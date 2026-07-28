@@ -1,10 +1,14 @@
 /* Cassa comune — service worker.
    Registrato con percorso relativo da index.html: navigator.serviceWorker.register("./sw.js")
    Cambia il numero di versione a ogni rilascio, o gli aggiornamenti non arrivano mai. */
-const CACHE = "cc-v1";
+const CACHE = "cc-v2";
 
 /* Guscio: tutto relativo, perché il sito sta in una sottocartella di GitHub Pages. */
-const GUSCIO = ["./", "./index.html", "./sw.js"];
+const GUSCIO = [
+  "./", "./index.html", "./sw.js", "./manifest.json",
+  "./favicon-16.png", "./favicon-32.png", "./apple-touch-icon.png",
+  "./icon-192.png", "./icon-512.png",
+];
 
 /* Origini dei font: messe in cache al primo passaggio, non precaricate.
    Se sono irraggiungibili, il fallback di sistema nello stack CSS tiene l'app leggibile. */
