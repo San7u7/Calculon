@@ -344,6 +344,7 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
     <section class="screen" id="s-ingresso" hidden>
       <h1>Cassa comune</h1>
       <p class="lead">Le spese della vacanza, divise mentre sei ancora in fila alla cassa. Niente account: solo un codice.</p>
+      <button class="btn btn-ghost w" id="btn-annulla-ingresso" type="button" hidden style="margin-bottom:16px">← Torna al tuo gruppo</button>
 
       <div class="card">
         <h2 class="ttl">Entra con un codice</h2>
@@ -412,6 +413,12 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
         <label class="lbl" for="sp-payer">Chi ha pagato</label>
         <select id="sp-payer"></select>
         <p class="nota" style="margin-top:7px">Puoi registrare anche una spesa fatta da un altro: scegli chi ha pagato davvero.</p>
+      </div>
+
+      <div class="card">
+        <h2 class="ttl">Chi partecipa</h2>
+        <p class="nota" style="margin-top:0">Di solito tutti. Togli la spunta a chi non c'entra in questa spesa.</p>
+        <div id="sp-persone"></div>
       </div>
 
       <div class="quadra" id="sp-quadra" data-ok="1" style="margin-bottom:2px">
@@ -486,10 +493,21 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
       </div>
 
       <div class="card">
+        <h2 class="ttl">Questo dispositivo</h2>
+        <p class="nota" style="margin-top:0">Su questo telefono, in questo gruppo, sei <b id="g-io">—</b>.</p>
+        <button class="btn w" id="btn-cambia-io" type="button">Cambia chi sei</button>
+        <button class="btn btn-ghost w" id="btn-esci" type="button">Esci da questo gruppo</button>
+        <p class="nota">Esci cancella solo la copia locale di questo gruppo, gli altri tuoi gruppi restano. Il gruppo stesso non si cancella, e ci rientri col codice.</p>
+      </div>
+    </section>
+
+    <!-- ============ PROFILO ============ -->
+    <section class="screen" id="s-profilo" hidden>
+      <div class="card">
         <h2 class="ttl">La tua foto</h2>
-        <p class="nota" style="margin-top:0">Aggiungi una foto: ti riconosceranno a colpo d'occhio nelle spese e nei saldi.</p>
+        <p class="nota" style="margin-top:0">Vale per tutti i tuoi gruppi: ti riconosceranno a colpo d'occhio ovunque.</p>
         <div class="foto-mia">
-          <span id="g-avatar"></span>
+          <span id="pf-avatar"></span>
           <button class="btn" id="btn-foto" type="button">Scegli una foto</button>
         </div>
         <button class="btn btn-ghost w" id="btn-foto-rm" type="button" hidden>Togli la foto</button>
@@ -498,19 +516,17 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
 
       <div class="card">
         <h2 class="ttl">Come ti pagano</h2>
-        <p class="nota" style="margin-top:0">Incolla il tuo link PayPal.Me (o un altro link per ricevere denaro). Chi ti deve dei soldi lo vedrà nei Saldi con un tasto per pagarti al volo.</p>
-        <label class="lbl" for="g-pay">Il tuo link per ricevere</label>
-        <input id="g-pay" type="text" inputmode="url" autocomplete="off"
+        <p class="nota" style="margin-top:0">Un link solo, valido in tutti i gruppi. Chi ti deve dei soldi lo vedrà nei Saldi con un tasto per pagarti al volo.</p>
+        <label class="lbl" for="pf-pay">Il tuo link per ricevere</label>
+        <input id="pf-pay" type="text" inputmode="url" autocomplete="off"
                placeholder="paypal.me/iltuonome">
         <button class="btn btn-primary w" id="btn-salva-pay" type="button">Salva il link</button>
       </div>
 
       <div class="card">
-        <h2 class="ttl">Questo dispositivo</h2>
-        <p class="nota" style="margin-top:0">Su questo telefono sei <b id="g-io">—</b>.</p>
-        <button class="btn w" id="btn-cambia-io" type="button">Cambia chi sei</button>
-        <button class="btn btn-ghost w" id="btn-esci" type="button">Esci dal gruppo su questo telefono</button>
-        <p class="nota">Uscire cancella solo la copia locale. Il gruppo resta, e ci rientri col codice.</p>
+        <h2 class="ttl">I tuoi gruppi</h2>
+        <div id="pf-gruppi"></div>
+        <button class="btn btn-primary w" id="btn-nuovo-gruppo" type="button">+ Entra o crea un altro gruppo</button>
       </div>
     </section>
 
@@ -521,6 +537,7 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
     <button type="button" data-go="spese">Spese</button>
     <button type="button" data-go="saldi">Saldi</button>
     <button type="button" data-go="gruppo">Gruppo</button>
+    <button type="button" data-go="profilo">Profilo</button>
     </div>
   </nav>
 </div>
@@ -769,6 +786,73 @@ function caricaGruppo(gid){
 }
 function salvaDati(){ if (GID && D) lsSetJson("cc.data." + GID, D); }
 
+/* ---------- identità della persona: foto e link PayPal, uguali in ogni gruppo ---------- */
+function identita(){ return lsJson("cc.identity", {}); }
+function salvaIdentita(patch){
+  const id = Object.assign(identita(), patch);
+  // "" o null cancella il campo invece di salvare una stringa vuota
+  for (const k of Object.keys(id)) if (!id[k]) delete id[k];
+  lsSetJson("cc.identity", id);
+  propagaIdentita();
+  return id;
+}
+
+/* Elenca tutti i gruppi presenti su questo telefono, scandendo le chiavi cc.data.* */
+function tuttiIGruppi(){
+  const out = [];
+  for (let i = 0; i < localStorage.length; i++){
+    const k = localStorage.key(i);
+    if (!k || k.indexOf("cc.data.") !== 0) continue;
+    const gid = k.slice("cc.data.".length);
+    const dati = lsJson(k, null);
+    if (!dati || !dati.meta) continue;
+    out.push({
+      id: gid,
+      name: dati.meta.name || gid,
+      me: ls("cc.me." + gid) || null,
+      membri: (dati.meta.members || []).filter(m => !m.deleted).length,
+    });
+  }
+  return out;
+}
+
+/* Spinge la foto/link salvati globalmente dentro il tuo membro, in OGNI gruppo dove ti sei già scelto.
+   I gruppi non aperti in questo momento vengono aggiornati direttamente su disco e messi in coda:
+   la sincronizzazione vera parte al prossimo giro (quando li apri, o al prossimo /morning aperto). */
+function propagaIdentita(){
+  const id = identita();
+  for (const g of tuttiIGruppi()){
+    if (!g.me) continue;                      // non ti sei ancora scelto in quel gruppo
+    if (g.id === GID && D){
+      const mio = (D.meta.members || []).find(m => m.id === g.me);
+      if (!mio) continue;
+      let cambiato = false;
+      if (id.foto && mio.foto !== id.foto){ mio.foto = id.foto; cambiato = true; }
+      if (!id.foto && mio.foto){ delete mio.foto; cambiato = true; }
+      if (id.pay && mio.pay !== id.pay){ mio.pay = id.pay; cambiato = true; }
+      if (!id.pay && mio.pay){ delete mio.pay; cambiato = true; }
+      if (cambiato) mutaMeta();
+    } else {
+      const dati = lsJson("cc.data." + g.id, null);
+      if (!dati) continue;
+      const mio = (dati.meta.members || []).find(m => m.id === g.me);
+      if (!mio) continue;
+      let cambiato = false;
+      if (id.foto && mio.foto !== id.foto){ mio.foto = id.foto; cambiato = true; }
+      if (!id.foto && mio.foto){ delete mio.foto; cambiato = true; }
+      if (id.pay && mio.pay !== id.pay){ mio.pay = id.pay; cambiato = true; }
+      if (!id.pay && mio.pay){ delete mio.pay; cambiato = true; }
+      if (!cambiato) continue;
+      dati.meta.version   = (dati.meta.version | 0) + 1;
+      dati.meta.deviceId  = DEV;
+      dati.meta.updatedAt = Date.now();
+      lsSetJson("cc.data." + g.id, dati);
+      const o = lsJson("cc.outbox." + g.id, []);
+      if (o.indexOf("__meta__") < 0){ o.push("__meta__"); lsSetJson("cc.outbox." + g.id, o); }
+    }
+  }
+}
+
 /* ---------- outbox ---------- */
 function outbox(){ return lsJson("cc.outbox." + GID, []); }
 function outboxSet(a){ lsSetJson("cc.outbox." + GID, a); }
@@ -907,6 +991,14 @@ async function copia(txt, msg){
 }
 function vaiA(v){ vista = v; render(); window.scrollTo(0, 0); }
 
+/* Cambia il gruppo attivo su questo telefono, senza toccare gli altri. */
+function passaAlGruppo(gid){
+  caricaGruppo(gid);
+  pullOk = true;
+  vaiA(ME ? "spese" : "chi");
+  tentaSync();
+}
+
 /* Un link incollato dall'utente → URL sicuro https, o null se non è un link valido.
    Accetta "paypal.me/tizio", "https://...", "http://..."; blocca schemi strani (javascript:, ecc). */
 function normalizzaLink(raw){
@@ -937,7 +1029,7 @@ function render(){
   const dentro = !!(GID && D);
   if (!dentro && vista !== "ingresso") vista = "ingresso";
   $("#hdr").hidden  = !dentro;
-  $("#tabs").hidden = !dentro || vista === "nuova" || vista === "rimborso" || (vista === "chi" && !ME);
+  $("#tabs").hidden = !dentro || vista === "nuova" || vista === "rimborso" || vista === "ingresso" || (vista === "chi" && !ME);
   $$(".screen").forEach(s => { s.hidden = true; });
   $("#s-" + vista).hidden = false;
 
@@ -949,11 +1041,14 @@ function render(){
       else b.removeAttribute("aria-current");
     });
   }
+  const annIngr = $("#btn-annulla-ingresso");
+  if (annIngr) annIngr.hidden = !(vista === "ingresso" && dentro);
 
-  if (vista === "chi")    renderChi();
-  if (vista === "spese")  renderSpese();
-  if (vista === "saldi")  renderSaldi();
-  if (vista === "gruppo") renderGruppo();
+  if (vista === "chi")     renderChi();
+  if (vista === "spese")   renderSpese();
+  if (vista === "saldi")   renderSaldi();
+  if (vista === "gruppo")  renderGruppo();
+  if (vista === "profilo") renderProfilo();
 }
 
 /* ---------- chi sei ---------- */
@@ -985,7 +1080,11 @@ function renderChi(){
     b.appendChild(avatarEl(m));
     const n = document.createElement("span"); n.className = "nome-sc"; n.textContent = m.name;
     b.appendChild(n);
-    b.onclick = () => { ME = m.id; lsSet("cc.me." + GID, m.id); vaiA("spese"); };
+    b.onclick = () => {
+      ME = m.id; lsSet("cc.me." + GID, m.id);
+      propagaIdentita();   // porta foto e link già impostati altrove anche in questo gruppo
+      vaiA("spese");
+    };
     box.appendChild(b);
   }
 }
@@ -1120,14 +1219,6 @@ function renderGruppo(){
   $("#g-code").textContent = D.meta.id;
   $("#g-io").textContent   = ME ? nome(ME) : "non ancora scelto";
 
-  const mio = (D.meta.members || []).find(m => m.id === ME);
-  const pay = $("#g-pay");
-  if (pay) pay.value = (mio && mio.pay) ? mio.pay : "";
-
-  const av = $("#g-avatar");
-  if (av){ av.innerHTML = ""; av.appendChild(avatarEl(mio, true)); }
-  $("#btn-foto-rm").hidden = !(mio && mio.foto);
-
   const box = $("#g-membri");
   box.innerHTML = "";
   for (const m of membri()){
@@ -1153,6 +1244,41 @@ function renderGruppo(){
   }
 }
 
+/* ---------- profilo ---------- */
+function renderProfilo(){
+  const id = identita();
+
+  const av = $("#pf-avatar");
+  if (av){ av.innerHTML = ""; av.appendChild(avatarEl({ id: "io", name: nome(ME) || "?", foto: id.foto }, true)); }
+  $("#btn-foto-rm").hidden = !id.foto;
+  $("#pf-pay").value = id.pay || "";
+
+  const box = $("#pf-gruppi");
+  box.innerHTML = "";
+  const elenco = tuttiIGruppi().sort((a, b) => a.name.localeCompare(b.name));
+  if (!elenco.length){
+    box.innerHTML = '<p class="nota" style="margin-top:0">Non fai ancora parte di nessun gruppo su questo telefono.</p>';
+    return;
+  }
+  for (const g of elenco){
+    const riga = document.createElement("div");
+    riga.className = "membro";
+    const n = document.createElement("span"); n.className = "nome";
+    n.textContent = g.name + (g.me ? "" : " · non ti sei ancora scelto");
+    riga.appendChild(n);
+    if (g.id === GID){
+      const t = document.createElement("span"); t.className = "io"; t.textContent = "ATTIVO";
+      riga.appendChild(t);
+    } else {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "btn btn-mini"; b.textContent = "Apri";
+      b.onclick = () => passaAlGruppo(g.id);
+      riga.appendChild(b);
+    }
+    box.appendChild(riga);
+  }
+}
+
 /* ============================================================
    FORM: spesa e rimborso
    ============================================================ */
@@ -1162,16 +1288,19 @@ function apriForm(rec){
   if (rec && rec.kind === "payment") return apriRimborso(rec);
   modifica = rec || null;
 
-  form = { amt: 0 };
+  form = { amt: 0, sel: {} };
   const viv = membri();
 
   if (rec){
     form.amt = rec.amountCents;
+    const parts = (rec.split && rec.split.parts) || {};
+    for (const m of viv) form.sel[m.id] = Object.prototype.hasOwnProperty.call(parts, m.id);
     $("#sp-desc").value = rec.desc || "";
     $("#sp-date").value = rec.date;
     $("#sp-amt").value  = fmtCifre(String(rec.amountCents));
     $("#nuova-ttl").textContent = "Modifica spesa";
   } else {
+    for (const m of viv) form.sel[m.id] = true;   // di default partecipano tutti
     $("#sp-desc").value = "";
     $("#sp-date").value = oggiISO();
     $("#sp-amt").value  = "";
@@ -1189,33 +1318,55 @@ function apriForm(rec){
 
   $("#sp-elimina").hidden = !rec;
   $("#err-sp").hidden = true;
-  aggiornaQuota();
+  renderPersone();
   vaiA("nuova");
 }
 
-/* Divisione sempre uguale fra tutti i partecipanti vivi. */
-function partiUguali(){
+/* Divisione sempre uguale fra i partecipanti selezionati (di solito tutti). */
+function partiSelezionate(){
   const parts = {};
-  for (const m of membri()) parts[m.id] = 1;
+  for (const m of membri()) if (form.sel[m.id]) parts[m.id] = 1;
   return parts;
 }
 
 function recordProvvisorio(){
   return { kind: "expense", deleted: false, amountCents: form.amt,
-           split: { mode: "equal", parts: partiUguali() } };
+           split: { mode: "equal", parts: partiSelezionate() } };
 }
 
-/* mostra a quanto tocca ciascuno e blocca il salvataggio finché non c'è un importo */
+function renderPersone(){
+  const box = $("#sp-persone");
+  box.innerHTML = "";
+  for (const m of membri()){
+    const riga = document.createElement("div");
+    riga.className = "pers";
+    const lab = document.createElement("label");
+    const av = avatarEl(m);
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.checked = !!form.sel[m.id];
+    cb.setAttribute("aria-label", "Includi " + m.name);
+    cb.onchange = () => { form.sel[m.id] = cb.checked; aggiornaQuota(); };
+    const nm = document.createElement("span");
+    nm.textContent = m.name + (m.id === ME ? " (tu)" : "");
+    lab.appendChild(av); lab.appendChild(nm); lab.appendChild(cb);
+    riga.appendChild(lab);
+    box.appendChild(riga);
+  }
+  aggiornaQuota();
+}
+
+/* mostra a quanto tocca ciascuno e blocca il salvataggio finché non c'è un importo e qualcuno selezionato */
 function aggiornaQuota(){
   const box = $("#sp-quadra"), k = $("#sp-quadra-k"), v = $("#sp-quadra-v");
-  const n = membri().length;
+  const scelti = membri().filter(m => form.sel[m.id]);
+  const n = scelti.length;
   const q = shares(recordProvvisorio());
-  const aTesta = n ? (q[membri()[0].id] || 0) : 0;
+  const aTesta = n ? (q[scelti[0].id] || 0) : 0;
 
   if (!n){
-    k.textContent = "Nessun partecipante"; v.textContent = "—";
+    k.textContent = "Nessuno selezionato"; v.textContent = "—";
   } else if (form.amt <= 0){
-    k.textContent = "Divisa fra tutti (" + n + ")"; v.textContent = "—";
+    k.textContent = "Divisa fra " + n + (n === 1 ? " persona" : " persone"); v.textContent = "—";
   } else {
     k.textContent = eur(aTesta) + " € a testa · in " + n;
     v.textContent = eur(form.amt) + " €";
@@ -1399,6 +1550,7 @@ function installaGruppo(stato){
   lsSet("cc.group", GID);
   salvaDati();
   pullOk = true;
+  if (ME) propagaIdentita();
   vaiA(ME ? "spese" : "chi");
 }
 
@@ -1461,36 +1613,29 @@ $("#btn-addp").onclick = () => {
   mutaMeta();
 };
 $("#btn-salva-pay").onclick = () => {
-  if (!ME){ avviso("Prima scegli chi sei su questo telefono."); return; }
-  const grezzo = $("#g-pay").value.trim();
-  const mio = D.meta.members.find(m => m.id === ME);
-  if (!mio) return;
+  const grezzo = $("#pf-pay").value.trim();
   if (!grezzo){
-    delete mio.pay;
-    mutaMeta();
+    salvaIdentita({ pay: "" });
+    render();
     avviso("Link rimosso");
     return;
   }
   const link = normalizzaLink(grezzo);
   if (!link){ avviso("Questo non sembra un link valido"); return; }
-  mio.pay = link;
-  mutaMeta();
-  avviso("Link salvato");
+  salvaIdentita({ pay: link });
+  render();
+  avviso("Link salvato, valido in tutti i gruppi");
 };
 $("#btn-cambia-io").onclick = () => vaiA("chi");
 
-$("#btn-foto").onclick = () => {
-  if (!ME){ avviso("Prima scegli chi sei su questo telefono."); return; }
-  $("#foto-file").click();
-};
+$("#btn-foto").onclick = () => { $("#foto-file").click(); };
 $("#btn-foto-rm").onclick = () => {
-  const mio = D.meta.members.find(m => m.id === ME);
-  if (mio && mio.foto){ delete mio.foto; mutaMeta(); avviso("Foto rimossa"); }
+  if (identita().foto){ salvaIdentita({ foto: "" }); render(); avviso("Foto rimossa"); }
 };
 $("#foto-file").onchange = (ev) => {
   const file = ev.target.files && ev.target.files[0];
   ev.target.value = "";                 // permette di riscegliere lo stesso file
-  if (!file || !ME) return;
+  if (!file) return;
   if (!/^image\//.test(file.type)){ avviso("Serve un'immagine"); return; }
   const img = new Image();
   const url = URL.createObjectURL(file);
@@ -1504,24 +1649,30 @@ $("#foto-file").onchange = (ev) => {
     const g = c.getContext("2d");
     g.drawImage(img, (img.width - lato) / 2, (img.height - lato) / 2, lato, lato, 0, 0, dim, dim);
     const dataUrl = c.toDataURL("image/jpeg", 0.78);
-    const mio = D.meta.members.find(m => m.id === ME);
-    if (!mio) return;
-    mio.foto = dataUrl;
-    mutaMeta();
-    avviso("Foto salvata");
+    salvaIdentita({ foto: dataUrl });
+    render();
+    avviso("Foto salvata, valida in tutti i gruppi");
   };
   img.onerror = () => { URL.revokeObjectURL(url); avviso("Immagine non leggibile"); };
   img.src = url;
 };
 $("#btn-esci").onclick = () => {
-  if (!confirm("Uscire dal gruppo su questo telefono? Le voci non ancora inviate andranno perse.")) return;
-  localStorage.removeItem("cc.data." + GID);
-  localStorage.removeItem("cc.outbox." + GID);
-  localStorage.removeItem("cc.me." + GID);
-  localStorage.removeItem("cc.group");
-  GID = null; D = null; ME = null;
-  vaiA("ingresso");
+  if (!confirm("Uscire da questo gruppo su questo telefono? Le voci non ancora inviate andranno perse.")) return;
+  const uscito = GID;
+  localStorage.removeItem("cc.data." + uscito);
+  localStorage.removeItem("cc.outbox." + uscito);
+  localStorage.removeItem("cc.me." + uscito);
+  const altri = tuttiIGruppi().filter(g => g.id !== uscito);
+  if (altri.length){
+    passaAlGruppo(altri[0].id);
+  } else {
+    localStorage.removeItem("cc.group");
+    GID = null; D = null; ME = null;
+    vaiA("ingresso");
+  }
 };
+$("#btn-nuovo-gruppo").onclick = () => vaiA("ingresso");
+$("#btn-annulla-ingresso").onclick = () => vaiA(ME ? "spese" : "chi");
 
 $("#sync").onclick = () => { pullOk = false; statoSync(); tentaSync(); };
 $$("#tabs button").forEach(b => { b.onclick = () => vaiA(b.dataset.go); });
