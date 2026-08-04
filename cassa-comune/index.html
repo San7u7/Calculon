@@ -112,6 +112,10 @@ main{flex:1;display:flex;flex-direction:column;padding:16px 16px 16px}
 /* spese: totale abbassato, lista che respira in mezzo, azioni ancorate in fondo */
 #s-spese:not([hidden]){margin:0;flex:1;display:flex;flex-direction:column}
 #s-spese .tot{margin-top:22px}
+.countdown{margin-top:22px;padding:11px 18px;border-radius:99px;text-align:center;
+  font-weight:700;font-size:14px;background:var(--vetro);border:1px solid var(--vetro-bordo);
+  -webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);color:var(--inchiostro)}
+.countdown.attiva{background:var(--sole);color:#fff;border-color:transparent}
 #s-spese #lista-spese{flex:1;display:flex;flex-direction:column;justify-content:center}
 /* saldi: parte dall'alto, scorre se lungo */
 #s-saldi:not([hidden]){margin:0;flex:1;display:flex;flex-direction:column}
@@ -377,6 +381,7 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
 
     <!-- ============ SPESE ============ -->
     <section class="screen" id="s-spese" hidden>
+      <div id="sp-countdown" class="countdown" hidden></div>
       <div class="tot">
         <div class="k">Totale speso dal gruppo</div>
         <div class="big eur" id="tot-speso">0,00</div>
@@ -483,6 +488,16 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
       </div>
 
       <div class="card">
+        <h2 class="ttl">Date della vacanza</h2>
+        <p class="nota" style="margin-top:0" id="g-countdown"></p>
+        <label class="lbl" for="g-data-inizio">Inizio</label>
+        <input id="g-data-inizio" type="date">
+        <label class="lbl" for="g-data-fine">Fine</label>
+        <input id="g-data-fine" type="date">
+        <button class="btn btn-primary w" id="btn-salva-date">Salva le date</button>
+      </div>
+
+      <div class="card">
         <h2 class="ttl">Partecipanti</h2>
         <div id="g-membri"></div>
         <label class="lbl" for="g-nuovo">Aggiungi qualcuno</label>
@@ -497,7 +512,16 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
         <p class="nota" style="margin-top:0">Su questo telefono, in questo gruppo, sei <b id="g-io">—</b>.</p>
         <button class="btn w" id="btn-cambia-io" type="button">Cambia chi sei</button>
         <button class="btn btn-ghost w" id="btn-esci" type="button">Esci da questo gruppo</button>
-        <p class="nota">Esci cancella solo la copia locale di questo gruppo, gli altri tuoi gruppi restano. Il gruppo stesso non si cancella, e ci rientri col codice.</p>
+        <p class="nota">Esci cancella solo la copia locale di questo gruppo, gli altri tuoi gruppi restano. Il gruppo stesso non si cancella, e ci rientri col codice. Se nessuno lo usa per 10 giorni, il gruppo si cancella comunque da solo.</p>
+      </div>
+
+      <div class="card" style="box-shadow:0 1px 2px rgba(0,0,0,.04),0 14px 36px rgba(210,60,40,.10)">
+        <h2 class="ttl" style="color:var(--rosso)">Zona pericolosa</h2>
+        <p class="nota" style="margin-top:0">Cancella il gruppo per tutti, per sempre. Non è recuperabile, nemmeno da chi lo ha creato.</p>
+        <label class="lbl" for="g-conferma-elimina">Scrivi il nome del gruppo per confermare</label>
+        <input id="g-conferma-elimina" type="text" autocomplete="off" placeholder="">
+        <button class="btn w" id="btn-elimina-gruppo" type="button"
+                style="margin-top:16px;background:var(--rosso);color:#fff" disabled>Elimina questo gruppo per tutti</button>
       </div>
     </section>
 
@@ -1090,9 +1114,42 @@ function renderChi(){
 }
 
 /* ---------- spese ---------- */
+/* Calcola il messaggio di countdown dalle date del gruppo, o null se non impostate. */
+function testoCountdown(){
+  const inizio = D.meta.dataInizio, fine = D.meta.dataFine;
+  if (!inizio && !fine) return null;
+  const oggi = oggiISO();
+  const giorni = (a, b) => Math.round((new Date(b) - new Date(a)) / 86400000);
+
+  if (inizio && oggi < inizio){
+    const n = giorni(oggi, inizio);
+    return { attiva: false, testo: n === 1 ? "Manca 1 giorno alla vacanza" : "Mancano " + n + " giorni alla vacanza" };
+  }
+  if (fine && oggi > fine){
+    const n = giorni(fine, oggi);
+    return { attiva: false, testo: "La vacanza è finita" + (n === 1 ? " ieri" : " da " + n + " giorni") };
+  }
+  if (inizio && fine){
+    const tot = giorni(inizio, fine) + 1;
+    const passato = giorni(inizio, oggi) + 1;
+    return { attiva: true, testo: "Giorno " + passato + " di " + tot + " · si torna il " + dataLunga(fine) };
+  }
+  if (fine) return { attiva: true, testo: "Si torna il " + dataLunga(fine) };
+  return { attiva: true, testo: "Vacanza iniziata il " + dataLunga(inizio) };
+}
+
 function renderSpese(){
   const tutte = recs().filter(r => !r.deleted);
   $("#tot-speso").textContent = eur(totaleSpeso(tutte)) + " €";
+
+  const cd = $("#sp-countdown");
+  const info = testoCountdown();
+  if (info){
+    cd.hidden = false; cd.textContent = info.testo;
+    cd.className = "countdown" + (info.attiva ? " attiva" : "");
+  } else {
+    cd.hidden = true;
+  }
 
   let mia = 0;
   for (const r of tutte){ const q = shares(r); if (ME && q[ME]) mia += q[ME]; }
@@ -1218,6 +1275,15 @@ function testoRiepilogo(){
 function renderGruppo(){
   $("#g-code").textContent = D.meta.id;
   $("#g-io").textContent   = ME ? nome(ME) : "non ancora scelto";
+
+  $("#g-data-inizio").value = D.meta.dataInizio || "";
+  $("#g-data-fine").value   = D.meta.dataFine   || "";
+  const info = testoCountdown();
+  $("#g-countdown").textContent = info ? info.testo : "Imposta le date per vedere il conto alla rovescia.";
+
+  $("#g-conferma-elimina").value = "";
+  $("#g-conferma-elimina").placeholder = D.meta.name;
+  $("#btn-elimina-gruppo").disabled = true;
 
   const box = $("#g-membri");
   box.innerHTML = "";
@@ -1611,6 +1677,43 @@ $("#btn-addp").onclick = () => {
   D.meta.members.push({ id: "m_" + codice(4).toLowerCase(), name: n, deleted: false });
   $("#g-nuovo").value = "";
   mutaMeta();
+};
+$("#btn-salva-date").onclick = () => {
+  const ini = $("#g-data-inizio").value || null;
+  const fin = $("#g-data-fine").value || null;
+  if (ini && fin && fin < ini){ avviso("La fine non può essere prima dell'inizio"); return; }
+  if (ini) D.meta.dataInizio = ini; else delete D.meta.dataInizio;
+  if (fin) D.meta.dataFine   = fin; else delete D.meta.dataFine;
+  mutaMeta();
+  render();
+  avviso("Date salvate");
+};
+$("#g-conferma-elimina").addEventListener("input", () => {
+  $("#btn-elimina-gruppo").disabled = $("#g-conferma-elimina").value.trim() !== D.meta.name;
+});
+$("#btn-elimina-gruppo").onclick = async () => {
+  if ($("#g-conferma-elimina").value.trim() !== D.meta.name) return;
+  if (!confirm('Cancellare per sempre "' + D.meta.name + '" per TUTTI i partecipanti? Non si può annullare.')) return;
+  const daVia = GID;
+  try {
+    const r = await fetch(API + "/api/group/" + daVia, { method: "DELETE" });
+    if (!r.ok && r.status !== 404) throw new Error("http " + r.status);
+  } catch (err){
+    avviso("Server irraggiungibile, riprova quando sei online.");
+    return;
+  }
+  localStorage.removeItem("cc.data." + daVia);
+  localStorage.removeItem("cc.outbox." + daVia);
+  localStorage.removeItem("cc.me." + daVia);
+  const altri = tuttiIGruppi().filter(g => g.id !== daVia);
+  if (altri.length){
+    passaAlGruppo(altri[0].id);
+  } else {
+    localStorage.removeItem("cc.group");
+    GID = null; D = null; ME = null;
+    vaiA("ingresso");
+  }
+  avviso("Gruppo eliminato per tutti");
 };
 $("#btn-salva-pay").onclick = () => {
   const grezzo = $("#pf-pay").value.trim();

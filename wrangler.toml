@@ -1,0 +1,7 @@
+name = "cassa-comune"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+[[kv_namespaces]]
+binding = "CC"
+id = "25cd17aa0f2644798b40ca07433b4306"
