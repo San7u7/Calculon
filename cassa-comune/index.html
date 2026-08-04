@@ -4,47 +4,76 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#1E8FD5">
-<title>Cassa comune</title>
+<title>Calculon</title>
 <link rel="icon" href="./favicon-32.png" sizes="32x32" type="image/png">
 <link rel="icon" href="./favicon-16.png" sizes="16x16" type="image/png">
 <link rel="apple-touch-icon" href="./apple-touch-icon.png">
 <link rel="manifest" href="./manifest.json">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800;900&family=Spline+Sans+Mono:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap">
 <style>
 /* ============================================================
    CASSA COMUNE — sistema visivo "scontrino + cartellino prezzo"
    Carta chiara ad alto contrasto: si legge in pieno sole.
    ============================================================ */
+/* ══════════════════════════════════════════════════════════════
+   PANNELLO DI CONTROLLO — cambia i numeri qui, il resto si adegua
+   Cerca "PANNELLO" in questo file per tornarci.
+   ══════════════════════════════════════════════════════════════ */
 :root{
-  /* base chiarissima, leggibile sotto il sole */
-  --carta:#F4F7FA;
-  --carta2:#EAF1F6;
+  /* ---- COLORI ---- */
+  --viola:#7B5CFF;              /* colore principale, inizio del gradiente */
+  --rosa:#FF4E8E;               /* fine del gradiente, e chi ti deve dei soldi */
+  --carta:#F7F3FF;              /* sfondo della pagina */
+  --carta2:#F0EAFF;
   --foglio:#FFFFFF;
-  --inchiostro:#1C2A33;      /* blu-antracite morbido */
-  --grigio:#7E909C;
-  --linea:rgba(40,80,110,.14);
-  /* l'accento: azzurro mare, da chiaro a intenso */
-  --sole-1:#5CC7F0;
-  --sole-2:#1E8FD5;
-  --sole:linear-gradient(135deg,var(--sole-1),var(--sole-2));
-  --alone:radial-gradient(circle at 50% 45%,var(--sole-1),var(--sole-2) 70%);
-  --verde:#2E9E7B;
-  --rosso:#D46A6A;
-  /* superfici di vetro: equilibrate, con corpo ma ancora traslucide */
-  --vetro:rgba(255,255,255,.66);
-  --vetro-forte:rgba(255,255,255,.78);
-  --vetro-bordo:rgba(255,255,255,.8);
-  --blur:blur(18px) saturate(1.4);
-  --ombra:0 2px 8px rgba(30,90,140,.06),0 14px 36px rgba(30,90,140,.12);
-  --sf:'Archivo','Helvetica Neue',system-ui,-apple-system,sans-serif;
-  --mono:'Spline Sans Mono',ui-monospace,'SF Mono',Menlo,Consolas,monospace;
-  --r:26px;
-  --r-sm:16px;
-  --tap:48px;
+  --inchiostro:#554e53;         /* testo principale */
+  --grigio:#615785;             /* testo secondario, etichette */
+  --linea:rgba(26,18,48,.10);   /* divisori fra sezioni */
+
+  /* ---- DISTANZE (i numeri che sposti più spesso) ---- */
+  --gap-sez:34px;               /* fra una sezione e l'altra */
+  --gap-titolo:18px;            /* fra l'etichetta MAIUSCOLA e il suo contenuto */
+  --gap-nota:22px;              /* sotto le frasi di spiegazione */
+  --gap-campo:22px;             /* fra un campo e il successivo */
+  --gap-bottone:22px;           /* sopra i pulsanti larghi */
+  --pad-pagina:18px;            /* margine sinistro e destro della pagina */
+
+  /* ---- DIMENSIONI ---- */
+  --tit-grande:34px;            /* i titoli delle schermate */
+  --tot-spese:clamp(46px,15vw,64px);  /* il totale enorme nelle spese */
+  --tot-saldo:clamp(38px,11.5vw,50px);/* il saldo nel pannello scuro */
+  --tot-personali:23px;         /* il totale delle spese personali */
+  --importo-grande:34px;        /* quando digiti una spesa di gruppo */
+  --importo-piccolo:27px;       /* quando digiti una spesa personale */
+  --et-sezione:10px;            /* le etichette MAIUSCOLE */
+  --testo:15px;                 /* il testo normale */
+
+  /* ---- FORME ---- */
+  --r:28px;                     /* angoli grandi */
+  --r-sm:20px;                  /* angoli dei campi */
+  --tap:48px;                   /* altezza minima di ciò che si tocca */
+
+  /* ---- il resto è calcolato, di solito non serve toccarlo ---- */
+  --ciano-2:#FFFFFF;
+  --ciano:#3CE0E0;
+  --arancio:#FF9B3C;
+  --sole:linear-gradient(120deg,var(--viola),var(--rosa));
+  --sole-2:var(--viola);
+  --alone:linear-gradient(135deg,var(--viola),var(--rosa));
+  --verde:#FFFFFF;
+  --rosso:#FF4E8E;
+  --sf:'Space Grotesk','Helvetica Neue',system-ui,sans-serif;
+  --px:'Space Grotesk',system-ui,sans-serif;
+  --mono:'Space Grotesk',system-ui,sans-serif;
+  --bordo:0px;
+  --curva:cubic-bezier(.34,1.56,.64,1);
+  --curva-morbida:cubic-bezier(.22,1,.36,1);
 }
 *{box-sizing:border-box}
+/* l'attributo hidden deve vincere su qualsiasi display impostato dalle classi */
+[hidden]{display:none!important}
 html,body{margin:0;padding:0}
 body{
   background:var(--carta);
@@ -55,15 +84,24 @@ body{
   -webkit-text-size-adjust:100%;
   overscroll-behavior-y:none;
 }
-/* atmosfera marina ed equilibrata: aloni ampi ma leggibili */
+/* lo sfondo è vivo: tre masse di colore che derivano lentamente e si sovrappongono */
 body::before{
-  content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+  content:"";position:fixed;inset:-30%;pointer-events:none;z-index:0;
   background:
-    radial-gradient(130% 65% at 88% -10%,rgba(30,143,213,.16),transparent 58%),
-    radial-gradient(100% 55% at -8% 10%,rgba(92,199,240,.14),transparent 55%),
-    radial-gradient(85% 45% at 50% 116%,rgba(92,199,240,.12),transparent 60%),
-    linear-gradient(180deg,var(--carta),var(--carta2));
+    radial-gradient(closest-side circle at 28% 22%, rgba(123,92,255,.55), transparent),
+    radial-gradient(closest-side circle at 76% 34%, rgba(255,78,142,.48), transparent),
+    radial-gradient(closest-side circle at 48% 78%, rgba(184,240,60,.42), transparent),
+    radial-gradient(closest-side circle at 84% 82%, rgba(60,224,224,.32), transparent);
+  filter:blur(48px);
+  animation:deriva 26s ease-in-out infinite alternate;
 }
+@keyframes deriva{
+  0%  {transform:translate3d(0,0,0) scale(1) rotate(0deg)}
+  33% {transform:translate3d(3%,-4%,0) scale(1.12) rotate(4deg)}
+  66% {transform:translate3d(-4%,3%,0) scale(1.05) rotate(-3deg)}
+  100%{transform:translate3d(2%,4%,0) scale(1.15) rotate(2deg)}
+}
+@media (prefers-reduced-motion:reduce){ body::before{animation:none} }
 #app{position:relative;z-index:1;width:100%;margin:0 auto;min-height:100dvh;display:flex;flex-direction:column}
 /* header e tab occupano tutta la larghezza; il contenuto resta in colonna leggibile */
 main{max-width:440px;margin-left:auto;margin-right:auto;width:100%}
@@ -73,233 +111,364 @@ button{cursor:pointer}
 
 /* ---------- intestazione ---------- */
 .hdr{
-  position:relative;
   position:sticky;top:0;z-index:20;
   display:flex;align-items:center;gap:12px;
   padding:0;padding-top:env(safe-area-inset-top);
-  margin:0 0 18px;
-  background:rgba(244,247,250,.86);
-  -webkit-backdrop-filter:blur(22px) saturate(1.6);backdrop-filter:blur(22px) saturate(1.6);
-  box-shadow:0 6px 22px rgba(30,90,140,.05);
+  margin:0 0 14px;
+  background:rgba(255,255,255,.55);
+  -webkit-backdrop-filter:blur(18px) saturate(1.6);backdrop-filter:blur(18px) saturate(1.6);
 }
-/* due gobbe piene, saldate al bordo: mai trasparenti, non lasciano intravedere nulla dietro */
-.hdr::before,.hdr::after{
-  content:"";position:absolute;top:100%;width:64px;height:16px;border-radius:50%;
-  background:rgba(244,247,250,.86);
-  -webkit-backdrop-filter:blur(22px) saturate(1.6);backdrop-filter:blur(22px) saturate(1.6);
-  margin-top:-8px;pointer-events:none;
-}
-.hdr::before{left:27%;transform:translateX(-50%)}
-.hdr::after{left:73%;transform:translateX(-50%)}
 .hdr-in{display:flex;align-items:center;gap:12px;
   max-width:440px;margin:0 auto;width:100%;padding:16px 20px 15px}
 .mark{
-  width:30px;height:30px;flex:none;border-radius:50%;background:var(--alone);
-  display:grid;place-items:center;box-shadow:0 2px 10px rgba(30,143,213,.4)}
+  width:32px;height:32px;flex:none;border-radius:50%;background:var(--sole);
+  display:grid;place-items:center}
 .mark svg{width:22px;height:22px;display:block}
-.gname{font-weight:800;font-size:18px;letter-spacing:-.02em;flex:1;min-width:0;
+.gname{font-family:var(--sf);font-weight:700;font-size:18px;letter-spacing:-.02em;flex:1;min-width:0;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sync{
-  font-family:var(--mono);font-size:10px;font-weight:500;letter-spacing:.08em;
-  text-transform:uppercase;border:1px solid var(--vetro-bordo);background:rgba(255,255,255,.4);color:var(--grigio);
+  font-family:var(--sf);font-size:10px;font-weight:700;letter-spacing:.08em;
+  text-transform:uppercase;border:0;background:rgba(255,255,255,.7);color:var(--grigio);
   border-radius:99px;padding:7px 12px;min-height:32px;white-space:nowrap;
+  transition:background-color .25s ease,color .25s ease;
 }
-.sync[data-st="attesa"]{background:var(--sole);color:#fff;border-color:transparent;box-shadow:0 2px 10px rgba(30,143,213,.32)}
-.sync[data-st="offline"]{background:rgba(51,48,43,.82);color:var(--carta);border-color:transparent}
+.sync[data-st="attesa"]{background:var(--sole);color:#fff}
+.sync[data-st="offline"]{background:var(--sole);color:#fff}
 
 /* ---------- struttura ---------- */
-main{flex:1;display:flex;flex-direction:column;padding:16px 16px 16px}
+main{flex:1;display:flex;flex-direction:column;padding:8px var(--pad-pagina) 20px}
+/* ogni schermata entra con una dissolvenza morbida quando diventa visibile */
+@keyframes schermataEntra{ from{opacity:0; transform:translateY(10px)} to{opacity:1; transform:none} }
+/* le voci entrano una dopo l'altra, non tutte insieme: dà il ritmo del riferimento */
+@keyframes voceEntra{ from{opacity:0; transform:translateY(14px) scale(.97)} to{opacity:1; transform:none} }
+.voce,.mov-card,.membro,.scelta,.barra{animation:voceEntra .5s var(--curva) backwards}
+.voce:nth-child(1),.mov-card:nth-child(1),.membro:nth-child(1),.scelta:nth-child(1),.barra:nth-child(1){animation-delay:.02s}
+.voce:nth-child(2),.mov-card:nth-child(2),.membro:nth-child(2),.scelta:nth-child(2),.barra:nth-child(2){animation-delay:.07s}
+.voce:nth-child(3),.mov-card:nth-child(3),.membro:nth-child(3),.scelta:nth-child(3),.barra:nth-child(3){animation-delay:.12s}
+.voce:nth-child(4),.mov-card:nth-child(4),.membro:nth-child(4),.scelta:nth-child(4),.barra:nth-child(4){animation-delay:.17s}
+.voce:nth-child(5),.mov-card:nth-child(5),.membro:nth-child(5),.scelta:nth-child(5),.barra:nth-child(5){animation-delay:.22s}
+.voce:nth-child(n+6),.mov-card:nth-child(n+6),.membro:nth-child(n+6),.scelta:nth-child(n+6),.barra:nth-child(n+6){animation-delay:.27s}
+/* il cursore che lampeggia mentre il testo si scrive, come le scritte tecniche del riferimento */
+@keyframes lampeggia{ 0%,49%{opacity:1} 50%,100%{opacity:0} }
+.cursore{display:inline-block;width:.6em;height:1em;background:currentColor;
+  vertical-align:-.12em;margin-left:2px;animation:lampeggia .9s steps(1) infinite}
+/* le card entrano espandendosi, come l'elemento che si apre a schermo pieno nel riferimento */
+@keyframes cardApre{ from{opacity:0; transform:scale(.94)} to{opacity:1; transform:none} }
+.card,.tot,.mio{animation:cardApre .45s var(--curva) backwards}
+.tot{animation-delay:.04s}
+@media (prefers-reduced-motion:reduce){
+  .voce,.mov-card,.membro,.scelta,.barra,.card,.tot,.mio{animation:none}
+  .cursore{animation:none;opacity:0}
+}
+.screen:not([hidden]){animation:schermataEntra .32s cubic-bezier(.22,.9,.35,1)}
 /* schermate corte: centrate verticalmente */
 .screen:not([hidden]){margin:auto 0;width:100%}
 /* spese: totale abbassato, lista che respira in mezzo, azioni ancorate in fondo */
 #s-spese:not([hidden]){margin:0;flex:1;display:flex;flex-direction:column}
-#s-spese .tot{margin-top:22px}
-.countdown{margin-top:22px;padding:11px 18px;border-radius:99px;text-align:center;
-  font-weight:700;font-size:14px;background:var(--vetro);border:1px solid var(--vetro-bordo);
-  -webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);color:var(--inchiostro)}
-.countdown.attiva{background:var(--sole);color:#fff;border-color:transparent}
-#s-spese #lista-spese{flex:1;display:flex;flex-direction:column;justify-content:center}
+.nudge{margin:8px 0 6px;padding:11px 9px 11px 17px;border-radius:99px;display:flex;align-items:center;gap:8px;
+  background:var(--foglio);border:var(--bordo) solid var(--inchiostro)}
+.nudge span{flex:1;font-size:13px;color:var(--grigio);font-weight:600}
+.nudge button{border:0;background:transparent;font-weight:700;cursor:pointer}
+#sp-nudge-vai{color:var(--inchiostro);font-size:13px;padding:6px 4px}
+#s-spese #lista-spese{flex:1}
 /* saldi: parte dall'alto, scorre se lungo */
 #s-saldi:not([hidden]){margin:0;flex:1;display:flex;flex-direction:column}
 #saldi-lista,#mov-lista{flex:0 0 auto}
 .screen[hidden]{display:none}
-h1{font-size:44px;line-height:.98;letter-spacing:-.045em;font-weight:900;margin:8px 0 10px}
-h2.ttl{font-size:12px;letter-spacing:.14em;text-transform:uppercase;font-weight:700;
+h1{font-family:var(--sf);font-size:var(--tit-grande);line-height:1.05;letter-spacing:-.035em;font-weight:700;
+  margin:8px 0 10px}
+h2.ttl{font-family:var(--sf);font-size:11px;letter-spacing:.13em;text-transform:uppercase;font-weight:600;
   color:var(--grigio);margin:0 0 14px}
-.lead{color:var(--grigio);margin:0 0 24px;font-size:16px;line-height:1.5}
+.lead{color:var(--grigio);margin:0 0 26px;font-size:15px;line-height:1.6}
+.passo{font-size:15px;line-height:1.5;margin:0 0 12px;color:var(--inchiostro)}
+.passo:last-child{margin-bottom:0}
+.passo b{color:var(--inchiostro)}
 .sep{display:flex;align-items:center;gap:12px;color:var(--grigio);font-size:12px;
   text-transform:uppercase;letter-spacing:.14em;margin:22px 4px}
 .sep::before,.sep::after{content:"";flex:1;border-top:1px solid var(--linea)}
 
-.card{background:var(--vetro);border:1px solid var(--vetro-bordo);border-radius:var(--r);
-  padding:22px 20px;margin-bottom:16px;
-  -webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);
-  box-shadow:var(--ombra),inset 0 1px 0 rgba(255,255,255,.5)}
-.lbl{display:block;font-size:11px;letter-spacing:.1em;text-transform:uppercase;
-  color:var(--grigio);font-weight:600;margin:16px 0 7px}
+/* ---------- SEZIONI: niente box, solo aria e una linea sottile ---------- */
+.sez{position:relative;padding:0 0 var(--gap-sez);margin:0 0 var(--gap-sez);
+  border-bottom:1px solid var(--linea)}
+.sez:last-of-type{border-bottom:0;margin-bottom:12px}
+.divisore{height:1px;background:var(--linea);margin:0 0 30px}
+/* popup di conferma: appare solo quando serve davvero */
+.velo{position:fixed;inset:0;z-index:60;display:grid;place-items:center;padding:22px;
+  background:rgba(26,18,48,.42);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);
+  animation:veloEntra .25s ease}
+@keyframes veloEntra{ from{opacity:0} to{opacity:1} }
+.popup{width:100%;max-width:380px;background:rgba(255,255,255,.94);
+  -webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);
+  border-radius:26px;padding:26px 24px 24px;
+  box-shadow:0 24px 60px rgba(26,18,48,.28);
+  animation:popEntra .35s var(--curva)}
+@keyframes popEntra{ from{opacity:0;transform:scale(.9) translateY(12px)} to{opacity:1;transform:none} }
+.pop-tit{font-size:21px;font-weight:700;letter-spacing:-.03em;margin:0 0 10px}
+.pop-testo{font-size:14px;line-height:1.55;color:var(--grigio);margin:0 0 22px}
+.pop-testo b{color:var(--inchiostro)}
+.popup .campo{margin-bottom:22px}
+@media (prefers-reduced-motion:reduce){ .velo,.popup{animation:none} }
+.sez-k{display:block;font-size:var(--et-sezione);letter-spacing:.16em;text-transform:uppercase;
+  color:var(--grigio);font-weight:600;margin:0 0 var(--gap-titolo)}
+.sez .nota{margin:0 0 var(--gap-nota)}
+.sez .nota:last-child{margin-bottom:0}
+.sez > .btn.w{margin-top:var(--gap-bottone)}
+.sez-codice{text-align:center}
+.sez-rossa .sez-k{color:var(--rosso);margin-bottom:12px}
+.sez-rossa .nota{margin:0 0 22px}
+.sez-rossa .campo{margin-bottom:22px}
+/* due elementi affiancati, con respiro */
+.due{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:6px}
+.due > .btn{width:100%;margin:0}
+/* campo: etichetta e input come un'unica unità */
+.campo{display:block;margin-bottom:var(--gap-campo)}
+.campo-solo{margin-top:-6px;margin-bottom:var(--gap-campo)}
+.campo:last-child{margin-bottom:0}
+.campo .lbl{margin:0 0 7px}
+.riga-aggiungi{display:flex;gap:10px;align-items:center;margin-top:24px}
+.riga-aggiungi input{flex:1}
+.riga-aggiungi .btn{flex:none;margin:0}
+/* liste appese al filo, coerenti con la schermata spese */
+/* il filo è uno solo in tutta l'app: stesse misure della schermata spese */
+.filo-lista{position:relative;padding-left:46px;margin:8px 0 4px}
+.filo-lista::before{content:"";position:absolute;left:15px;top:12px;bottom:12px;width:2px;
+  background:linear-gradient(180deg,var(--viola),var(--rosa));border-radius:2px;opacity:.35}
+.filo-lista > *{position:relative;
+  transition:transform .4s var(--curva);
+  animation:voceEntra .5s var(--curva) backwards}
+.filo-lista > *::after{content:"";position:absolute;left:-36px;top:50%;margin-top:-6px;
+  width:12px;height:12px;border-radius:50%;background:var(--sole);
+  box-shadow:0 0 0 4px var(--carta);
+  transition:transform .45s var(--curva),border-radius .45s var(--curva)}
+/* stesso gesto della linea spese: il pallino cresce e si arrotonda, la riga scivola */
+.filo-lista > *:hover::after,.filo-lista > *:active::after{transform:scale(1.35);border-radius:30%}
+.filo-lista > *:active{transform:translateX(3px)}
+/* entrano una dopo l'altra, come le spese */
+.filo-lista > *:nth-child(1){animation-delay:.02s}
+.filo-lista > *:nth-child(2){animation-delay:.07s}
+.filo-lista > *:nth-child(3){animation-delay:.12s}
+.filo-lista > *:nth-child(4){animation-delay:.17s}
+.filo-lista > *:nth-child(5){animation-delay:.22s}
+.filo-lista > *:nth-child(n+6){animation-delay:.27s}
+@media (prefers-reduced-motion:reduce){ .filo-lista > *{animation:none} }
+/* dentro una lista col filo, le voci non disegnano un secondo pallino */
+.filo-lista .voce::before{display:none}
+.filo-lista .voce{padding-left:0}
+.tot-pers{margin:0 0 30px}
+.tot-pers .sez-k{margin-bottom:7px}
+.tot-pers .big{font-size:var(--tot-personali);font-weight:700;letter-spacing:-.03em;display:block;
+  background:var(--sole);-webkit-background-clip:text;background-clip:text;color:transparent}
+.passi{display:flex;flex-direction:column;gap:14px}
+.passo{display:flex;gap:13px;align-items:flex-start;margin:0;font-size:14px;line-height:1.5}
+.passo b{flex:none;width:24px;height:24px;border-radius:50%;background:var(--sole);color:#fff;
+  font-size:12px;font-weight:600;display:grid;place-items:center;margin-top:1px}
+.passo span{flex:1;color:var(--inchiostro)}
+.btn-rosso{background:var(--rosso);color:#fff;box-shadow:0 8px 22px rgba(255,78,142,.28)}
+.nota-fine{font-size:12px;line-height:1.6;margin:26px 0 0}
+.card{background:transparent;border:0;padding:0;margin:0 0 26px}
+.lbl{display:block;font-size:11px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--grigio);font-weight:600;margin:20px 0 9px}
 .lbl:first-of-type{margin-top:0}
 input[type=text],input[type=date],select{
   width:100%;min-width:0;max-width:100%;box-sizing:border-box;
-  min-height:var(--tap);padding:12px 15px;
-  background:rgba(255,255,255,.5);border:1px solid var(--vetro-bordo);
+  min-height:var(--tap);padding:12px 15px;font-family:var(--sf);
+  background:rgba(255,255,255,.8);border:0;
   border-radius:var(--r-sm);
 }
 input[type=date]{-webkit-appearance:none;appearance:none;}
-input:focus,select:focus{background:rgba(255,255,255,.7);border-color:var(--sole-2);
-  box-shadow:0 0 0 3px rgba(30,143,213,.14)}
-select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--sole-2) 50%),
-  linear-gradient(135deg,var(--sole-2) 50%,transparent 50%);
+input:focus,select:focus{outline:2px solid var(--viola);outline-offset:1px}
+select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--inchiostro) 50%),
+  linear-gradient(135deg,var(--inchiostro) 50%,transparent 50%);
   background-position:calc(100% - 18px) 21px,calc(100% - 13px) 21px;
   background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:38px}
 select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
-.code-in{font-family:var(--mono);font-size:30px;font-weight:500;letter-spacing:.22em;
+.code-in{font-family:var(--px);font-size:28px;font-weight:400;letter-spacing:.22em;
   text-align:center;text-transform:uppercase;background:var(--carta)}
 
-/* ---------- pulsanti: cartellino prezzo ---------- */
-.btn{min-height:var(--tap);padding:13px 20px;border-radius:99px;font-weight:700;
-  border:0;background:var(--inchiostro);color:var(--carta);letter-spacing:.01em;font-size:15px}
-.btn-primary{background:var(--sole);color:#fff;box-shadow:0 8px 24px rgba(30,143,213,.34)}
-.btn-primary:active{transform:translateY(1px)}
-.btn-primary[disabled]{background:var(--linea);color:#fff;box-shadow:none;
-  transform:none;cursor:not-allowed}
-.btn-ghost{background:transparent;color:var(--grigio);box-shadow:inset 0 0 0 1.5px var(--linea)}
+/* ---------- pulsanti: piatti, netti, come un pannello di controllo ---------- */
+.btn{font-family:var(--sf);min-height:var(--tap);padding:13px 22px;border-radius:99px;font-weight:700;
+  border:0;background:var(--sole);color:#fff;
+  letter-spacing:0;font-size:15px;
+  box-shadow:0 8px 22px rgba(123,92,255,.32);
+  transition:transform .4s var(--curva),box-shadow .3s var(--curva-morbida),opacity .2s ease}
+.btn:active{transform:scale(.93)}
+.btn-primary{background:var(--sole);color:#fff}
+.btn-primary:active{transform:scale(.93)}
+.btn-primary[disabled]{background:rgba(26,18,48,.14);color:rgba(26,18,48,.4);
+  box-shadow:none;transform:none;cursor:not-allowed}
+.btn-ghost{background:rgba(255,255,255,.7);color:var(--inchiostro);box-shadow:0 4px 14px rgba(26,18,48,.08)}
 .btn.w{width:100%;margin-top:18px;display:block}
-.btn-mini{min-height:38px;padding:8px 14px;font-size:13px;font-weight:600}
+.btn-mini{min-height:38px;padding:8px 14px;font-size:11px;font-weight:700}
 .row-actions{display:flex;gap:10px;margin-top:18px}
 .row-actions .btn{flex:1}
 
 /* ---------- denaro ---------- */
-.eur{font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:700;white-space:nowrap}
+.eur{font-family:var(--sf);font-variant-numeric:tabular-nums;font-weight:400;white-space:nowrap}
 .pos{color:var(--verde)}
 .neg{color:var(--rosso)}
 
-/* ---------- riepilogo in cima alle spese ---------- */
-.tot{background:var(--vetro-forte);border:1px solid var(--vetro-bordo);border-radius:var(--r);
-  padding:24px 22px 20px;position:relative;overflow:hidden;margin-bottom:16px;
-  -webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);
-  box-shadow:var(--ombra),inset 0 1px 0 rgba(255,255,255,.6)}
-/* il sole, sfumato e morbido, dietro il vetro */
-.tot::after{content:"";position:absolute;right:-30px;top:-50px;width:170px;height:170px;
-  border-radius:50%;background:var(--alone);filter:blur(22px);opacity:.62;pointer-events:none}
-.tot .k{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--grigio);font-weight:600;position:relative}
-.tot .big{font-family:var(--sf);font-size:52px;font-weight:800;letter-spacing:-.045em;line-height:1;
-  margin:6px 0 2px;position:relative}
-.tot .sub{display:flex;justify-content:space-between;align-items:baseline;
-  border-top:1px solid var(--linea);margin-top:18px;padding-top:14px;font-size:15px;position:relative}
-.strappo{display:none}
+/* ---------- A · IL FILO DEL TEMPO: una linea, le spese appese ---------- */
+.scena{position:relative;flex:1;padding:14px 0 8px}
+.rail{position:relative;z-index:2;margin:0 0 30px 0;pointer-events:none}
+.rail-k{display:block;font-size:10px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--grigio);font-weight:600;margin-bottom:10px}
+.rail-data{display:inline-block;font-size:10px;letter-spacing:.1em;text-transform:uppercase;
+  font-weight:600;color:var(--viola);background:rgba(255,255,255,.8);
+  -webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);
+  padding:9px 17px;border-radius:99px;margin:18px 0 32px;pointer-events:auto;
+  box-shadow:0 4px 16px rgba(123,92,255,.14)}
+.rail-data.attiva{color:#fff;background:var(--sole);box-shadow:0 6px 20px rgba(123,92,255,.3)}
+.rail-tot .big{font-size:var(--tot-spese);font-weight:700;line-height:.92;display:block;
+  letter-spacing:-.045em;
+  background:var(--sole);-webkit-background-clip:text;background-clip:text;color:transparent;
+  margin-left:-2px}
+.rail-quota{display:inline-flex;align-items:baseline;gap:9px;margin-top:18px;
+  background:rgba(255,255,255,.68);border-radius:99px;padding:7px 15px;pointer-events:auto;
+  -webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
+.rail-quota .rail-k{margin:0}
+.rail-quota .eur{font-size:15px;font-weight:700}
 
-/* ---------- lista spese ---------- */
-.giorno{font-size:12px;font-weight:700;letter-spacing:.02em;
-  color:var(--grigio);margin:22px 6px 8px;text-transform:capitalize}
-.voce{display:flex;align-items:center;gap:10px;width:100%;text-align:left;
-  background:transparent;border:0;border-bottom:1px solid var(--linea);
-  padding:14px 4px;min-height:var(--tap)}
-.voce:last-child{border-bottom:0}
-.voce .desc{font-weight:700;letter-spacing:-.01em}
-.voce .chi{display:block;font-size:13px;color:var(--grigio);margin-top:2px;font-weight:400}
+/* il filo: una linea continua che attraversa tutta la vacanza */
+.colonna{position:relative;padding:6px 0 4px 46px;z-index:1}
+.colonna::before{content:"";position:absolute;left:15px;top:14px;bottom:14px;width:2px;
+  background:linear-gradient(180deg,var(--viola),var(--rosa));
+  border-radius:2px;opacity:.35}
+
+.giorno{position:relative;font-size:10px;font-weight:600;letter-spacing:.14em;
+  color:var(--grigio);margin:26px 0 12px;text-transform:uppercase}
+.giorno:first-child{margin-top:4px}
+.giorno::before{content:"";position:absolute;left:-36px;top:-1px;width:12px;height:12px;
+  border-radius:50%;background:var(--carta);
+  box-shadow:0 0 0 4px var(--carta),inset 0 0 0 2px rgba(123,92,255,.45)}
+
+/* ogni spesa è appesa al filo: nessun contenitore, solo un nodo e il testo */
+.voce{position:relative;display:flex;align-items:flex-start;gap:13px;width:100%;text-align:left;
+  background:transparent;border:0;border-radius:16px;
+  padding:13px 12px 13px 0;min-height:auto;
+  transition:transform .4s var(--curva),background-color .3s ease}
+.voce::before{content:"";position:absolute;left:-36px;top:18px;width:12px;height:12px;
+  border-radius:50%;background:var(--sole);
+  box-shadow:0 0 0 4px var(--carta);
+  transition:transform .45s var(--curva),border-radius .45s var(--curva)}
+.voce:active{transform:translateX(3px)}
+.voce:hover::before,.voce:active::before{transform:scale(1.35);border-radius:30%}
+.voce .tondo{width:38px;height:38px;flex:none;border-radius:50%;overflow:hidden;
+  display:grid;place-items:center;background:var(--sole);color:#fff;
+  font-weight:600;font-size:14px;margin-top:1px;
+  transition:border-radius .5s var(--curva),transform .5s var(--curva)}
+.voce .tondo img{width:100%;height:100%;object-fit:cover;display:block}
+.voce:hover .tondo,.voce:active .tondo{border-radius:32%;transform:rotate(-6deg)}
+.voce .desc{font-weight:600;letter-spacing:-.01em;font-size:15px;line-height:1.3}
+.voce .chi{display:block;font-size:12px;color:var(--grigio);margin-top:3px;font-weight:400;line-height:1.45}
 .voce .punti{display:none}
-.voce>span:first-child{flex:1;min-width:0}
-.voce .eur{font-weight:700}
-/* rimborso: pallina-sole a sinistra invece del simbolo */
+.voce>span.testi{flex:1;min-width:0;padding-top:1px}
+.voce .eur{font-weight:700;font-size:16px;flex:none;letter-spacing:-.02em;padding-top:1px}
+.voce.rimb::before{background:#fff;box-shadow:0 0 0 4px var(--carta),inset 0 0 0 2px var(--rosa)}
 .voce.rimb .desc{display:inline-flex;align-items:center;gap:8px}
-.voce.rimb .desc::before{content:"";width:9px;height:9px;border-radius:50%;
-  background:var(--alone);flex:none}
-.vuoto{text-align:center;color:var(--grigio);padding:40px 16px}
-.vuoto p{margin:0 0 4px}
+.vuoto{text-align:center;color:var(--grigio);padding:44px 16px}
+.vuoto p{margin:0 0 5px}
 
 /* ---------- barra azioni + tab ---------- */
-.azioni{position:sticky;bottom:0;display:flex;gap:10px;padding:14px 0 30px;margin-top:8px;
-  background:linear-gradient(transparent,var(--carta2) 35%)}
+.azioni{position:sticky;bottom:0;display:flex;gap:10px;padding:22px 0 18px;margin-top:16px;
+  background:none}
 .azioni .btn{flex:1}
-.tabs{position:relative;position:sticky;bottom:0;z-index:20;display:flex;padding:0;
-  padding-bottom:env(safe-area-inset-bottom);margin:18px 0 0;
-  background:rgba(255,255,255,.86);
-  -webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);
-  box-shadow:0 -6px 22px rgba(30,90,140,.05)}
-/* due gobbe piene, saldate al bordo: mai trasparenti, non lasciano intravedere nulla dietro */
-.tabs::before,.tabs::after{
-  content:"";position:absolute;bottom:100%;width:64px;height:16px;border-radius:50%;
-  background:rgba(255,255,255,.86);
-  -webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);
-  margin-bottom:-8px;pointer-events:none;
-}
-.tabs::before{left:27%;transform:translateX(-50%)}
-.tabs::after{left:73%;transform:translateX(-50%)}
-.tabs-in{display:flex;gap:6px;max-width:440px;margin:0 auto;width:100%;padding:16px 12px 8px}
-.tabs button{flex:1;min-height:48px;background:transparent;border:0;font-weight:700;font-size:14px;
-  letter-spacing:0;color:var(--grigio);padding:6px 4px;border-radius:99px}
-.tabs button[aria-current="page"]{color:#fff;background:var(--sole);
-  box-shadow:0 4px 14px rgba(30,143,213,.3)}
+.tabs{position:sticky;bottom:0;z-index:20;display:flex;padding:0 14px;
+  padding-bottom:calc(14px + env(safe-area-inset-bottom));margin:0;
+  background:transparent;border:0}
+.tabs-in{display:flex;gap:4px;max-width:440px;margin:0 auto;width:100%;padding:6px;
+  background:rgba(255,255,255,.72);border:0;border-radius:99px;
+  -webkit-backdrop-filter:blur(18px) saturate(1.6);backdrop-filter:blur(18px) saturate(1.6);
+  box-shadow:0 10px 30px rgba(26,18,48,.13)}
+.tabs button{font-family:var(--sf);flex:1;min-height:44px;background:transparent;border:0;font-weight:600;font-size:12px;
+  letter-spacing:0;color:var(--grigio);padding:6px 4px;border-radius:99px;
+  transition:background .4s var(--curva),color .3s var(--curva),transform .4s var(--curva)}
+.tabs button[aria-current="page"]{color:#fff;background:var(--sole);transform:scale(1.04)}
 
 /* ---------- editor divisione ---------- */
 .pers{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--linea);min-height:var(--tap)}
 .pers:last-of-type{border-bottom:0}
 .pers label{flex:1;display:flex;align-items:center;gap:10px;min-height:var(--tap);font-weight:600}
-.pers input[type=checkbox]{width:24px;height:24px;accent-color:var(--sole-2);flex:none}
-.quadra{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:13px 16px;
-  border:1px solid var(--vetro-bordo);border-radius:var(--r-sm);font-size:14px;font-weight:600;
-  background:rgba(255,255,255,.3);color:var(--grigio)}
-.quadra[data-ok="1"]{background:rgba(46,158,123,.14);border-color:rgba(46,158,123,.3);color:var(--verde)}
+.pers input[type=checkbox]{width:24px;height:24px;accent-color:var(--inchiostro);flex:none}
+.quadra{font-family:var(--sf);display:flex;justify-content:space-between;align-items:center;gap:10px;padding:13px 16px;
+  border:var(--bordo) solid var(--inchiostro);border-radius:var(--r-sm);font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
+  background:var(--carta);color:var(--grigio);
+  transition:background-color .2s ease,color .2s ease}
+.quadra[data-ok="1"]{color:var(--verde)}
 .quadra .eur{font-weight:700}
-.importo-wrap{display:flex;align-items:center;gap:10px;border:1px solid var(--vetro-bordo);
-  border-radius:var(--r-sm);padding:10px 16px;background:rgba(255,255,255,.3)}
-.importo-wrap:focus-within{background:rgba(255,255,255,.7);border-color:var(--sole-2);
-  box-shadow:0 0 0 3px rgba(30,143,213,.14)}
-.importo{flex:1;font-family:var(--sf);font-size:46px;font-weight:800;letter-spacing:-.045em;
-  border:0;padding:4px 0;min-height:56px;background:transparent;text-align:right;width:100%}
+.importo-wrap{display:flex;align-items:center;gap:10px;border:0;width:100%;
+  border-radius:var(--r-sm);padding:8px 20px;background:rgba(255,255,255,.8);
+  margin-bottom:22px}
+.importo-wrap:focus-within{outline:2px solid var(--viola);outline-offset:1px}
+.importo{flex:1;font-family:var(--sf);font-size:var(--importo-grande);font-weight:700;letter-spacing:-.02em;
+  border:0;padding:4px 0;min-height:52px;background:transparent;text-align:right;width:100%}
+#s-profilo .importo{font-size:var(--importo-piccolo);min-height:44px}
+#s-profilo .importo-wrap{padding:6px 18px;margin-bottom:26px}
 .importo:focus{outline:none}
-.importo-wrap .sim{font-size:28px;font-weight:700;color:var(--grigio)}
+.importo-wrap .sim{font-family:var(--sf);font-size:22px;font-weight:700;color:var(--grigio)}
 .err{color:var(--rosso);font-size:14px;font-weight:600;margin:14px 0 0}
 
 /* ---------- saldi ---------- */
-.mio{background:rgba(51,48,43,.88);color:#F7F1E9;border-radius:var(--r);
-  padding:26px 24px;margin-bottom:18px;position:relative;overflow:hidden;
-  border:1px solid rgba(255,255,255,.16);
-  -webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);
-  box-shadow:var(--ombra)}
-.mio::after{content:"";position:absolute;right:-30px;bottom:-70px;width:180px;height:180px;
-  border-radius:50%;background:var(--alone);opacity:.55;filter:blur(24px)}
-.mio .k{font-size:11px;letter-spacing:.12em;text-transform:uppercase;opacity:.6;font-weight:600;position:relative}
-.mio .big{font-family:var(--sf);font-size:52px;font-weight:800;letter-spacing:-.045em;
-  line-height:1.02;margin-top:8px;position:relative}
-.mio .big.pos{color:var(--sole-1)}
-.mio .big.neg{color:#FFC6A6}
-.barra{display:flex;align-items:center;gap:10px;padding:14px 4px;border-bottom:1px solid var(--linea)}
+.mio{background:var(--sole);color:#fff;border-radius:var(--r);
+  padding:26px 24px 28px;margin-bottom:6px;position:relative;overflow:hidden;border:0;
+  box-shadow:0 14px 40px rgba(123,92,255,.3)}
+.mio .k{font-size:11px;letter-spacing:.16em;text-transform:uppercase;opacity:.8;font-weight:600;position:relative}
+.mio .big{font-size:var(--tot-saldo);font-weight:700;letter-spacing:-.04em;
+  line-height:1.05;margin-top:9px;position:relative}
+.mio .big.pos{color:#FFFFFF}
+.mio .big.neg{color:#FFE08A}
+/* B · LA MAPPA DEL GRUPPO: tu al centro, le linee dicono chi deve a chi */
+.mappa-wrap{margin:18px 0 6px}
+.mappa{width:100%;height:auto;display:block;overflow:visible}
+.mappa-leg{text-align:center;font-size:11px;color:var(--grigio);margin:10px 0 0}
+.mappa .filo{stroke-linecap:round;opacity:0;
+  animation:filoEntra .9s var(--curva-morbida) forwards}
+@keyframes filoEntra{ to{opacity:.95} }
+.mappa .nodo{opacity:0;animation:nodoEntra .55s var(--curva) forwards}
+@keyframes nodoEntra{ from{opacity:0;transform:scale(.4)} to{opacity:1;transform:scale(1)} }
+.mappa .et{font-family:var(--sf);font-weight:600;fill:#fff}
+.mappa .et-fuori{font-family:var(--sf);font-weight:600;fill:var(--inchiostro);font-size:10px}
+@media (prefers-reduced-motion:reduce){
+  .mappa .filo{animation:none;opacity:.95}
+  .mappa .nodo{animation:none;opacity:1}
+}
+.barra{font-family:var(--sf);display:flex;align-items:center;gap:10px;padding:14px 4px;border-bottom:var(--bordo) solid var(--linea)}
 .barra .nome{flex:1;font-weight:600}
-.mov{display:flex;align-items:center;gap:10px;padding:14px 4px;border-bottom:1px solid var(--linea);font-weight:700}
-.mov .frecc{color:var(--sole-2);font-weight:800}
-.mov .punti{display:none}
-.mov .eur{font-weight:700}
+.mov-card{background:rgba(255,255,255,.7);border:0;border-radius:var(--r);
+  padding:17px 19px;margin-bottom:11px;
+  -webkit-backdrop-filter:blur(14px) saturate(1.5);backdrop-filter:blur(14px) saturate(1.5);
+  box-shadow:0 6px 22px rgba(26,18,48,.08)}
+.mov{display:flex;align-items:center;gap:9px;font-weight:600;font-size:15px}
+.mov .frecc{color:var(--viola);font-weight:800}
+.mov .eur{font-weight:700;flex:none}
 .mov-sp{flex:1}
-.btn-paga{display:block;width:100%;margin:6px 0 14px;text-align:center;text-decoration:none;
-  font-size:14px;padding:12px 16px}
-.btn-segna{display:block;width:100%;margin:2px 0 12px;text-align:center;font-size:13px;
-  padding:8px 14px;min-height:36px}
+.mov-azioni{display:flex;gap:10px;margin-top:14px}
+.mov-azioni .btn{flex:1;text-align:center;text-decoration:none;font-size:12px;padding:11px 12px;min-height:44px}
+.btn-rimborsato{background:var(--foglio);color:var(--inchiostro);border:var(--bordo) solid var(--inchiostro)}
 
 /* ---------- gruppo ---------- */
-.codice{font-family:var(--mono);font-size:40px;font-weight:500;letter-spacing:.16em;text-align:center;
+.codice{font-family:var(--px);font-size:34px;font-weight:400;letter-spacing:.16em;text-align:center;
   padding:16px 0 8px}
-.avatar{width:40px;height:40px;flex:none;border-radius:50%;display:grid;place-items:center;
-  font-weight:800;font-size:16px;color:#fff;overflow:hidden;background:var(--sole);
-  box-shadow:0 2px 8px rgba(30,90,140,.18)}
+.avatar{width:46px;height:46px;flex:none;border-radius:50%;display:grid;place-items:center;
+  font-weight:700;font-size:17px;color:#fff;overflow:hidden;background:var(--sole);border:0;
+  transition:border-radius .5s var(--curva),transform .5s var(--curva)}
 .avatar img{width:100%;height:100%;object-fit:cover;display:block}
-.avatar.lg{width:52px;height:52px;font-size:20px}
-.membro{display:flex;align-items:center;gap:12px;padding:12px 2px;border-bottom:1px solid var(--linea);min-height:var(--tap)}
+.avatar.lg{width:52px;height:52px;font-size:19px}
+.membro{display:flex;align-items:center;gap:13px;padding:13px 2px;border:0;min-height:var(--tap)}
 .membro .nome{flex:1;font-weight:600}
-.membro .io{font-size:10px;font-weight:700;letter-spacing:.08em;color:#fff;
-  background:var(--sole);padding:3px 9px;border-radius:99px}
+.membro .io{font-family:var(--sf);font-size:10px;font-weight:700;letter-spacing:.08em;color:var(--foglio);
+  background:var(--inchiostro);padding:3px 9px;border-radius:99px}
+/* la scelta di chi sei: l'avatar passa da cerchio a quadrato arrotondato al tocco, come nel riferimento */
 .scelta{display:flex;align-items:center;gap:14px;width:100%;text-align:left;
-  min-height:64px;margin-bottom:12px;border:1px solid var(--vetro-bordo);border-radius:var(--r);
-  background:var(--vetro);padding:14px 20px;font-weight:800;font-size:19px;letter-spacing:-.02em;
-  -webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);
-  box-shadow:var(--ombra),inset 0 1px 0 rgba(255,255,255,.5);transition:transform .12s}
+  min-height:66px;margin-bottom:11px;border:0;border-radius:99px;
+  background:rgba(255,255,255,.72);padding:10px 22px 10px 10px;font-weight:700;font-size:17px;letter-spacing:-.01em;
+  -webkit-backdrop-filter:blur(14px) saturate(1.5);backdrop-filter:blur(14px) saturate(1.5);
+  box-shadow:0 6px 22px rgba(26,18,48,.08);
+  transition:transform .45s var(--curva)}
 .scelta .nome-sc{flex:1}
-.scelta::after{content:"";width:14px;height:14px;border-radius:50%;background:var(--alone);
-  opacity:0;transition:opacity .15s;flex:none;filter:blur(1px)}
-.scelta:hover::after,.scelta:active::after{opacity:.9}
-.scelta:active{transform:scale(.985)}
+.scelta:hover .avatar,.scelta:active .avatar{border-radius:34%;transform:rotate(-8deg) scale(1.06)}
+.scelta:active{transform:scale(.96)}
 /* riga foto profilo nella schermata Gruppo */
-.foto-mia{display:flex;align-items:center;gap:14px;margin-top:2px}
+.foto-mia{display:flex;align-items:center;gap:14px;margin:4px 0 2px}
 .foto-mia .btn{flex:1}
 .nota{color:var(--grigio);font-size:14px;margin:12px 2px 0;line-height:1.5}
 
@@ -343,14 +512,49 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
 
   <main id="main">
 
+    <!-- ============ INTRO OBBLIGATORIA ============ -->
+    <section class="screen" id="s-intro" hidden>
+      <h1>Calculon</h1>
+      <p class="lead">Divide le spese della vacanza mentre siete ancora in giro.</p>
+
+      <div class="sez">
+        <div class="passi">
+          <p class="passo"><b>1</b><span>Crei un gruppo o entri con un codice</span></p>
+          <p class="passo"><b>2</b><span>Ognuno registra le spese, anche quelle di un altro</span></p>
+          <p class="passo"><b>3</b><span>I saldi si aggiornano da soli, si salda alla fine</span></p>
+        </div>
+      </div>
+
+      <div class="sez">
+        <label class="campo"><span class="lbl">Come ti chiami</span>
+          <input id="in-nome" type="text" placeholder="Il tuo nome" autocomplete="off"></label>
+        <button class="btn btn-primary w" id="btn-intro-continua" type="button" disabled>Continua</button>
+      </div>
+
+      <div class="sez">
+        <span class="sez-k">Facoltativo, ma puoi farlo ora</span>
+        <p class="nota">Una foto per farti riconoscere nei gruppi.</p>
+        <div class="foto-mia">
+          <span id="in-avatar"></span>
+          <button class="btn btn-ghost" id="in-btn-foto" type="button">Scegli una foto</button>
+        </div>
+      </div>
+
+      <div class="sez">
+        <span class="sez-k">Come ti pagano</span>
+        <p class="nota">Il link per farti mandare i soldi, valido in tutti i gruppi.</p>
+        <input id="in-pay" class="campo-solo" type="text" inputmode="url" autocomplete="off" placeholder="paypal.me/iltuonome">
+      </div>
+    </section>
+
     <!-- ============ INGRESSO ============ -->
     <section class="screen" id="s-ingresso" hidden>
-      <h1>Cassa comune</h1>
-      <p class="lead">Le spese della vacanza, divise mentre sei ancora in fila alla cassa. Niente account: solo un codice.</p>
-      <button class="btn btn-ghost w" id="btn-annulla-ingresso" type="button" hidden style="margin-bottom:16px">← Torna al tuo gruppo</button>
+      <h1>Calculon</h1>
+      <p class="lead">Le spese divise mentre sei ancora in fila alla cassa. Nessun account: solo un codice.</p>
+      <button class="btn btn-ghost w" id="btn-annulla-ingresso" type="button" hidden>← Torna al tuo gruppo</button>
 
-      <div class="card">
-        <h2 class="ttl">Entra con un codice</h2>
+      <div class="sez">
+        <span class="sez-k">Entra con un codice</span>
         <input id="in-code" class="code-in" type="text" maxlength="6" placeholder="XN8YCD"
                autocomplete="off" autocapitalize="characters" spellcheck="false" inputmode="text">
         <button class="btn btn-primary w" id="btn-entra">Entra nel gruppo</button>
@@ -359,12 +563,12 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
 
       <div class="sep">oppure</div>
 
-      <div class="card">
-        <h2 class="ttl">Crea un gruppo</h2>
-        <label class="lbl" for="in-name">Come si chiama</label>
-        <input id="in-name" type="text" placeholder="Cilento 2026" autocomplete="off">
-        <label class="lbl">Chi c'è</label>
-        <div id="new-membri"></div>
+      <div class="sez">
+        <span class="sez-k">Crea un gruppo</span>
+        <label class="campo"><span class="lbl">Come si chiama</span>
+          <input id="in-name" type="text" placeholder="Estate Tropeana" autocomplete="off"></label>
+        <span class="lbl">Chi c'è</span>
+        <div id="new-membri" class="filo-lista"></div>
         <button class="btn btn-ghost btn-mini" id="btn-addm" type="button">+ Aggiungi partecipante</button>
         <button class="btn btn-primary w" id="btn-crea">Crea il gruppo</button>
         <p class="err" id="err-crea" hidden></p>
@@ -380,17 +584,26 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
 
     <!-- ============ SPESE ============ -->
     <section class="screen" id="s-spese" hidden>
-      <div id="sp-countdown" class="countdown" hidden></div>
-      <div class="tot">
-        <div class="k">Totale speso dal gruppo</div>
-        <div class="big eur" id="tot-speso">0,00</div>
-        <div class="sub">
-          <span class="k" id="tot-quota-k">La tua quota</span>
-          <span class="eur" id="tot-quota">0,00</span>
-        </div>
+      <div id="sp-nudge" class="nudge" hidden>
+        <span id="sp-nudge-testo">Completa il profilo: foto e link per farti pagare.</span>
+        <button type="button" id="sp-nudge-vai">Vai</button>
       </div>
-      <div class="strappo"></div>
-      <div id="lista-spese"></div>
+
+      <div class="scena">
+        <aside class="rail">
+          <div class="rail-data" id="sp-countdown" hidden></div>
+          <div class="rail-tot">
+            <span class="rail-k">Totale</span>
+            <span class="big eur" id="tot-speso">0,00</span>
+          </div>
+          <div class="rail-quota">
+            <span class="rail-k" id="tot-quota-k">La tua quota</span>
+            <span class="eur" id="tot-quota">0,00</span>
+          </div>
+        </aside>
+        <div class="colonna" id="lista-spese"></div>
+      </div>
+
       <div class="azioni">
         <button class="btn btn-primary" id="btn-nuova">+ Spesa</button>
         <button class="btn" id="btn-rimborso">Rimborso</button>
@@ -401,37 +614,38 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
     <section class="screen" id="s-nuova" hidden>
       <h1 id="nuova-ttl">Nuova spesa</h1>
 
-      <div class="card">
-        <label class="lbl" for="sp-amt">Quanto</label>
+      <div class="sez">
+        <span class="sez-k">Quanto</span>
         <div class="importo-wrap">
           <input id="sp-amt" class="importo" type="text" inputmode="numeric" placeholder="0,00" autocomplete="off">
           <span class="sim">€</span>
         </div>
-
-        <label class="lbl" for="sp-desc">Per cosa</label>
-        <input id="sp-desc" type="text" placeholder="Spesa al Conad" autocomplete="off">
-
-        <label class="lbl" for="sp-date">Quando</label>
-        <input id="sp-date" type="date">
-
-        <label class="lbl" for="sp-payer">Chi ha pagato</label>
-        <select id="sp-payer"></select>
-        <p class="nota" style="margin-top:7px">Puoi registrare anche una spesa fatta da un altro: scegli chi ha pagato davvero.</p>
       </div>
 
-      <div class="card">
-        <h2 class="ttl">Chi partecipa</h2>
-        <p class="nota" style="margin-top:0">Di solito tutti. Togli la spunta a chi non c'entra in questa spesa.</p>
-        <div id="sp-persone"></div>
+      <div class="sez">
+        <label class="campo"><span class="lbl">Per cosa</span>
+          <input id="sp-desc" type="text" placeholder="Spesa al Conad" autocomplete="off"></label>
+        <div class="due">
+          <label class="campo"><span class="lbl">Quando</span>
+            <input id="sp-date" type="date"></label>
+          <label class="campo"><span class="lbl">Chi ha pagato</span>
+            <select id="sp-payer"></select></label>
+        </div>
+        <p class="nota">Puoi registrare anche la spesa di un altro: scegli chi ha pagato davvero.</p>
       </div>
 
-      <div class="quadra" id="sp-quadra" data-ok="1" style="margin-bottom:2px">
-        <span id="sp-quadra-k">Divisa fra tutti</span><span class="eur" id="sp-quadra-v">—</span>
+      <div class="sez">
+        <span class="sez-k">Chi partecipa</span>
+        <p class="nota">Di solito tutti. Togli chi non c'entra.</p>
+        <div id="sp-persone" class="filo-lista"></div>
+        <div class="quadra" id="sp-quadra" data-ok="1">
+          <span id="sp-quadra-k">Divisa fra tutti</span><span class="eur" id="sp-quadra-v">—</span>
+        </div>
       </div>
 
       <p class="err" id="err-sp" hidden></p>
-      <div class="row-actions">
-        <button class="btn" id="sp-annulla" type="button">Annulla</button>
+      <div class="due">
+        <button class="btn btn-ghost" id="sp-annulla" type="button">Annulla</button>
         <button class="btn btn-primary" id="sp-salva" type="button">Salva</button>
       </div>
       <button class="btn btn-ghost w" id="sp-elimina" type="button" hidden>Elimina questa spesa</button>
@@ -440,26 +654,31 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
     <!-- ============ RIMBORSO ============ -->
     <section class="screen" id="s-rimborso" hidden>
       <h1 id="rb-ttl">Nuovo rimborso</h1>
-      <p class="lead">Soldi passati di mano fra due persone. Non è una spesa: non entra nel totale.</p>
+      <p class="lead">Soldi passati di mano fra due persone. Non entra nel totale del gruppo.</p>
 
-      <div class="card">
-        <label class="lbl" for="rb-from">Chi dà</label>
-        <select id="rb-from"></select>
-        <label class="lbl" for="rb-to">A chi</label>
-        <select id="rb-to"></select>
-        <label class="lbl" for="rb-amt">Quanto</label>
+      <div class="sez">
+        <span class="sez-k">Quanto</span>
         <div class="importo-wrap">
           <input id="rb-amt" class="importo" type="text" inputmode="numeric" placeholder="0,00" autocomplete="off">
           <span class="sim">€</span>
         </div>
+      </div>
+
+      <div class="sez">
+        <div class="due">
+          <label class="campo"><span class="lbl">Chi dà</span>
+            <select id="rb-from"></select></label>
+          <label class="campo"><span class="lbl">A chi</span>
+            <select id="rb-to"></select></label>
+        </div>
         <p class="nota" id="rb-nota"></p>
-        <label class="lbl" for="rb-date">Quando</label>
-        <input id="rb-date" type="date">
+        <label class="campo"><span class="lbl">Quando</span>
+          <input id="rb-date" type="date"></label>
       </div>
 
       <p class="err" id="err-rb" hidden></p>
-      <div class="row-actions">
-        <button class="btn" id="rb-annulla" type="button">Annulla</button>
+      <div class="due">
+        <button class="btn btn-ghost" id="rb-annulla" type="button">Annulla</button>
         <button class="btn btn-primary" id="rb-salva" type="button">Salva</button>
       </div>
       <button class="btn btn-ghost w" id="rb-elimina" type="button" hidden>Elimina questo rimborso</button>
@@ -471,105 +690,108 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
         <div class="k" id="mio-k">La tua posizione</div>
         <div class="big" id="mio-v">0,00 €</div>
       </div>
-      <h2 class="ttl">Come sta il gruppo</h2>
-      <div id="saldi-lista"></div>
-      <h2 class="ttl" style="margin-top:26px">Per pareggiare</h2>
+
+      <div class="mappa-wrap">
+        <svg class="mappa" id="mappa" viewBox="0 0 320 330" aria-hidden="true"></svg>
+        <p class="mappa-leg">Più spessa la linea, più grande il conto</p>
+      </div>
+
+      <h2 class="ttl" style="margin-top:22px">Per pareggiare</h2>
       <div id="mov-lista"></div>
+      <div id="saldi-lista" hidden></div>
       <button class="btn btn-primary w" id="btn-condividi">Copia il riepilogo</button>
     </section>
 
     <!-- ============ GRUPPO ============ -->
     <section class="screen" id="s-gruppo" hidden>
-      <div class="card">
-        <h2 class="ttl">Codice da passare agli altri</h2>
+      <div class="sez sez-codice">
+        <span class="sez-k">Codice del gruppo</span>
         <div class="codice" id="g-code">——————</div>
         <button class="btn btn-primary w" id="btn-copia-code">Copia il codice</button>
       </div>
 
-      <div class="card">
-        <h2 class="ttl">Date della vacanza</h2>
-        <p class="nota" style="margin-top:0" id="g-countdown"></p>
-        <label class="lbl" for="g-data-inizio">Inizio</label>
-        <input id="g-data-inizio" type="date">
-        <label class="lbl" for="g-data-fine">Fine</label>
-        <input id="g-data-fine" type="date">
+      <div class="sez">
+        <span class="sez-k">Date della vacanza</span>
+        <p class="nota" id="g-countdown"></p>
+        <div class="due">
+          <label class="campo"><span class="lbl">Inizio</span>
+            <input id="g-data-inizio" type="date"></label>
+          <label class="campo"><span class="lbl">Fine</span>
+            <input id="g-data-fine" type="date"></label>
+        </div>
         <button class="btn btn-primary w" id="btn-salva-date">Salva le date</button>
       </div>
 
-      <div class="card">
-        <h2 class="ttl">Partecipanti</h2>
-        <div id="g-membri"></div>
-        <label class="lbl" for="g-nuovo">Aggiungi qualcuno</label>
-        <div style="display:flex;gap:8px">
-          <input id="g-nuovo" type="text" placeholder="Nome" autocomplete="off">
-          <button class="btn" id="btn-addp" type="button" style="flex:none">Aggiungi</button>
+      <div class="sez">
+        <span class="sez-k">Partecipanti</span>
+        <div id="g-membri" class="filo-lista"></div>
+        <div class="riga-aggiungi">
+          <input id="g-nuovo" type="text" placeholder="Aggiungi un nome" autocomplete="off">
+          <button class="btn btn-mini" id="btn-addp" type="button">Aggiungi</button>
         </div>
       </div>
 
-      <div class="card">
-        <h2 class="ttl">Questo dispositivo</h2>
-        <p class="nota" style="margin-top:0">Su questo telefono, in questo gruppo, sei <b id="g-io">—</b>.</p>
-        <button class="btn w" id="btn-cambia-io" type="button">Cambia chi sei</button>
-        <button class="btn btn-ghost w" id="btn-esci" type="button">Esci da questo gruppo</button>
-        <p class="nota">Esci cancella solo la copia locale di questo gruppo, gli altri tuoi gruppi restano. Il gruppo stesso non si cancella, e ci rientri col codice. Se nessuno lo usa per 10 giorni, il gruppo si cancella comunque da solo.</p>
+      <div class="sez">
+        <span class="sez-k">Questo dispositivo</span>
+        <p class="nota">In questo gruppo sei <b id="g-io">—</b>.</p>
+        <div class="due">
+          <button class="btn btn-ghost" id="btn-cambia-io" type="button">Cambia chi sei</button>
+          <button class="btn btn-ghost" id="btn-esci" type="button">Esci dal gruppo</button>
+        </div>
+        <p class="nota nota-fine">Esci cancella solo la copia su questo telefono. Il gruppo resta e ci rientri col codice. Se nessuno lo apre per 10 giorni, si cancella da solo.</p>
       </div>
 
-      <div class="card" style="box-shadow:0 1px 2px rgba(0,0,0,.04),0 14px 36px rgba(210,60,40,.10)">
-        <h2 class="ttl" style="color:var(--rosso)">Zona pericolosa</h2>
-        <p class="nota" style="margin-top:0">Cancella il gruppo per tutti, per sempre. Non è recuperabile, nemmeno da chi lo ha creato.</p>
-        <label class="lbl" for="g-conferma-elimina">Scrivi il nome del gruppo per confermare</label>
-        <input id="g-conferma-elimina" type="text" autocomplete="off" placeholder="">
-        <button class="btn w" id="btn-elimina-gruppo" type="button"
-                style="margin-top:16px;background:var(--rosso);color:#fff" disabled>Elimina questo gruppo per tutti</button>
+      <div class="sez sez-rossa">
+        <span class="sez-k">Zona pericolosa</span>
+        <p class="nota">Cancella il gruppo per tutti, per sempre. Non è recuperabile.</p>
+        <button class="btn w btn-rosso" id="btn-elimina-gruppo" type="button">Elimina per tutti</button>
       </div>
     </section>
 
     <!-- ============ PROFILO ============ -->
     <section class="screen" id="s-profilo" hidden>
-      <div class="card">
-        <h2 class="ttl">La tua foto</h2>
-        <p class="nota" style="margin-top:0">Vale per tutti i tuoi gruppi: ti riconosceranno a colpo d'occhio ovunque.</p>
+      <h1 id="pf-saluto">Ciao!</h1>
+      <div class="divisore"></div>
+
+      <div class="sez">
+        <span class="sez-k">La tua foto</span>
+        <p class="nota">Vale per tutti i tuoi gruppi.</p>
         <div class="foto-mia">
           <span id="pf-avatar"></span>
-          <button class="btn" id="btn-foto" type="button">Scegli una foto</button>
+          <button class="btn btn-ghost" id="btn-foto" type="button">Scegli una foto</button>
+          <button class="btn btn-ghost btn-mini" id="btn-foto-rm" type="button" hidden>Togli</button>
         </div>
-        <button class="btn btn-ghost w" id="btn-foto-rm" type="button" hidden>Togli la foto</button>
         <input id="foto-file" type="file" accept="image/*" hidden>
       </div>
 
-      <div class="card">
-        <h2 class="ttl">Come ti pagano</h2>
-        <p class="nota" style="margin-top:0">Un link solo, valido in tutti i gruppi. Chi ti deve dei soldi lo vedrà nei Saldi con un tasto per pagarti al volo.</p>
-        <label class="lbl" for="pf-pay">Il tuo link per ricevere</label>
-        <input id="pf-pay" type="text" inputmode="url" autocomplete="off"
-               placeholder="paypal.me/iltuonome">
+      <div class="sez">
+        <span class="sez-k">Come ti pagano</span>
+        <p class="nota">Un link solo, valido ovunque. Chi ti deve dei soldi lo vedrà nei saldi.</p>
+        <input id="pf-pay" class="campo-solo" type="text" inputmode="url" autocomplete="off" placeholder="paypal.me/iltuonome">
         <button class="btn btn-primary w" id="btn-salva-pay" type="button">Salva il link</button>
       </div>
 
-      <div class="card">
-        <h2 class="ttl">Le tue spese personali</h2>
-        <p class="nota" style="margin-top:0">Solo per tenerne conto tu: non entrano nel totale del gruppo, non si dividono con nessuno, e restano solo su questo telefono.</p>
-        <div class="tot" style="margin:14px 0;padding:16px 18px">
-          <div class="k">Hai speso di tasca tua, in questa vacanza</div>
-          <div class="big eur" id="pf-tot-personali" style="font-size:32px">0,00 €</div>
+      <div class="sez">
+        <span class="sez-k">Le tue spese personali</span>
+        <p class="nota">Solo per te: non entrano nel conto del gruppo e restano su questo telefono.</p>
+        <div class="tot-pers">
+          <span class="sez-k">Di tasca tua</span>
+          <span class="big eur" id="pf-tot-personali">0,00 €</span>
         </div>
-
-        <label class="lbl" for="pfp-amt">Quanto</label>
         <div class="importo-wrap">
-          <input id="pfp-amt" class="importo" style="font-size:32px;min-height:44px" type="text" inputmode="numeric" placeholder="0,00" autocomplete="off">
+          <input id="pfp-amt" class="importo" type="text" inputmode="numeric" placeholder="0,00" autocomplete="off">
           <span class="sim">€</span>
         </div>
-        <label class="lbl" for="pfp-desc">Per cosa</label>
-        <input id="pfp-desc" type="text" placeholder="Gelato, souvenir, benzina del motorino..." autocomplete="off">
+        <label class="campo"><span class="lbl">Per cosa</span>
+          <input id="pfp-desc" type="text" placeholder="Gelato, souvenir..." autocomplete="off"></label>
         <button class="btn btn-primary w" id="btn-add-personale" type="button">+ Aggiungi</button>
-
-        <div id="pf-personali-lista" style="margin-top:8px"></div>
+        <div id="pf-personali-lista" class="filo-lista"></div>
       </div>
 
-      <div class="card">
-        <h2 class="ttl">I tuoi gruppi</h2>
-        <div id="pf-gruppi"></div>
-        <button class="btn btn-primary w" id="btn-nuovo-gruppo" type="button">+ Entra o crea un altro gruppo</button>
+      <div class="sez">
+        <span class="sez-k">I tuoi gruppi</span>
+        <div id="pf-gruppi" class="filo-lista"></div>
+        <button class="btn btn-primary w" id="btn-nuovo-gruppo" type="button">+ Entra o crea un gruppo</button>
       </div>
     </section>
 
@@ -583,6 +805,20 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
     <button type="button" data-go="profilo">Profilo</button>
     </div>
   </nav>
+</div>
+
+<div class="velo" id="velo-elimina" hidden>
+  <div class="popup" role="dialog" aria-modal="true" aria-labelledby="pop-tit">
+    <h2 class="pop-tit" id="pop-tit">Eliminare il gruppo?</h2>
+    <p class="pop-testo"><b id="pop-nome">Questo gruppo</b> sparisce per <b>tutti</b> i partecipanti, con tutte le spese. Non si può annullare.</p>
+    <label class="campo"><span class="lbl">Scrivi <b>cancellare</b> per confermare</span>
+      <input id="g-conferma-elimina" type="text" autocomplete="off" autocapitalize="off"
+             autocorrect="off" spellcheck="false" placeholder="cancellare"></label>
+    <div class="due">
+      <button class="btn btn-ghost" id="pop-annulla" type="button">Annulla</button>
+      <button class="btn btn-rosso" id="pop-conferma" type="button" disabled>Elimina</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -1004,9 +1240,9 @@ function statoSync(){
   const el = $("#sync");
   if (!el || !GID) return;
   const n = outbox().length;
-  // "senza rete" copre anche il server irraggiungibile: per chi usa l'app è la stessa cosa.
+  // "aggiorna" copre sia l'assenza di rete sia il server irraggiungibile: si tocca per riprovare.
   if (navigator.onLine === false || (!pullOk && n === 0)){
-    el.dataset.st = "offline"; el.textContent = "senza rete";
+    el.dataset.st = "offline"; el.textContent = "Aggiorna";
   } else if (n > 0){
     el.dataset.st = "attesa";  el.textContent = n + " in attesa";
   } else {
@@ -1025,15 +1261,69 @@ function dataLunga(iso){
   const d = new Date(p[0], p[1] - 1, p[2]);
   return d.toLocaleDateString("it-IT", { weekday: "short", day: "numeric", month: "long" });
 }
+/* Il numero appare con un piccolo sfarfallio digitale invece che di colpo,
+   come nel video di riferimento: le cifre scorrono a caso per pochi fotogrammi e poi si fermano sul valore vero. */
+/* Il testo si scrive carattere per carattere con il cursore che lampeggia,
+   come le scritte tecniche del video di riferimento ("ANALYZING_SURFACE_BIOME..."). */
+function scriviTesto(el, testo, velocita){
+  if (!el) return;
+  clearInterval(el._scrivi);
+  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches){
+    el.textContent = testo; return;
+  }
+  const ms = velocita || 22;
+  let i = 0;
+  el.textContent = "";
+  const cur = document.createElement("span");
+  cur.className = "cursore";
+  el.appendChild(cur);
+  el._scrivi = setInterval(() => {
+    i++;
+    el.textContent = testo.slice(0, i);
+    if (i >= testo.length){
+      clearInterval(el._scrivi);
+    } else {
+      el.appendChild(cur.cloneNode());
+    }
+  }, ms);
+}
+
+function glitchIn(el, testoFinale){
+  if (!el) return;
+  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches){
+    el.textContent = testoFinale; return;
+  }
+  const cifre = "0123456789";
+  let passo = 0;
+  const passi = 5;
+  clearInterval(el._glitch);
+  el._glitch = setInterval(() => {
+    passo++;
+    if (passo >= passi){ el.textContent = testoFinale; clearInterval(el._glitch); return; }
+    el.textContent = testoFinale.replace(/[0-9]/g, () => cifre[Math.floor(Math.random() * 10)]);
+  }, 45);
+}
+
 function avviso(txt){
   const t = document.createElement("div");
   t.textContent = txt;
   t.setAttribute("role", "status");
-  t.style.cssText = "position:fixed;left:50%;transform:translateX(-50%);bottom:76px;z-index:60;" +
-    "background:#16181B;color:#F1EFE7;padding:11px 16px;border-radius:3px;font-weight:600;" +
-    "font-size:15px;max-width:88%;text-align:center;box-shadow:0 6px 20px rgba(0,0,0,.25)";
+  t.style.cssText = "position:fixed;left:50%;bottom:76px;z-index:60;" +
+    "transform:translateX(-50%) translateY(8px);opacity:0;" +
+    "transition:opacity .22s ease,transform .22s ease;" +
+    "background:#0E0E0C;color:#FFFFFF;padding:12px 18px;border-radius:99px;font-weight:700;" +
+    "font-family:'Space Mono',ui-monospace,monospace;text-transform:uppercase;letter-spacing:.06em;" +
+    "font-size:11px;max-width:88%;text-align:center";
   document.body.appendChild(t);
-  setTimeout(() => t.remove(), 2600);
+  requestAnimationFrame(() => {
+    t.style.opacity = "1";
+    t.style.transform = "translateX(-50%) translateY(0)";
+  });
+  setTimeout(() => {
+    t.style.opacity = "0";
+    t.style.transform = "translateX(-50%) translateY(8px)";
+    setTimeout(() => t.remove(), 220);
+  }, 2400);
 }
 async function copia(txt, msg){
   try { await navigator.clipboard.writeText(txt); avviso(msg || "Copiato"); }
@@ -1082,9 +1372,10 @@ function inputCifre(input, onChange, decimali){
    ============================================================ */
 function render(){
   const dentro = !!(GID && D);
-  if (!dentro && vista !== "ingresso") vista = "ingresso";
-  $("#hdr").hidden  = !dentro;
-  $("#tabs").hidden = !dentro || vista === "nuova" || vista === "rimborso" || vista === "ingresso" || (vista === "chi" && !ME);
+  if (!dentro && vista !== "ingresso" && vista !== "intro") vista = "ingresso";
+  document.body.dataset.vista = vista;
+  $("#hdr").hidden  = !dentro || vista === "intro";
+  $("#tabs").hidden = !dentro || vista === "nuova" || vista === "rimborso" || vista === "ingresso" || vista === "intro" || (vista === "chi" && !ME);
   $$(".screen").forEach(s => { s.hidden = true; });
   $("#s-" + vista).hidden = false;
 
@@ -1104,11 +1395,12 @@ function render(){
   if (vista === "saldi")   renderSaldi();
   if (vista === "gruppo")  renderGruppo();
   if (vista === "profilo") renderProfilo();
+  if (vista === "intro") renderIntro();
 }
 
 /* ---------- chi sei ---------- */
 /* Costruisce un avatar: la foto se c'è, altrimenti l'iniziale su colore stabile. */
-const AV_COLORI = ["#6B4FA0","#2E9E7B","#E08A2B","#B85C9E","#5A6BD8","#D46A6A","#3AA0A0","#C2792E"];
+const AV_COLORI = ["#7B5CFF","#FF4E8E","#B84DFF","#E0568C","#9B6BFF","#FF7AB0","#8B5CF6","#D14A8A"];
 function avatarEl(m, grande){
   const el = document.createElement("span");
   el.className = "avatar" + (grande ? " lg" : "");
@@ -1171,21 +1463,29 @@ function testoCountdown(){
 
 function renderSpese(){
   const tutte = recs().filter(r => !r.deleted);
-  $("#tot-speso").textContent = eur(totaleSpeso(tutte)) + " €";
+  glitchIn($("#tot-speso"), eur(totaleSpeso(tutte)) + " €");
 
   const cd = $("#sp-countdown");
   const info = testoCountdown();
   if (info){
-    cd.hidden = false; cd.textContent = info.testo;
-    cd.className = "countdown" + (info.attiva ? " attiva" : "");
+    cd.hidden = false; scriviTesto(cd, info.testo);
+    cd.className = "rail-data" + (info.attiva ? " attiva" : "");
   } else {
     cd.hidden = true;
+  }
+
+  const id = identita();
+  const nudge = $("#sp-nudge");
+  const mancaFoto = !id.foto, mancaPay = !id.pay;
+  nudge.hidden = !(ME && mancaFoto && mancaPay);
+  if (!nudge.hidden){
+    $("#sp-nudge-testo").textContent = "Completa il profilo: foto e link per farti pagare.";
   }
 
   let mia = 0;
   for (const r of tutte){ const q = shares(r); if (ME && q[ME]) mia += q[ME]; }
   $("#tot-quota-k").textContent = ME ? "La tua quota" : "Quota";
-  $("#tot-quota").textContent   = eur(mia) + " €";
+  glitchIn($("#tot-quota"), eur(mia) + " €");
 
   const box = $("#lista-spese");
   box.innerHTML = "";
@@ -1204,9 +1504,7 @@ function renderSpese(){
       const h = document.createElement("div");
       h.className = "giorno"; h.textContent = dataLunga(r.date);
       box.appendChild(h);
-      gruppo = document.createElement("div");
-      gruppo.className = "card"; gruppo.style.padding = "2px 14px";
-      box.appendChild(gruppo);
+      gruppo = box;   // niente più riquadro: le voci galleggiano nella colonna
     }
     const b = document.createElement("button");
     b.type = "button";
@@ -1216,28 +1514,119 @@ function renderSpese(){
     if (r.kind === "payment"){
       sotto = "da " + nome(r.from) + " a " + nome(r.to);
     } else {
-      sotto = nome(r.payer) + " ha pagato · in " + Object.keys(q).length;
-      if (r.createdBy && r.createdBy !== r.payer) sotto += " · inserita da " + nome(r.createdBy);
+      sotto = nome(r.payer) + " · in " + Object.keys(q).length;
+      if (r.createdBy && r.createdBy !== r.payer) sotto += " · da " + nome(r.createdBy);
       if (ME && q[ME]) sotto += " · tu " + eur(q[ME]) + " €";
     }
-    b.innerHTML = '<span><span class="desc"></span><span class="chi"></span></span>' +
-                  '<span class="punti"></span><span class="eur"></span>';
-    b.querySelector(".desc").textContent = r.desc || (r.kind === "payment" ? "Rimborso" : "Spesa");
-    b.querySelector(".chi").textContent  = sotto;
-    b.querySelector(".eur").textContent  = eur(r.amountCents) + " €";
+    // il cerchio: foto del pagante se c'è, altrimenti la sua iniziale
+    const chiId = r.kind === "payment" ? r.from : r.payer;
+    const m = (D.meta.members || []).find(x => x.id === chiId);
+    const tondo = document.createElement("span");
+    tondo.className = "tondo";
+    if (m && m.foto){
+      const img = document.createElement("img");
+      img.src = m.foto; img.alt = "";
+      tondo.appendChild(img);
+    } else {
+      tondo.textContent = ((m && m.name) || "?").trim()[0].toUpperCase();
+    }
+    b.appendChild(tondo);
+
+    const testi = document.createElement("span");
+    testi.className = "testi";
+    testi.innerHTML = '<span class="desc"></span><span class="chi"></span>';
+    testi.querySelector(".desc").textContent = r.desc || (r.kind === "payment" ? "Rimborso" : "Spesa");
+    testi.querySelector(".chi").textContent  = sotto;
+    b.appendChild(testi);
+
+    const imp = document.createElement("span");
+    imp.className = "eur";
+    imp.textContent = eur(r.amountCents) + " €";
+    b.appendChild(imp);
+
     b.onclick = () => apriForm(r);
     gruppo.appendChild(b);
   }
 }
 
 /* ---------- saldi ---------- */
+/* Disegna la mappa: tu al centro, gli altri intorno, le linee dicono chi deve a chi.
+   Spessore = quanto. Rosa = ti devono. Lime = devi tu. */
+function renderMappa(net){
+  const svg = $("#mappa");
+  if (!svg) return;
+  svg.innerHTML = "";
+  const NS = "http://www.w3.org/2000/svg";
+  const el = (t, a) => { const e = document.createElementNS(NS, t);
+    for (const k in a) e.setAttribute(k, a[k]); return e; };
+
+  const altri = Object.keys(net).filter(id => id !== ME);
+  if (!ME || !altri.length){ svg.innerHTML = ""; return; }
+
+  const cx = 160, cy = 165, raggio = 103;
+  const maxAbs = Math.max(1, ...altri.map(id => Math.abs(net[id])));
+
+  // le linee per prime, così restano sotto ai cerchi
+  altri.forEach((id, i) => {
+    const ang = (i / altri.length) * Math.PI * 2 - Math.PI / 2;
+    const x = cx + Math.cos(ang) * raggio, y = cy + Math.sin(ang) * raggio;
+    const v = net[id];
+    const spess = 2 + (Math.abs(v) / maxAbs) * 9;
+    // bianco se deve dare a te, rosa se sei tu a dovere
+    const col = v < 0 ? "#FFFFFF" : "#FF4E8E";
+    // la linea si ferma al bordo del cerchio, non sotto: l'etichetta resta pulita
+    const rNodo = 19 + (Math.abs(v) / maxAbs) * 11;
+    const xf = x - Math.cos(ang) * rNodo, yf = y - Math.sin(ang) * rNodo;
+    const l = el("line", { x1: cx, y1: cy, x2: xf, y2: yf, stroke: col,
+      "stroke-width": spess.toFixed(1), class: "filo" });
+    l.style.animationDelay = (i * 90) + "ms";
+    svg.appendChild(l);
+  });
+
+  // gli altri, dimensione proporzionale a quanto pesano
+  altri.forEach((id, i) => {
+    const ang = (i / altri.length) * Math.PI * 2 - Math.PI / 2;
+    const x = cx + Math.cos(ang) * raggio, y = cy + Math.sin(ang) * raggio;
+    const v = net[id];
+    const r = 19 + (Math.abs(v) / maxAbs) * 11;
+    const g = el("g", { class: "nodo" });
+    g.style.transformOrigin = x + "px " + y + "px";
+    g.style.animationDelay = (240 + i * 90) + "ms";
+    const m = (D.meta.members || []).find(x2 => x2.id === id);
+    let h = 0; for (let k = 0; k < id.length; k++) h = (h * 31 + id.charCodeAt(k)) >>> 0;
+    g.appendChild(el("circle", { cx: x, cy: y, r: r.toFixed(1),
+      fill: AV_COLORI[h % AV_COLORI.length] }));
+    const ini = el("text", { x: x, y: y + 5, "text-anchor": "middle",
+      class: "et", "font-size": "14" });
+    ini.textContent = ((m && m.name) || "?").trim()[0].toUpperCase();
+    g.appendChild(ini);
+    const fuoriY = Math.sin(ang) >= 0 ? y + r + 16 : y - r - 8;
+    const imp = el("text", { x: x, y: fuoriY, "text-anchor": "middle", class: "et-fuori" });
+    imp.textContent = eur(Math.abs(v)) + " €";
+    g.appendChild(imp);
+    svg.appendChild(g);
+  });
+
+  // tu al centro, più grande di tutti
+  const gTu = el("g", { class: "nodo" });
+  gTu.style.transformOrigin = cx + "px " + cy + "px";
+  gTu.appendChild(el("circle", { cx: cx, cy: cy, r: 36, fill: "#7B5CFF" }));
+  const t1 = el("text", { x: cx, y: cy - 2, "text-anchor": "middle", class: "et", "font-size": "13" });
+  t1.textContent = "TU";
+  gTu.appendChild(t1);
+  const t2 = el("text", { x: cx, y: cy + 14, "text-anchor": "middle", class: "et", "font-size": "11", opacity: ".85" });
+  t2.textContent = eur(net[ME] || 0, true);
+  gTu.appendChild(t2);
+  svg.appendChild(gTu);
+}
+
 function renderSaldi(){
   const net = balances(D.meta.members, recs());
   const mio = ME ? (net[ME] || 0) : 0;
   const big = $("#mio-v");
   big.className = "big " + (mio > 0 ? "pos" : mio < 0 ? "neg" : "");
-  big.textContent = eur(mio, true) + " €";
-  $("#mio-k").textContent = !ME ? "Posizione" : mio > 0 ? "Ti devono" : mio < 0 ? "Devi dare" : "Sei in pari";
+  glitchIn(big, eur(mio, true) + " €");
+  scriviTesto($("#mio-k"), (!ME ? "Posizione" : mio > 0 ? "Ti devono" : mio < 0 ? "Devi dare" : "Sei in pari").toUpperCase(), 30);
 
   const box = $("#saldi-lista");
   box.innerHTML = "";
@@ -1253,6 +1642,8 @@ function renderSaldi(){
     box.appendChild(d);
   }
 
+  renderMappa(net);
+
   const mov = settle(net);
   const mb = $("#mov-lista");
   mb.innerHTML = "";
@@ -1262,28 +1653,45 @@ function renderSaldi(){
     for (const m of mov){
       const dest = (D.meta.members || []).find(x => x.id === m.to);
       const link = dest && normalizzaLink(dest.pay);
-      const d = document.createElement("div");
-      d.className = "mov";
-      d.innerHTML = '<span class="da"></span><span class="frecc">→</span><span class="a"></span>' +
-                    '<span class="mov-sp"></span><span class="eur"></span>';
-      d.querySelector(".da").textContent  = nome(m.from);
-      d.querySelector(".a").textContent   = nome(m.to);
-      d.querySelector(".eur").textContent = eur(m.amount) + " €";
-      mb.appendChild(d);
-      // sempre disponibile: se questi soldi sono già passati di mano fuori dall'app, si segna qui in un tocco
-      const segna = document.createElement("button");
-      segna.type = "button"; segna.className = "btn btn-ghost btn-mini btn-segna";
-      segna.textContent = "Segna come già dato";
-      segna.onclick = () => apriRimborso(null, { from: m.from, to: m.to, amount: m.amount });
-      mb.appendChild(segna);
-      // tasto Paga: solo se sei tu a dover pagare e il destinatario ha messo il link
-      if (m.from === ME && link){
+
+      const card = document.createElement("div");
+      card.className = "mov-card";
+
+      const riga = document.createElement("div");
+      riga.className = "mov";
+      riga.innerHTML = '<span class="da"></span><span class="frecc">→</span><span class="a"></span>' +
+                        '<span class="mov-sp"></span><span class="eur"></span>';
+      riga.querySelector(".da").textContent  = nome(m.from);
+      riga.querySelector(".a").textContent   = nome(m.to);
+      riga.querySelector(".eur").textContent = eur(m.amount) + " €";
+      card.appendChild(riga);
+
+      const azioni = document.createElement("div");
+      azioni.className = "mov-azioni";
+
+      // Paga: sempre presente. Se il destinatario ha un link, lo apre; altrimenti lo spiega.
+      if (link){
         const a = document.createElement("a");
-        a.className = "btn btn-primary btn-paga";
+        a.className = "btn btn-primary";
         a.href = link; a.target = "_blank"; a.rel = "noopener noreferrer";
-        a.textContent = "Paga " + nome(m.to) + " · " + eur(m.amount) + " €";
-        mb.appendChild(a);
+        a.textContent = "Paga";
+        azioni.appendChild(a);
+      } else {
+        const a = document.createElement("button");
+        a.type = "button"; a.className = "btn btn-primary";
+        a.textContent = "Paga";
+        a.onclick = () => avviso(nome(m.to) + " non ha ancora messo un link per farsi pagare.");
+        azioni.appendChild(a);
       }
+      // Rimborsato: sempre disponibile, per chi ha già dato/ricevuto i soldi a mano
+      const rimb = document.createElement("button");
+      rimb.type = "button"; rimb.className = "btn btn-rimborsato";
+      rimb.textContent = "Rimborsato";
+      rimb.onclick = () => apriRimborso(null, { from: m.from, to: m.to, amount: m.amount });
+      azioni.appendChild(rimb);
+
+      card.appendChild(azioni);
+      mb.appendChild(card);
     }
   }
 }
@@ -1291,7 +1699,7 @@ function renderSaldi(){
 function testoRiepilogo(){
   const net = balances(D.meta.members, recs());
   const righe = [];
-  righe.push(D.meta.name + " — cassa comune");
+  righe.push(D.meta.name + " — Calculon");
   righe.push("Totale speso: " + eur(totaleSpeso(recs().filter(r => !r.deleted))) + " €");
   righe.push("");
   righe.push("Saldi:");
@@ -1317,10 +1725,6 @@ function renderGruppo(){
   $("#g-data-fine").value   = D.meta.dataFine   || "";
   const info = testoCountdown();
   $("#g-countdown").textContent = info ? info.testo : "Imposta le date per vedere il conto alla rovescia.";
-
-  $("#g-conferma-elimina").value = "";
-  $("#g-conferma-elimina").placeholder = D.meta.name;
-  $("#btn-elimina-gruppo").disabled = true;
 
   const box = $("#g-membri");
   box.innerHTML = "";
@@ -1348,11 +1752,20 @@ function renderGruppo(){
 }
 
 /* ---------- profilo ---------- */
+/* ---------- intro obbligatoria ---------- */
+function renderIntro(){
+  const id = identita();
+  const av = $("#in-avatar");
+  if (av){ av.innerHTML = ""; av.appendChild(avatarEl({ id: "io", name: $("#in-nome").value.trim() || "?", foto: id.foto }, true)); }
+  if (id.pay && !$("#in-pay").value) $("#in-pay").value = id.pay;
+}
+
 function renderProfilo(){
   const id = identita();
+  $("#pf-saluto").textContent = id.nome ? "Ciao, " + id.nome + "!" : "Ciao!";
 
   const av = $("#pf-avatar");
-  if (av){ av.innerHTML = ""; av.appendChild(avatarEl({ id: "io", name: nome(ME) || "?", foto: id.foto }, true)); }
+  if (av){ av.innerHTML = ""; av.appendChild(avatarEl({ id: "io", name: nome(ME) || id.nome || "?", foto: id.foto }, true)); }
   $("#btn-foto-rm").hidden = !id.foto;
   $("#pf-pay").value = id.pay || "";
 
@@ -1697,6 +2110,25 @@ function installaGruppo(stato){
 /* ============================================================
    EVENTI
    ============================================================ */
+$("#in-nome").addEventListener("input", () => {
+  $("#btn-intro-continua").disabled = !$("#in-nome").value.trim();
+});
+$("#in-btn-foto").onclick = () => { $("#foto-file").click(); };
+$("#btn-intro-continua").onclick = () => {
+  const n = $("#in-nome").value.trim();
+  if (!n) return;
+  const patch = { nome: n };
+  const grezzo = $("#in-pay").value.trim();
+  if (grezzo){
+    const link = normalizzaLink(grezzo);
+    if (!link){ avviso("Questo link non sembra valido: correggilo o lascialo vuoto."); return; }
+    patch.pay = link;
+  }
+  salvaIdentita(patch);
+  vista = (GID && D) ? (ME ? "spese" : "chi") : "ingresso";
+  render();
+};
+
 $("#btn-entra").onclick = () => entra($("#in-code").value.trim().toUpperCase());
 $("#in-code").addEventListener("input", (ev) => {
   ev.target.value = ev.target.value.toUpperCase().replace(/[^A-HJ-NP-Z2-9]/g, "").slice(0, 6);
@@ -1772,12 +2204,31 @@ $("#btn-salva-date").onclick = () => {
   render();
   avviso("Date salvate");
 };
-$("#g-conferma-elimina").addEventListener("input", () => {
-  $("#btn-elimina-gruppo").disabled = $("#g-conferma-elimina").value.trim() !== D.meta.name;
+/* Il tasto rosso non cancella: apre il popup di conferma. */
+function apriPopupElimina(){
+  if (!D) return;
+  $("#pop-nome").textContent = D.meta.name;
+  const inp = $("#g-conferma-elimina");
+  inp.value = "";
+  $("#pop-conferma").disabled = true;
+  $("#velo-elimina").hidden = false;
+  setTimeout(() => inp.focus(), 60);
+}
+function chiudiPopupElimina(){ $("#velo-elimina").hidden = true; }
+
+$("#btn-elimina-gruppo").onclick = apriPopupElimina;
+$("#pop-annulla").onclick = chiudiPopupElimina;
+$("#velo-elimina").addEventListener("click", (ev) => {
+  if (ev.target === $("#velo-elimina")) chiudiPopupElimina();
 });
-$("#btn-elimina-gruppo").onclick = async () => {
-  if ($("#g-conferma-elimina").value.trim() !== D.meta.name) return;
-  if (!confirm('Cancellare per sempre "' + D.meta.name + '" per TUTTI i partecipanti? Non si può annullare.')) return;
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && !$("#velo-elimina").hidden) chiudiPopupElimina();
+});
+$("#g-conferma-elimina").addEventListener("input", () => {
+  $("#pop-conferma").disabled = $("#g-conferma-elimina").value.trim().toLowerCase() !== "cancellare";
+});
+$("#pop-conferma").onclick = async () => {
+  if (!D || $("#g-conferma-elimina").value.trim().toLowerCase() !== "cancellare") return;
   const daVia = GID;
   try {
     const r = await fetch(API + "/api/group/" + daVia, { method: "DELETE" });
@@ -1786,6 +2237,7 @@ $("#btn-elimina-gruppo").onclick = async () => {
     avviso("Server irraggiungibile, riprova quando sei online.");
     return;
   }
+  chiudiPopupElimina();
   localStorage.removeItem("cc.data." + daVia);
   localStorage.removeItem("cc.outbox." + daVia);
   localStorage.removeItem("cc.me." + daVia);
@@ -1844,6 +2296,8 @@ $("#foto-file").onchange = (ev) => {
   img.onerror = () => { URL.revokeObjectURL(url); avviso("Immagine non leggibile"); };
   img.src = url;
 };
+
+$("#sp-nudge-vai").onclick    = () => vaiA("profilo");
 $("#btn-esci").onclick = () => {
   if (!confirm("Uscire da questo gruppo su questo telefono? Le voci non ancora inviate andranno perse.")) return;
   const uscito = GID;
@@ -1874,7 +2328,7 @@ if (GID){
   caricaGruppo(GID);
   if (!D){ localStorage.removeItem("cc.group"); GID = null; }
 }
-vista = (GID && D) ? (ME ? "spese" : "chi") : "ingresso";
+vista = !identita().nome ? "intro" : (GID && D) ? (ME ? "spese" : "chi") : "ingresso";
 render();
 
 window.addEventListener("online",  () => { statoSync(); tentaSync(); });
