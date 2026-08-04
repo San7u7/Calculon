@@ -273,6 +273,8 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
 .mov-sp{flex:1}
 .btn-paga{display:block;width:100%;margin:6px 0 14px;text-align:center;text-decoration:none;
   font-size:14px;padding:12px 16px}
+.btn-segna{display:block;width:100%;margin:2px 0 12px;text-align:center;font-size:13px;
+  padding:8px 14px;min-height:36px}
 
 /* ---------- gruppo ---------- */
 .codice{font-family:var(--mono);font-size:40px;font-weight:500;letter-spacing:.16em;text-align:center;
@@ -542,6 +544,26 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
         <input id="pf-pay" type="text" inputmode="url" autocomplete="off"
                placeholder="paypal.me/iltuonome">
         <button class="btn btn-primary w" id="btn-salva-pay" type="button">Salva il link</button>
+      </div>
+
+      <div class="card">
+        <h2 class="ttl">Le tue spese personali</h2>
+        <p class="nota" style="margin-top:0">Solo per tenerne conto tu: non entrano nel totale del gruppo, non si dividono con nessuno, e restano solo su questo telefono.</p>
+        <div class="tot" style="margin:14px 0;padding:16px 18px">
+          <div class="k">Hai speso di tasca tua, in questa vacanza</div>
+          <div class="big eur" id="pf-tot-personali" style="font-size:32px">0,00 €</div>
+        </div>
+
+        <label class="lbl" for="pfp-amt">Quanto</label>
+        <div class="importo-wrap">
+          <input id="pfp-amt" class="importo" style="font-size:32px;min-height:44px" type="text" inputmode="numeric" placeholder="0,00" autocomplete="off">
+          <span class="sim">€</span>
+        </div>
+        <label class="lbl" for="pfp-desc">Per cosa</label>
+        <input id="pfp-desc" type="text" placeholder="Gelato, souvenir, benzina del motorino..." autocomplete="off">
+        <button class="btn btn-primary w" id="btn-add-personale" type="button">+ Aggiungi</button>
+
+        <div id="pf-personali-lista" style="margin-top:8px"></div>
       </div>
 
       <div class="card">
@@ -816,6 +838,18 @@ function salvaIdentita(patch){
   lsSetJson("cc.identity", id);
   propagaIdentita();
   return id;
+}
+
+/* ---------- spese personali: private, solo su questo telefono, mai sincronizzate col gruppo ---------- */
+function personali(gid){ return lsJson("cc.personali." + gid, []); }
+function salvaPersonali(gid, arr){ lsSetJson("cc.personali." + gid, arr); }
+function aggiungiPersonale(gid, desc, amountCents){
+  const arr = personali(gid);
+  arr.push({ id: codice(6), desc: desc || "Spesa", amountCents, date: oggiISO(), createdAt: Date.now() });
+  salvaPersonali(gid, arr);
+}
+function togliPersonale(gid, id){
+  salvaPersonali(gid, personali(gid).filter(x => x.id !== id));
 }
 
 /* Elenca tutti i gruppi presenti su questo telefono, scandendo le chiavi cc.data.* */
@@ -1236,6 +1270,12 @@ function renderSaldi(){
       d.querySelector(".a").textContent   = nome(m.to);
       d.querySelector(".eur").textContent = eur(m.amount) + " €";
       mb.appendChild(d);
+      // sempre disponibile: se questi soldi sono già passati di mano fuori dall'app, si segna qui in un tocco
+      const segna = document.createElement("button");
+      segna.type = "button"; segna.className = "btn btn-ghost btn-mini btn-segna";
+      segna.textContent = "Segna come già dato";
+      segna.onclick = () => apriRimborso(null, { from: m.from, to: m.to, amount: m.amount });
+      mb.appendChild(segna);
       // tasto Paga: solo se sei tu a dover pagare e il destinatario ha messo il link
       if (m.from === ME && link){
         const a = document.createElement("a");
@@ -1316,6 +1356,8 @@ function renderProfilo(){
   $("#btn-foto-rm").hidden = !id.foto;
   $("#pf-pay").value = id.pay || "";
 
+  renderPersonali();
+
   const box = $("#pf-gruppi");
   box.innerHTML = "";
   const elenco = tuttiIGruppi().sort((a, b) => a.name.localeCompare(b.name));
@@ -1338,6 +1380,32 @@ function renderProfilo(){
       b.onclick = () => passaAlGruppo(g.id);
       riga.appendChild(b);
     }
+    box.appendChild(riga);
+  }
+}
+
+function renderPersonali(){
+  if (!GID) return;
+  const arr = personali(GID).slice().sort((a, b) => b.createdAt - a.createdAt);
+  const tot = arr.reduce((s, x) => s + x.amountCents, 0);
+  $("#pf-tot-personali").textContent = eur(tot) + " €";
+
+  const box = $("#pf-personali-lista");
+  box.innerHTML = "";
+  if (!arr.length) return;
+  for (const x of arr){
+    const riga = document.createElement("div");
+    riga.className = "voce";
+    riga.innerHTML = '<span><span class="desc"></span><span class="chi"></span></span><span class="eur"></span>';
+    riga.querySelector(".desc").textContent = x.desc;
+    riga.querySelector(".chi").textContent  = dataLunga(x.date);
+    riga.querySelector(".eur").textContent  = eur(x.amountCents) + " €";
+    const rm = document.createElement("button");
+    rm.type = "button"; rm.className = "btn btn-mini"; rm.textContent = "Togli";
+    rm.style.marginLeft = "8px"; rm.style.flex = "none";
+    rm.onclick = () => { togliPersonale(GID, x.id); renderPersonali(); };
+    riga.querySelector("span").style.flex = "1";
+    riga.appendChild(rm);
     box.appendChild(riga);
   }
 }
@@ -1463,7 +1531,7 @@ function salvaSpesa(){
 /* ---------- rimborso ---------- */
 let rbAmt = 0;
 
-function apriRimborso(rec){
+function apriRimborso(rec, preset){
   modifica = rec || null;
   const viv = membri();
   for (const s of [$("#rb-from"), $("#rb-to")]){
@@ -1481,6 +1549,15 @@ function apriRimborso(rec){
     $("#rb-amt").value  = fmtCifre(String(rec.amountCents));
     $("#rb-date").value = rec.date;
     $("#rb-ttl").textContent = "Modifica rimborso";
+    notaRimborso();
+  } else if (preset){
+    // aperto da un movimento preciso in Saldi: niente auto-scelta, uso esattamente quello
+    $("#rb-from").value = preset.from;
+    $("#rb-to").value   = preset.to;
+    rbAmt = preset.amount;
+    $("#rb-amt").value  = fmtCifre(String(preset.amount));
+    $("#rb-date").value = oggiISO();
+    $("#rb-ttl").textContent = "Segna come già dato";
     notaRimborso();
   } else {
     const net = balances(D.meta.members, recs());
@@ -1636,6 +1713,16 @@ $("#btn-crea").onclick = crea;
 $("#btn-nuova").onclick    = () => apriForm(null);
 $("#btn-rimborso").onclick = () => apriRimborso(null);
 
+let pfpAmt = 0;
+inputCifre($("#pfp-amt"), (v) => { pfpAmt = v; }, true);
+$("#btn-add-personale").onclick = () => {
+  if (!GID){ avviso("Entra prima in un gruppo."); return; }
+  if (pfpAmt <= 0){ avviso("Metti un importo."); return; }
+  aggiungiPersonale(GID, $("#pfp-desc").value.trim(), pfpAmt);
+  $("#pfp-amt").value = ""; $("#pfp-desc").value = ""; pfpAmt = 0;
+  renderPersonali();
+};
+
 inputCifre($("#sp-amt"), (v) => { form.amt = v; aggiornaQuota(); }, true);
 $("#sp-salva").onclick   = salvaSpesa;
 $("#sp-annulla").onclick = () => { modifica = null; vaiA("spese"); };
@@ -1702,6 +1789,7 @@ $("#btn-elimina-gruppo").onclick = async () => {
   localStorage.removeItem("cc.data." + daVia);
   localStorage.removeItem("cc.outbox." + daVia);
   localStorage.removeItem("cc.me." + daVia);
+  localStorage.removeItem("cc.personali." + daVia);
   const altri = tuttiIGruppi().filter(g => g.id !== daVia);
   if (altri.length){
     passaAlGruppo(altri[0].id);
@@ -1762,6 +1850,7 @@ $("#btn-esci").onclick = () => {
   localStorage.removeItem("cc.data." + uscito);
   localStorage.removeItem("cc.outbox." + uscito);
   localStorage.removeItem("cc.me." + uscito);
+  localStorage.removeItem("cc.personali." + uscito);
   const altri = tuttiIGruppi().filter(g => g.id !== uscito);
   if (altri.length){
     passaAlGruppo(altri[0].id);

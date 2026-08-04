@@ -1,6 +1,6 @@
 {
-  "name": "Cassa comune",
-  "short_name": "Cassa comune",
+  "name": "Calculon",
+  "short_name": "Calculon",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",

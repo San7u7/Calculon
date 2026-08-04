@@ -1,7 +1,7 @@
-/* Cassa comune — service worker.
+/* Calculon — service worker.
    Registrato con percorso relativo da index.html: navigator.serviceWorker.register("./sw.js")
    Cambia il numero di versione a ogni rilascio, o gli aggiornamenti non arrivano mai. */
-const CACHE = "cc-v3";
+const CACHE = "cc-v6";
 
 /* Guscio: tutto relativo, perché il sito sta in una sottocartella di GitHub Pages. */
 const GUSCIO = [
