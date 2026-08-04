@@ -43,8 +43,6 @@
   --r:26px;
   --r-sm:16px;
   --tap:48px;
-  /* onda del mare: due sole gobbe, stirata su tutta la barra. Disegno mio. */
-  --onda:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='12' viewBox='0 0 200 12' preserveAspectRatio='none'%3E%3Cpath d='M0 0 H200 V3 C150 3 150 12 100 12 C50 12 50 3 0 3 Z' fill='%23000'/%3E%3C/svg%3E");
 }
 *{box-sizing:border-box}
 html,body{margin:0;padding:0}
@@ -75,20 +73,24 @@ button{cursor:pointer}
 
 /* ---------- intestazione ---------- */
 .hdr{
+  position:relative;
   position:sticky;top:0;z-index:20;
   display:flex;align-items:center;gap:12px;
   padding:0;padding-top:env(safe-area-inset-top);
-  margin:0 0 6px;
-  background:rgba(244,247,250,.62);
+  margin:0 0 18px;
+  background:rgba(244,247,250,.86);
   -webkit-backdrop-filter:blur(22px) saturate(1.6);backdrop-filter:blur(22px) saturate(1.6);
   box-shadow:0 6px 22px rgba(30,90,140,.05);
 }
-/* onda del mare sotto l'header */
-.hdr::after{content:"";position:absolute;left:0;right:0;bottom:-10px;height:11px;
-  background:#EEF3F8;
-  -webkit-mask:var(--onda);mask:var(--onda);
-  -webkit-mask-size:100% 11px;mask-size:100% 11px;-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;
-  pointer-events:none}
+/* due gobbe piene, saldate al bordo: mai trasparenti, non lasciano intravedere nulla dietro */
+.hdr::before,.hdr::after{
+  content:"";position:absolute;top:100%;width:64px;height:16px;border-radius:50%;
+  background:rgba(244,247,250,.86);
+  -webkit-backdrop-filter:blur(22px) saturate(1.6);backdrop-filter:blur(22px) saturate(1.6);
+  margin-top:-8px;pointer-events:none;
+}
+.hdr::before{left:27%;transform:translateX(-50%)}
+.hdr::after{left:73%;transform:translateX(-50%)}
 .hdr-in{display:flex;align-items:center;gap:12px;
   max-width:440px;margin:0 auto;width:100%;padding:16px 20px 15px}
 .mark{
@@ -137,14 +139,16 @@ h2.ttl{font-size:12px;letter-spacing:.14em;text-transform:uppercase;font-weight:
   color:var(--grigio);font-weight:600;margin:16px 0 7px}
 .lbl:first-of-type{margin-top:0}
 input[type=text],input[type=date],select{
-  width:100%;min-height:var(--tap);padding:12px 15px;
+  width:100%;min-width:0;max-width:100%;box-sizing:border-box;
+  min-height:var(--tap);padding:12px 15px;
   background:rgba(255,255,255,.5);border:1px solid var(--vetro-bordo);
   border-radius:var(--r-sm);
 }
+input[type=date]{-webkit-appearance:none;appearance:none;}
 input:focus,select:focus{background:rgba(255,255,255,.7);border-color:var(--sole-2);
   box-shadow:0 0 0 3px rgba(30,143,213,.14)}
-select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--inchiostro) 50%),
-  linear-gradient(135deg,var(--inchiostro) 50%,transparent 50%);
+select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--sole-2) 50%),
+  linear-gradient(135deg,var(--sole-2) 50%,transparent 50%);
   background-position:calc(100% - 18px) 21px,calc(100% - 13px) 21px;
   background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:38px}
 select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
@@ -207,38 +211,31 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
 .azioni{position:sticky;bottom:0;display:flex;gap:10px;padding:14px 0 30px;margin-top:8px;
   background:linear-gradient(transparent,var(--carta2) 35%)}
 .azioni .btn{flex:1}
-.tabs{position:sticky;bottom:0;z-index:20;display:flex;padding:0;
-  padding-bottom:env(safe-area-inset-bottom);margin:0;
-  background:rgba(255,255,255,.6);
+.tabs{position:relative;position:sticky;bottom:0;z-index:20;display:flex;padding:0;
+  padding-bottom:env(safe-area-inset-bottom);margin:18px 0 0;
+  background:rgba(255,255,255,.86);
   -webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);
   box-shadow:0 -6px 22px rgba(30,90,140,.05)}
-/* onda del mare sopra i tab (capovolta rispetto all'header) */
-.tabs::before{content:"";position:absolute;left:0;right:0;top:-10px;height:11px;
-  background:#FBFCFE;
-  -webkit-mask:var(--onda);mask:var(--onda);
-  -webkit-mask-size:100% 11px;mask-size:100% 11px;-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;
-  transform:scaleY(-1);pointer-events:none}
-.tabs-in{display:flex;gap:6px;max-width:440px;margin:0 auto;width:100%;padding:8px 12px}
+/* due gobbe piene, saldate al bordo: mai trasparenti, non lasciano intravedere nulla dietro */
+.tabs::before,.tabs::after{
+  content:"";position:absolute;bottom:100%;width:64px;height:16px;border-radius:50%;
+  background:rgba(255,255,255,.86);
+  -webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);
+  margin-bottom:-8px;pointer-events:none;
+}
+.tabs::before{left:27%;transform:translateX(-50%)}
+.tabs::after{left:73%;transform:translateX(-50%)}
+.tabs-in{display:flex;gap:6px;max-width:440px;margin:0 auto;width:100%;padding:16px 12px 8px}
 .tabs button{flex:1;min-height:48px;background:transparent;border:0;font-weight:700;font-size:14px;
   letter-spacing:0;color:var(--grigio);padding:6px 4px;border-radius:99px}
 .tabs button[aria-current="page"]{color:#fff;background:var(--sole);
   box-shadow:0 4px 14px rgba(30,143,213,.3)}
 
 /* ---------- editor divisione ---------- */
-.modi{display:grid;grid-template-columns:repeat(4,1fr);gap:0;border:2px solid var(--inchiostro);
-  border-radius:var(--r);overflow:hidden}
-.modi button{min-height:var(--tap);border:0;border-right:1px solid var(--inchiostro);
-  background:var(--foglio);font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
-.modi button:last-child{border-right:0}
-.modi button[aria-pressed="true"]{background:var(--inchiostro);color:var(--carta)}
 .pers{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--linea);min-height:var(--tap)}
 .pers:last-of-type{border-bottom:0}
 .pers label{flex:1;display:flex;align-items:center;gap:10px;min-height:var(--tap);font-weight:600}
-.pers input[type=checkbox]{width:24px;height:24px;accent-color:var(--inchiostro);flex:none}
-.peso{width:78px;flex:none;text-align:right;font-family:var(--mono);font-weight:700;
-  min-height:38px;padding:6px 8px}
-.quota{width:82px;flex:none;text-align:right;font-family:var(--mono);font-size:14px;
-  font-variant-numeric:tabular-nums;color:var(--grigio)}
+.pers input[type=checkbox]{width:24px;height:24px;accent-color:var(--sole-2);flex:none}
 .quadra{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:13px 16px;
   border:1px solid var(--vetro-bordo);border-radius:var(--r-sm);font-size:14px;font-weight:600;
   background:rgba(255,255,255,.3);color:var(--grigio)}
@@ -1077,7 +1074,7 @@ function render(){
 
 /* ---------- chi sei ---------- */
 /* Costruisce un avatar: la foto se c'è, altrimenti l'iniziale su colore stabile. */
-const AV_COLORI = ["#1E8FD5","#2E9E7B","#E08A2B","#B85C9E","#5A6BD8","#D46A6A","#3AA0A0","#C2792E"];
+const AV_COLORI = ["#6B4FA0","#2E9E7B","#E08A2B","#B85C9E","#5A6BD8","#D46A6A","#3AA0A0","#C2792E"];
 function avatarEl(m, grande){
   const el = document.createElement("span");
   el.className = "avatar" + (grande ? " lg" : "");
