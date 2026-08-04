@@ -1501,7 +1501,7 @@ async function entra(code){
     if (!r.ok) throw new Error("http " + r.status);
     installaGruppo(await r.json());
   } catch (err){
-    e.textContent = "Server irraggiungibile. Riprova.";
+    e.textContent = "Server irraggiungibile. Riprova. (" + (err && err.message || err) + ")";
     e.hidden = false;
   }
 }
@@ -1523,7 +1523,7 @@ async function crea(){
     if (!r.ok) throw new Error("http " + r.status);
     installaGruppo(await r.json());
   } catch (err){
-    e.textContent = "Server irraggiungibile. Riprova.";
+    e.textContent = "Server irraggiungibile. Riprova. (" + (err && err.message || err) + ")";
     e.hidden = false;
   }
 }
