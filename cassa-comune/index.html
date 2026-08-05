@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#1E8FD5">
+<meta name="theme-color" content="#F7F3FF">
 <title>Calculon</title>
 <link rel="icon" href="./favicon-32.png" sizes="32x32" type="image/png">
 <link rel="icon" href="./favicon-16.png" sizes="16x16" type="image/png">
@@ -74,6 +74,14 @@
 *{box-sizing:border-box}
 /* l'attributo hidden deve vincere su qualsiasi display impostato dalle classi */
 [hidden]{display:none!important}
+/* niente scorrimento laterale accidentale: su mobile è il difetto più fastidioso */
+html,body{overflow-x:hidden;max-width:100%}
+/* i testi lunghi vanno a capo invece di sfondare */
+.desc,.chi,.nota,.lead,.gname,.passo span,.membro .nome,.pop-testo{overflow-wrap:anywhere}
+/* niente evidenziazione grigia al tocco su iPhone */
+button,a,.voce,.scelta,.membro{-webkit-tap-highlight-color:transparent}
+/* i campi non fanno ingrandire la pagina quando ci scrivi dentro */
+input,select,textarea{font-size:16px}
 html,body{margin:0;padding:0}
 body{
   background:var(--carta);
@@ -90,8 +98,8 @@ body::before{
   background:
     radial-gradient(closest-side circle at 28% 22%, rgba(123,92,255,.55), transparent),
     radial-gradient(closest-side circle at 76% 34%, rgba(255,78,142,.48), transparent),
-    radial-gradient(closest-side circle at 48% 78%, rgba(184,240,60,.42), transparent),
-    radial-gradient(closest-side circle at 84% 82%, rgba(60,224,224,.32), transparent);
+    radial-gradient(closest-side circle at 48% 78%, rgba(255,176,92,.40), transparent),
+    radial-gradient(closest-side circle at 84% 82%, rgba(255,138,128,.32), transparent);
   filter:blur(48px);
   animation:deriva 26s ease-in-out infinite alternate;
 }
@@ -120,16 +128,22 @@ button{cursor:pointer}
 }
 .hdr-in{display:flex;align-items:center;gap:12px;
   max-width:440px;margin:0 auto;width:100%;padding:16px 20px 15px}
-.mark{
-  width:32px;height:32px;flex:none;border-radius:50%;background:var(--sole);
-  display:grid;place-items:center}
-.mark svg{width:22px;height:22px;display:block}
-.gname{font-family:var(--sf);font-weight:700;font-size:18px;letter-spacing:-.02em;flex:1;min-width:0;
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* il logo al posto del titolo nelle schermate d'ingresso */
+.tit-logo{margin:6px 0 16px;line-height:0}
+.logo-titolo{width:100%;max-width:236px;height:auto;display:block}
+@media (max-width:400px){ .logo-titolo{max-width:212px} }
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.mark{flex:none;display:block;line-height:0}
+.mark svg{width:96px;height:auto;display:block}
+@media (max-width:400px){ .mark svg{width:84px} }
+.gname{font-family:var(--sf);font-weight:500;font-size:13px;letter-spacing:-.01em;flex:1;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--grigio);
+  padding-left:2px;border-left:1px solid var(--linea);margin-left:2px;padding-top:1px}
+@media (max-width:400px){ .gname{font-size:12px} }
 .sync{
   font-family:var(--sf);font-size:10px;font-weight:700;letter-spacing:.08em;
   text-transform:uppercase;border:0;background:rgba(255,255,255,.7);color:var(--grigio);
-  border-radius:99px;padding:7px 12px;min-height:32px;white-space:nowrap;
+  border-radius:99px;padding:11px 14px;min-height:44px;white-space:nowrap;display:inline-flex;align-items:center;
   transition:background-color .25s ease,color .25s ease;
 }
 .sync[data-st="attesa"]{background:var(--sole);color:#fff}
@@ -298,7 +312,7 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
   box-shadow:none;transform:none;cursor:not-allowed}
 .btn-ghost{background:rgba(255,255,255,.7);color:var(--inchiostro);box-shadow:0 4px 14px rgba(26,18,48,.08)}
 .btn.w{width:100%;margin-top:18px;display:block}
-.btn-mini{min-height:38px;padding:8px 14px;font-size:11px;font-weight:700}
+.btn-mini{min-height:44px;padding:10px 16px;font-size:11px;font-weight:700}
 .row-actions{display:flex;gap:10px;margin-top:18px}
 .row-actions .btn{flex:1}
 
@@ -476,34 +490,94 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
   *{transition:none!important;animation:none!important}
   .btn-primary:active{transform:none}
 }
+
+/* ══════════════════════════════════════════════════════════════
+   ADATTAMENTO AGLI SCHERMI STRETTI
+   Sotto i 400px lo spazio è poco: si stringono i rientri, non i testi.
+   ══════════════════════════════════════════════════════════════ */
+@media (max-width:400px){
+  :root{ --pad-pagina:14px; --gap-sez:28px; --gap-nota:18px; --gap-campo:18px; }
+  /* il filo si avvicina al bordo: guadagno 12px di larghezza utile */
+  .colonna{padding-left:34px}
+  .colonna::before{left:11px}
+  .voce::before{left:-28px}
+  .giorno::before{left:-26px}
+  .filo-lista{padding-left:34px}
+  .filo-lista::before{left:11px}
+  .filo-lista > *::after{left:-28px}
+  /* il cerchio del pagante si stringe un po' */
+  .voce .tondo{width:34px;height:34px;font-size:13px}
+  .voce{gap:11px;padding:11px 0}
+  .voce .desc{font-size:14px}
+  .voce .chi{font-size:11px}
+  .voce .eur{font-size:15px}
+  /* i due pulsanti affiancati non si schiacciano */
+  .due{gap:9px}
+  .btn{padding:13px 14px;font-size:14px}
+  .row-actions{gap:9px}
+  /* l'avatar nelle liste */
+  .avatar{width:40px;height:40px;font-size:15px}
+  .membro{gap:11px}
+  .scelta{padding:9px 16px 9px 9px;font-size:16px;gap:11px}
+  /* il popup respira meno ai lati */
+  .velo{padding:14px}
+  .popup{padding:22px 18px 20px}
+}
+
+/* schermi molto stretti: i campi affiancati si impilano */
+@media (max-width:340px){
+  .due{grid-template-columns:1fr}
+  .row-actions{flex-direction:column}
+  .riga-aggiungi{flex-wrap:wrap}
+  .riga-aggiungi .btn{width:100%}
+  .voce .eur{font-size:14px}
+  .rail-quota{padding:6px 12px}
+}
+
+/* schermi alti e stretti: meno spazio verticale sprecato */
+@media (max-height:700px){
+  .rail{margin-bottom:20px}
+  .rail-data{margin:10px 0 22px}
+  main{padding-top:4px}
+}
+
+/* tablet e desktop: la colonna resta leggibile, non si allarga all'infinito */
+@media (min-width:560px){
+  .voce .desc{font-size:16px}
+  .mappa{max-width:420px;margin:0 auto}
+}
+
+
+/* ══════════════════════════════════════════════════════════════
+   APERTURA: il cerchio si divide e ogni spicchio si modella
+   nella sua lettera. Otto spicchi, otto lettere.
+   ══════════════════════════════════════════════════════════════ */
+#splash{position:fixed;inset:0;z-index:300;display:flex;
+  align-items:center;justify-content:center;background:var(--carta);
+  will-change:opacity}
+#splash[hidden]{display:none!important}
+#sp-svg{width:100%;max-width:380px;height:auto;display:block;
+  transform-origin:50% 59.3%}
+#app{animation:appEntra .7s var(--curva-morbida) 2.75s backwards}
+@keyframes appEntra{ from{opacity:0;transform:translateY(18px)} to{opacity:1;transform:none} }
+body.no-splash #app{animation:none}
+@media (prefers-reduced-motion:reduce){
+  #splash{animation:spEsci .3s linear 1.2s forwards}
+  #app{animation:none}
+}
 </style>
 </head>
 <body>
+<div id="splash" aria-hidden="true">
+  <svg viewBox="0 0 360 145" id="sp-svg"></svg>
+</div>
+
 <div id="app">
 
   <header class="hdr" id="hdr" hidden>
     <div class="hdr-in">
     <span class="mark" aria-hidden="true">
-      <svg viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
-        <!-- ossa incrociate -->
-        <g stroke="#fff" stroke-width="3.2" stroke-linecap="round">
-          <line x1="9" y1="28" x2="31" y2="12"/>
-          <line x1="31" y1="28" x2="9" y2="12"/>
-        </g>
-        <g fill="#fff">
-          <circle cx="9" cy="12" r="2.4"/><circle cx="9" cy="28" r="2.4"/>
-          <circle cx="31" cy="12" r="2.4"/><circle cx="31" cy="28" r="2.4"/>
-        </g>
-        <!-- cranio -->
-        <path d="M20 6c-6.4 0-11 4.3-11 10.3 0 3.6 1.7 6.3 4 8v3.2c0 1.2 1 2.2 2.2 2.2h9.6c1.2 0 2.2-1 2.2-2.2V24.3c2.3-1.7 4-4.4 4-8C31 10.3 26.4 6 20 6z" fill="#fff"/>
-        <!-- occhi -->
-        <ellipse cx="14.8" cy="17.2" rx="3" ry="3.4" fill="#1E8FD5"/>
-        <ellipse cx="25.2" cy="17.2" rx="3" ry="3.4" fill="#1E8FD5"/>
-        <!-- naso -->
-        <path d="M20 20.5l-1.6 3h3.2z" fill="#1E8FD5"/>
-        <!-- denti -->
-        <g fill="#1E8FD5"><rect x="17" y="27" width="1.5" height="3" rx=".5"/><rect x="19.3" y="27" width="1.5" height="3" rx=".5"/><rect x="21.6" y="27" width="1.5" height="3" rx=".5"/></g>
-      </svg>
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 272.0 44.0" class="logo-parola"><path fill="#7F77DD" d="M29.5 40.6 L22.7 43.6 L15.2 43.7 L8.2 40.9 L2.9 35.6 L0.0 28.7 L0.0 21.3 L2.9 14.4 L8.2 9.1 L15.2 6.3 L22.7 6.4 L29.5 9.4 L25.0 16.0 L21.0 14.3 L16.6 14.2 L12.6 15.8 L9.5 18.8 L7.9 22.8 L7.9 27.2 L9.5 31.2 L12.6 34.2 L16.6 35.8 L21.0 35.7 L25.0 34.0 Z"/><path fill="#9C8FE8" d="M63.8 42.0 L55.4 44.0 L47.4 40.8 L42.5 33.7 L42.5 25.1 L47.4 18.0 L55.4 14.8 L63.8 16.8 L71.1 23.6 L71.1 44.0 L63.1 44.0 L63.1 35.2 L59.8 23.7 L57.4 22.9 L54.9 23.0 L52.7 24.0 L50.9 25.8 L50.0 28.2 L50.0 30.6 L50.9 33.0 L52.7 34.8 L54.9 35.8 L57.4 35.9 L59.8 35.1 Z"/><path fill="#AFA9EC" d="M84.1 0.0 L84.1 4.0 L84.1 8.0 L84.1 12.0 L84.1 16.0 L84.1 20.0 L84.1 24.0 L84.1 28.0 L84.1 32.0 L84.1 36.0 L84.1 40.0 L84.1 44.0 L92.1 44.0 L92.1 40.0 L92.1 36.0 L92.1 32.0 L92.1 28.0 L92.1 24.0 L92.1 20.0 L92.1 16.0 L92.1 12.0 L92.1 8.0 L92.1 4.0 L92.1 0.0 Z"/><path fill="#ED93B1" d="M127.8 41.4 L122.5 43.7 L116.8 43.8 L111.4 41.6 L107.3 37.6 L105.1 32.3 L105.1 26.5 L107.3 21.2 L111.4 17.2 L116.8 15.0 L122.5 15.1 L127.8 17.4 L123.2 24.0 L120.8 23.0 L118.2 22.9 L115.8 23.9 L113.9 25.7 L112.9 28.1 L112.9 30.7 L113.9 33.1 L115.8 34.9 L118.2 35.9 L120.8 35.8 L123.2 34.8 Z"/><path fill="#E0568C" d="M140.8 16.8 L140.8 23.8 L140.8 30.8 L140.8 30.8 L143.3 38.6 L149.9 43.4 L158.1 43.4 L164.7 38.6 L167.2 30.8 L167.2 30.8 L167.2 23.8 L167.2 16.8 L159.2 16.8 L159.2 23.8 L159.2 30.8 L159.2 30.8 L158.2 33.9 L155.6 35.7 L152.4 35.7 L149.8 33.9 L148.8 30.8 L148.8 30.8 L148.8 23.8 L148.8 16.8 Z"/><path fill="#F0997B" d="M180.2 0.0 L180.2 4.0 L180.2 8.0 L180.2 12.0 L180.2 16.0 L180.2 20.0 L180.2 24.0 L180.2 28.0 L180.2 32.0 L180.2 36.0 L180.2 40.0 L180.2 44.0 L188.2 44.0 L188.2 40.0 L188.2 36.0 L188.2 32.0 L188.2 28.0 L188.2 24.0 L188.2 20.0 L188.2 16.0 L188.2 12.0 L188.2 8.0 L188.2 4.0 L188.2 0.0 Z"/><path fill="#EF9F27" d="M229.8 29.4 L227.5 37.3 L221.3 42.7 L213.1 43.9 L205.6 40.4 L201.2 33.5 L201.2 25.3 L205.6 18.4 L213.1 14.9 L221.3 16.1 L227.5 21.5 L229.8 29.4 L221.8 29.4 L220.7 25.8 L217.9 23.4 L214.2 22.9 L210.9 24.4 L208.9 27.5 L208.9 31.3 L210.9 34.4 L214.2 35.9 L217.9 35.4 L220.7 33.0 L221.8 29.4 Z"/><path fill="#FF4E8E" d="M242.8 44.0 L242.8 37.0 L242.8 30.0 L242.8 30.0 L245.6 21.4 L252.9 16.1 L261.9 16.1 L269.2 21.4 L272.0 30.0 L272.0 30.0 L272.0 37.0 L272.0 44.0 L264.0 44.0 L264.0 37.0 L264.0 30.0 L264.0 30.0 L262.7 26.1 L259.4 23.7 L255.3 23.7 L252.0 26.1 L250.8 30.0 L250.8 30.0 L250.8 37.0 L250.8 44.0 Z"/></svg>
     </span>
     <span class="gname" id="gname">—</span>
     <button class="sync" id="sync" type="button" data-st="allineato">allineato</button>
@@ -514,7 +588,9 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
 
     <!-- ============ INTRO OBBLIGATORIA ============ -->
     <section class="screen" id="s-intro" hidden>
-      <h1>Calculon</h1>
+      <h1 class="tit-logo"><span class="sr">Calculon</span>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 272.0 44.0" class="logo-titolo"><path fill="#7F77DD" d="M29.5 40.6 L22.7 43.6 L15.2 43.7 L8.2 40.9 L2.9 35.6 L0.0 28.7 L0.0 21.3 L2.9 14.4 L8.2 9.1 L15.2 6.3 L22.7 6.4 L29.5 9.4 L25.0 16.0 L21.0 14.3 L16.6 14.2 L12.6 15.8 L9.5 18.8 L7.9 22.8 L7.9 27.2 L9.5 31.2 L12.6 34.2 L16.6 35.8 L21.0 35.7 L25.0 34.0 Z"/><path fill="#9C8FE8" d="M63.8 42.0 L55.4 44.0 L47.4 40.8 L42.5 33.7 L42.5 25.1 L47.4 18.0 L55.4 14.8 L63.8 16.8 L71.1 23.6 L71.1 44.0 L63.1 44.0 L63.1 35.2 L59.8 23.7 L57.4 22.9 L54.9 23.0 L52.7 24.0 L50.9 25.8 L50.0 28.2 L50.0 30.6 L50.9 33.0 L52.7 34.8 L54.9 35.8 L57.4 35.9 L59.8 35.1 Z"/><path fill="#AFA9EC" d="M84.1 0.0 L84.1 4.0 L84.1 8.0 L84.1 12.0 L84.1 16.0 L84.1 20.0 L84.1 24.0 L84.1 28.0 L84.1 32.0 L84.1 36.0 L84.1 40.0 L84.1 44.0 L92.1 44.0 L92.1 40.0 L92.1 36.0 L92.1 32.0 L92.1 28.0 L92.1 24.0 L92.1 20.0 L92.1 16.0 L92.1 12.0 L92.1 8.0 L92.1 4.0 L92.1 0.0 Z"/><path fill="#ED93B1" d="M127.8 41.4 L122.5 43.7 L116.8 43.8 L111.4 41.6 L107.3 37.6 L105.1 32.3 L105.1 26.5 L107.3 21.2 L111.4 17.2 L116.8 15.0 L122.5 15.1 L127.8 17.4 L123.2 24.0 L120.8 23.0 L118.2 22.9 L115.8 23.9 L113.9 25.7 L112.9 28.1 L112.9 30.7 L113.9 33.1 L115.8 34.9 L118.2 35.9 L120.8 35.8 L123.2 34.8 Z"/><path fill="#E0568C" d="M140.8 16.8 L140.8 23.8 L140.8 30.8 L140.8 30.8 L143.3 38.6 L149.9 43.4 L158.1 43.4 L164.7 38.6 L167.2 30.8 L167.2 30.8 L167.2 23.8 L167.2 16.8 L159.2 16.8 L159.2 23.8 L159.2 30.8 L159.2 30.8 L158.2 33.9 L155.6 35.7 L152.4 35.7 L149.8 33.9 L148.8 30.8 L148.8 30.8 L148.8 23.8 L148.8 16.8 Z"/><path fill="#F0997B" d="M180.2 0.0 L180.2 4.0 L180.2 8.0 L180.2 12.0 L180.2 16.0 L180.2 20.0 L180.2 24.0 L180.2 28.0 L180.2 32.0 L180.2 36.0 L180.2 40.0 L180.2 44.0 L188.2 44.0 L188.2 40.0 L188.2 36.0 L188.2 32.0 L188.2 28.0 L188.2 24.0 L188.2 20.0 L188.2 16.0 L188.2 12.0 L188.2 8.0 L188.2 4.0 L188.2 0.0 Z"/><path fill="#EF9F27" d="M229.8 29.4 L227.5 37.3 L221.3 42.7 L213.1 43.9 L205.6 40.4 L201.2 33.5 L201.2 25.3 L205.6 18.4 L213.1 14.9 L221.3 16.1 L227.5 21.5 L229.8 29.4 L221.8 29.4 L220.7 25.8 L217.9 23.4 L214.2 22.9 L210.9 24.4 L208.9 27.5 L208.9 31.3 L210.9 34.4 L214.2 35.9 L217.9 35.4 L220.7 33.0 L221.8 29.4 Z"/><path fill="#FF4E8E" d="M242.8 44.0 L242.8 37.0 L242.8 30.0 L242.8 30.0 L245.6 21.4 L252.9 16.1 L261.9 16.1 L269.2 21.4 L272.0 30.0 L272.0 30.0 L272.0 37.0 L272.0 44.0 L264.0 44.0 L264.0 37.0 L264.0 30.0 L264.0 30.0 L262.7 26.1 L259.4 23.7 L255.3 23.7 L252.0 26.1 L250.8 30.0 L250.8 30.0 L250.8 37.0 L250.8 44.0 Z"/></svg>
+      </h1>
       <p class="lead">Divide le spese della vacanza mentre siete ancora in giro.</p>
 
       <div class="sez">
@@ -549,7 +625,9 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
 
     <!-- ============ INGRESSO ============ -->
     <section class="screen" id="s-ingresso" hidden>
-      <h1>Calculon</h1>
+      <h1 class="tit-logo"><span class="sr">Calculon</span>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 272.0 44.0" class="logo-titolo"><path fill="#7F77DD" d="M29.5 40.6 L22.7 43.6 L15.2 43.7 L8.2 40.9 L2.9 35.6 L0.0 28.7 L0.0 21.3 L2.9 14.4 L8.2 9.1 L15.2 6.3 L22.7 6.4 L29.5 9.4 L25.0 16.0 L21.0 14.3 L16.6 14.2 L12.6 15.8 L9.5 18.8 L7.9 22.8 L7.9 27.2 L9.5 31.2 L12.6 34.2 L16.6 35.8 L21.0 35.7 L25.0 34.0 Z"/><path fill="#9C8FE8" d="M63.8 42.0 L55.4 44.0 L47.4 40.8 L42.5 33.7 L42.5 25.1 L47.4 18.0 L55.4 14.8 L63.8 16.8 L71.1 23.6 L71.1 44.0 L63.1 44.0 L63.1 35.2 L59.8 23.7 L57.4 22.9 L54.9 23.0 L52.7 24.0 L50.9 25.8 L50.0 28.2 L50.0 30.6 L50.9 33.0 L52.7 34.8 L54.9 35.8 L57.4 35.9 L59.8 35.1 Z"/><path fill="#AFA9EC" d="M84.1 0.0 L84.1 4.0 L84.1 8.0 L84.1 12.0 L84.1 16.0 L84.1 20.0 L84.1 24.0 L84.1 28.0 L84.1 32.0 L84.1 36.0 L84.1 40.0 L84.1 44.0 L92.1 44.0 L92.1 40.0 L92.1 36.0 L92.1 32.0 L92.1 28.0 L92.1 24.0 L92.1 20.0 L92.1 16.0 L92.1 12.0 L92.1 8.0 L92.1 4.0 L92.1 0.0 Z"/><path fill="#ED93B1" d="M127.8 41.4 L122.5 43.7 L116.8 43.8 L111.4 41.6 L107.3 37.6 L105.1 32.3 L105.1 26.5 L107.3 21.2 L111.4 17.2 L116.8 15.0 L122.5 15.1 L127.8 17.4 L123.2 24.0 L120.8 23.0 L118.2 22.9 L115.8 23.9 L113.9 25.7 L112.9 28.1 L112.9 30.7 L113.9 33.1 L115.8 34.9 L118.2 35.9 L120.8 35.8 L123.2 34.8 Z"/><path fill="#E0568C" d="M140.8 16.8 L140.8 23.8 L140.8 30.8 L140.8 30.8 L143.3 38.6 L149.9 43.4 L158.1 43.4 L164.7 38.6 L167.2 30.8 L167.2 30.8 L167.2 23.8 L167.2 16.8 L159.2 16.8 L159.2 23.8 L159.2 30.8 L159.2 30.8 L158.2 33.9 L155.6 35.7 L152.4 35.7 L149.8 33.9 L148.8 30.8 L148.8 30.8 L148.8 23.8 L148.8 16.8 Z"/><path fill="#F0997B" d="M180.2 0.0 L180.2 4.0 L180.2 8.0 L180.2 12.0 L180.2 16.0 L180.2 20.0 L180.2 24.0 L180.2 28.0 L180.2 32.0 L180.2 36.0 L180.2 40.0 L180.2 44.0 L188.2 44.0 L188.2 40.0 L188.2 36.0 L188.2 32.0 L188.2 28.0 L188.2 24.0 L188.2 20.0 L188.2 16.0 L188.2 12.0 L188.2 8.0 L188.2 4.0 L188.2 0.0 Z"/><path fill="#EF9F27" d="M229.8 29.4 L227.5 37.3 L221.3 42.7 L213.1 43.9 L205.6 40.4 L201.2 33.5 L201.2 25.3 L205.6 18.4 L213.1 14.9 L221.3 16.1 L227.5 21.5 L229.8 29.4 L221.8 29.4 L220.7 25.8 L217.9 23.4 L214.2 22.9 L210.9 24.4 L208.9 27.5 L208.9 31.3 L210.9 34.4 L214.2 35.9 L217.9 35.4 L220.7 33.0 L221.8 29.4 Z"/><path fill="#FF4E8E" d="M242.8 44.0 L242.8 37.0 L242.8 30.0 L242.8 30.0 L245.6 21.4 L252.9 16.1 L261.9 16.1 L269.2 21.4 L272.0 30.0 L272.0 30.0 L272.0 37.0 L272.0 44.0 L264.0 44.0 L264.0 37.0 L264.0 30.0 L264.0 30.0 L262.7 26.1 L259.4 23.7 L255.3 23.7 L252.0 26.1 L250.8 30.0 L250.8 30.0 L250.8 37.0 L250.8 44.0 Z"/></svg>
+      </h1>
       <p class="lead">Le spese divise mentre sei ancora in fila alla cassa. Nessun account: solo un codice.</p>
       <button class="btn btn-ghost w" id="btn-annulla-ingresso" type="button" hidden>← Torna al tuo gruppo</button>
 
@@ -2330,6 +2408,192 @@ if (GID){
 }
 vista = !identita().nome ? "intro" : (GID && D) ? (ME ? "spese" : "chi") : "ingresso";
 render();
+
+/* ══════════════════════════════════════════════════════════════
+   APERTURA: il cerchio si divide e ogni spicchio diventa una lettera.
+   Si vede una volta per sessione. Il suono parte solo se il telefono lo permette.
+   ══════════════════════════════════════════════════════════════ */
+(function(){
+  var sp = document.getElementById("splash");
+  if (!sp) return;
+
+  var gia = false;
+  try { gia = sessionStorage.getItem("cc.splash") === "1"; } catch(e){}
+  if (gia){
+    sp.hidden = true;
+    document.body.classList.add("no-splash");
+    return;
+  }
+  try { sessionStorage.setItem("cc.splash", "1"); } catch(e){}
+
+const DA=[[[180.0, 22.0], [183.3, 22.1], [186.5, 22.5], [189.8, 23.1], [193.0, 23.9], [196.1, 24.9], [199.1, 26.2], [202.0, 27.6], [204.9, 29.3], [207.6, 31.2], [210.1, 33.2], [212.5, 35.5], [189.2, 58.8], [188.5, 58.2], [187.8, 57.6], [187.0, 57.1], [186.2, 56.6], [185.4, 56.2], [184.5, 55.8], [183.7, 55.5], [182.8, 55.3], [181.9, 55.1], [180.9, 55.0], [180.0, 55.0]], [[212.5, 35.5], [214.8, 37.9], [216.8, 40.4], [218.7, 43.1], [220.4, 46.0], [221.8, 48.9], [223.1, 51.9], [224.1, 55.0], [224.9, 58.2], [225.5, 61.5], [225.9, 64.7], [226.0, 68.0], [193.0, 68.0], [193.0, 67.1], [192.9, 66.1], [192.7, 65.2], [192.5, 64.3], [192.2, 63.5], [191.8, 62.6], [191.4, 61.8], [190.9, 61.0], [190.4, 60.2], [189.8, 59.5], [189.2, 58.8]], [[226.0, 68.0], [225.9, 71.3], [225.5, 74.5], [224.9, 77.8], [224.1, 81.0], [223.1, 84.1], [221.8, 87.1], [220.4, 90.0], [218.7, 92.9], [216.8, 95.6], [214.8, 98.1], [212.5, 100.5], [189.2, 77.2], [189.8, 76.5], [190.4, 75.8], [190.9, 75.0], [191.4, 74.2], [191.8, 73.4], [192.2, 72.5], [192.5, 71.7], [192.7, 70.8], [192.9, 69.9], [193.0, 68.9], [193.0, 68.0]], [[212.5, 100.5], [210.1, 102.8], [207.6, 104.8], [204.9, 106.7], [202.0, 108.4], [199.1, 109.8], [196.1, 111.1], [193.0, 112.1], [189.8, 112.9], [186.5, 113.5], [183.3, 113.9], [180.0, 114.0], [180.0, 81.0], [180.9, 81.0], [181.9, 80.9], [182.8, 80.7], [183.7, 80.5], [184.5, 80.2], [185.4, 79.8], [186.2, 79.4], [187.0, 78.9], [187.8, 78.4], [188.5, 77.8], [189.2, 77.2]], [[180.0, 114.0], [176.7, 113.9], [173.5, 113.5], [170.2, 112.9], [167.0, 112.1], [163.9, 111.1], [160.9, 109.8], [158.0, 108.4], [155.1, 106.7], [152.4, 104.8], [149.9, 102.8], [147.5, 100.5], [170.8, 77.2], [171.5, 77.8], [172.2, 78.4], [173.0, 78.9], [173.8, 79.4], [174.6, 79.8], [175.5, 80.2], [176.3, 80.5], [177.2, 80.7], [178.1, 80.9], [179.1, 81.0], [180.0, 81.0]], [[147.5, 100.5], [145.2, 98.1], [143.2, 95.6], [141.3, 92.9], [139.6, 90.0], [138.2, 87.1], [136.9, 84.1], [135.9, 81.0], [135.1, 77.8], [134.5, 74.5], [134.1, 71.3], [134.0, 68.0], [167.0, 68.0], [167.0, 68.9], [167.1, 69.9], [167.3, 70.8], [167.5, 71.7], [167.8, 72.5], [168.2, 73.4], [168.6, 74.2], [169.1, 75.0], [169.6, 75.8], [170.2, 76.5], [170.8, 77.2]], [[134.0, 68.0], [134.1, 64.7], [134.5, 61.5], [135.1, 58.2], [135.9, 55.0], [136.9, 51.9], [138.2, 48.9], [139.6, 46.0], [141.3, 43.1], [143.2, 40.4], [145.2, 37.9], [147.5, 35.5], [170.8, 58.8], [170.2, 59.5], [169.6, 60.2], [169.1, 61.0], [168.6, 61.8], [168.2, 62.6], [167.8, 63.5], [167.5, 64.3], [167.3, 65.2], [167.1, 66.1], [167.0, 67.1], [167.0, 68.0]], [[147.5, 35.5], [149.9, 33.2], [152.4, 31.2], [155.1, 29.3], [158.0, 27.6], [160.9, 26.2], [163.9, 24.9], [167.0, 23.9], [170.2, 23.1], [173.5, 22.5], [176.7, 22.1], [180.0, 22.0], [180.0, 55.0], [179.1, 55.0], [178.1, 55.1], [177.2, 55.3], [176.3, 55.5], [175.5, 55.8], [174.6, 56.2], [173.8, 56.6], [173.0, 57.1], [172.2, 57.6], [171.5, 58.2], [170.8, 58.8]]];
+const A=[[[73.5, 104.6], [66.7, 107.6], [59.2, 107.7], [52.2, 104.9], [46.9, 99.6], [44.0, 92.7], [44.0, 85.3], [46.9, 78.4], [52.2, 73.1], [59.2, 70.3], [66.7, 70.4], [73.5, 73.4], [69.0, 80.0], [65.0, 78.3], [60.6, 78.2], [56.6, 79.8], [53.5, 82.8], [51.9, 86.8], [51.9, 91.2], [53.5, 95.2], [56.6, 98.2], [60.6, 99.8], [65.0, 99.7], [69.0, 98.0]], [[107.8, 106.0], [99.4, 108.0], [91.4, 104.8], [86.5, 97.7], [86.5, 89.1], [91.4, 82.0], [99.4, 78.8], [107.8, 80.8], [115.1, 87.6], [115.1, 108.0], [107.1, 108.0], [107.1, 99.2], [103.8, 87.7], [101.4, 86.9], [98.9, 87.0], [96.7, 88.0], [94.9, 89.8], [94.0, 92.2], [94.0, 94.6], [94.9, 97.0], [96.7, 98.8], [98.9, 99.8], [101.4, 99.9], [103.8, 99.1]], [[128.1, 64.0], [128.1, 68.0], [128.1, 72.0], [128.1, 76.0], [128.1, 80.0], [128.1, 84.0], [128.1, 88.0], [128.1, 92.0], [128.1, 96.0], [128.1, 100.0], [128.1, 104.0], [128.1, 108.0], [136.1, 108.0], [136.1, 104.0], [136.1, 100.0], [136.1, 96.0], [136.1, 92.0], [136.1, 88.0], [136.1, 84.0], [136.1, 80.0], [136.1, 76.0], [136.1, 72.0], [136.1, 68.0], [136.1, 64.0]], [[171.8, 105.4], [166.5, 107.7], [160.8, 107.8], [155.4, 105.6], [151.3, 101.6], [149.1, 96.3], [149.1, 90.5], [151.3, 85.2], [155.4, 81.2], [160.8, 79.0], [166.5, 79.1], [171.8, 81.4], [167.2, 88.0], [164.8, 87.0], [162.2, 86.9], [159.8, 87.9], [157.9, 89.7], [156.9, 92.1], [156.9, 94.7], [157.9, 97.1], [159.8, 98.9], [162.2, 99.9], [164.8, 99.8], [167.2, 98.8]], [[184.8, 80.8], [184.8, 87.8], [184.8, 94.8], [184.8, 94.8], [187.3, 102.6], [193.9, 107.4], [202.1, 107.4], [208.7, 102.6], [211.2, 94.8], [211.2, 94.8], [211.2, 87.8], [211.2, 80.8], [203.2, 80.8], [203.2, 87.8], [203.2, 94.8], [203.2, 94.8], [202.2, 97.9], [199.6, 99.7], [196.4, 99.7], [193.8, 97.9], [192.8, 94.8], [192.8, 94.8], [192.8, 87.8], [192.8, 80.8]], [[224.2, 64.0], [224.2, 68.0], [224.2, 72.0], [224.2, 76.0], [224.2, 80.0], [224.2, 84.0], [224.2, 88.0], [224.2, 92.0], [224.2, 96.0], [224.2, 100.0], [224.2, 104.0], [224.2, 108.0], [232.2, 108.0], [232.2, 104.0], [232.2, 100.0], [232.2, 96.0], [232.2, 92.0], [232.2, 88.0], [232.2, 84.0], [232.2, 80.0], [232.2, 76.0], [232.2, 72.0], [232.2, 68.0], [232.2, 64.0]], [[273.8, 93.4], [271.5, 101.3], [265.3, 106.7], [257.1, 107.9], [249.6, 104.4], [245.2, 97.5], [245.2, 89.3], [249.6, 82.4], [257.1, 78.9], [265.3, 80.1], [271.5, 85.5], [273.8, 93.4], [265.8, 93.4], [264.7, 89.8], [261.9, 87.4], [258.2, 86.9], [254.9, 88.4], [252.9, 91.5], [252.9, 95.3], [254.9, 98.4], [258.2, 99.9], [261.9, 99.4], [264.7, 97.0], [265.8, 93.4]], [[286.8, 108.0], [286.8, 101.0], [286.8, 94.0], [286.8, 94.0], [289.6, 85.4], [296.9, 80.1], [305.9, 80.1], [313.2, 85.4], [316.0, 94.0], [316.0, 94.0], [316.0, 101.0], [316.0, 108.0], [308.0, 108.0], [308.0, 101.0], [308.0, 94.0], [308.0, 94.0], [306.7, 90.1], [303.4, 87.7], [299.3, 87.7], [296.0, 90.1], [294.8, 94.0], [294.8, 94.0], [294.8, 101.0], [294.8, 108.0]]];
+const C=["#7F77DD", "#9C8FE8", "#AFA9EC", "#ED93B1", "#E0568C", "#F0997B", "#EF9F27", "#FF4E8E"];
+
+/* Suono dell'apertura, generato dal browser: nessun file da scaricare.
+   Un respiro grave mentre il cerchio si apre, poi otto note — una per lettera. */
+const Suono = (function(){
+  let ctx = null;
+  function avvia(){
+    if (!ctx){
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      ctx = new AC();
+    }
+    if (ctx.state === "suspended") ctx.resume();
+    return ctx;
+  }
+
+  function respiro(t0){
+    // il cerchio che si apre: sospiro grave che sale appena
+    const o = ctx.createOscillator(), g = ctx.createGain(), f = ctx.createBiquadFilter();
+    o.type = "sine";
+    o.frequency.setValueAtTime(90, t0);
+    o.frequency.exponentialRampToValueAtTime(180, t0 + 0.55);
+    f.type = "lowpass";
+    f.frequency.setValueAtTime(400, t0);
+    f.frequency.exponentialRampToValueAtTime(1400, t0 + 0.5);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(0.16, t0 + 0.18);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.9);
+    o.connect(f); f.connect(g); g.connect(ctx.destination);
+    o.start(t0); o.stop(t0 + 1.0);
+  }
+
+  function nota(t0, hz, vol){
+    // campana morbida: fondamentale + armonica, spegnimento dolce
+    [[1, vol], [2.02, vol * 0.30], [3.01, vol * 0.12]].forEach(([m, v]) => {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = "sine";
+      o.frequency.setValueAtTime(hz * m, t0);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(v, t0 + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 1.5);
+      o.connect(g); g.connect(ctx.destination);
+      o.start(t0); o.stop(t0 + 1.6);
+    });
+  }
+
+  /* pentatonica: nessun intervallo stonato, suona bene in qualsiasi ordine */
+  const SCALA = [523.25, 587.33, 659.25, 783.99, 880.00, 1046.50, 1174.66, 1318.51];
+
+  return {
+    apertura(){
+      const c = avvia();
+      if (!c) return;
+      const t = c.currentTime + 0.03;
+      respiro(t);
+      // una nota per lettera, allo stesso ritmo con cui si formano
+      SCALA.forEach((hz, i) => nota(t + 0.42 + i * 0.125, hz, 0.13 - i * 0.006));
+      // accordo finale appena accennato, quando la parola è completa
+      [523.25, 659.25, 783.99].forEach(hz => nota(t + 1.55, hz, 0.05));
+    },
+    sblocca(){ avvia(); }
+  };
+})();
+
+
+  var svgSp = document.getElementById("sp-svg");
+  var forme = DA.map(function(_, i){
+    var el = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    el.setAttribute("fill", C[i]);
+    svgSp.appendChild(el);
+    return el;
+  });
+  var dd = function(pts){
+    return "M" + pts.map(function(q){ return q[0].toFixed(1)+" "+q[1].toFixed(1); }).join(" L") + " Z";
+  };
+  var ease = function(t){ return t<.5 ? 4*t*t*t : 1-Math.pow(-2*t+2,3)/2; };
+
+  function disegna(k){
+    forme.forEach(function(el, i){
+      var t = (k - 0.16 - i*0.05) / 0.50;
+      t = Math.max(0, Math.min(1, t));
+      var e = ease(t);
+      el.setAttribute("d", dd(DA[i].map(function(q, j){
+        return [ q[0] + (A[i][j][0]-q[0])*e, q[1] + (A[i][j][1]-q[1])*e ];
+      })));
+    });
+  }
+
+  /* Dove deve atterrare: il logo nell'intestazione. La parola resta parola:
+     vola su e si rimpicciolisce fino a combaciare con quello. */
+  function bersaglio(){
+    /* Atterra sul logo che si vede davvero: quello grande della schermata
+       d'ingresso se è lei ad aprirsi, altrimenti quello nell'intestazione. */
+    var cand = [];
+    document.querySelectorAll(".screen:not([hidden]) .logo-titolo").forEach(function(el){ cand.push(el); });
+    var m = document.querySelector(".mark svg");
+    if (m) cand.push(m);
+    for (var i = 0; i < cand.length; i++){
+      var el = cand[i], r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.bottom <= 0 || r.top >= window.innerHeight) continue;
+      /* l'app sta ancora entrando dal basso: misuro dove si fermerà, non dov'è ora */
+      var x = 0, y = 0, n = el;
+      while (n){ x += n.offsetLeft; y += n.offsetTop; n = n.offsetParent; }
+      return { x: x + r.width/2, y: y + r.height/2, w: r.width };
+    }
+    return { x: 68, y: 44, w: 96 };
+  }
+
+  /* La parola nel disegno grande occupa da x=44 a x=316 (272 unità), centrata su 180. */
+  function volo(){
+    var rc = svgSp.getBoundingClientRect();
+    if (!rc.width) return null;
+    var k = rc.width / 360;
+    var cx = rc.left + 180 * k;      // centro della parola
+    var cy = rc.top  + 86  * k;      // metà altezza delle lettere
+    var larg = 272 * k;
+    var b = bersaglio();
+    return { dx: b.x - cx, dy: b.y - cy, s: b.w / larg };
+  }
+
+  var ridotto = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  if (ridotto){
+    disegna(1);
+    sp.style.transition = "opacity .5s ease";
+    setTimeout(function(){ sp.style.opacity = "0"; }, 900);
+    setTimeout(function(){ sp.hidden = true; }, 1500);
+  } else {
+    var FORMA = 2200;   // il cerchio diventa parola
+    var PAUSA = 450;    // resta ferma un istante
+    var VOLO  = 950;    // sale al suo posto e si dissolve
+    var t0 = null, v = null;
+
+    var passo = function(ts){
+      if (!t0) t0 = ts;
+      var t = ts - t0;
+
+      if (t < FORMA){
+        disegna(Math.min(1, t / FORMA));
+        requestAnimationFrame(passo);
+      } else if (t < FORMA + PAUSA){
+        disegna(1);
+        requestAnimationFrame(passo);
+      } else if (t < FORMA + PAUSA + VOLO){
+        if (!v) v = volo();
+        disegna(1);                                  // la parola resta parola
+        var q = (t - FORMA - PAUSA) / VOLO;
+        var e = ease(q);
+        if (v){
+          var sc = 1 + (v.s - 1) * e;
+          svgSp.style.transform = "translate(" + (v.dx*e).toFixed(1) + "px," +
+                                  (v.dy*e).toFixed(1) + "px) scale(" + sc.toFixed(3) + ")";
+        }
+        sp.style.opacity = String(1 - ease(Math.max(0, (q - 0.30) / 0.70)));
+        requestAnimationFrame(passo);
+      } else {
+        sp.hidden = true;
+      }
+    };
+    disegna(0);
+    requestAnimationFrame(passo);
+    try { Suono.apertura(); } catch(e){}
+  }
+
+  setTimeout(function(){ sp.hidden = true; }, 4200);
+})();
 
 window.addEventListener("online",  () => { statoSync(); tentaSync(); });
 window.addEventListener("offline", statoSync);
