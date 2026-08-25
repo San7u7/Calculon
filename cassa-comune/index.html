@@ -2620,5 +2620,133 @@ if ("serviceWorker" in navigator){
      col committente cosa deve succedere in quel caso.
    ============================================================ */
 </script>
+
+<!-- F0 · Passo 2 — rete di sicurezza backup/restore legacy.
+     Non visibile in UI, non tocca lo storage al caricamento, non partecipa al normale
+     funzionamento: vive solo su window.__calculonDev. Dump VERBATIM delle chiavi cc.*,
+     nessuna trasformazione/normalizzazione/conversione. -->
+<script>
+"use strict";
+/* F0P2-DEV-START */
+(function(){
+  var PREFIX = "cc.";
+  var FORMAT = "calculon-legacy-backup";
+
+  /* raccoglie TUTTE le chiavi cc.* come stringhe grezze, senza toccarle */
+  function raccogliLocale(){
+    var out = {};
+    for (var i = 0; i < localStorage.length; i++){
+      var k = localStorage.key(i);
+      if (k && k.indexOf(PREFIX) === 0) out[k] = localStorage.getItem(k);
+    }
+    return out;
+  }
+
+  /* totali di controllo: informativi, NON autoritativi (l'autorita' resta local{}) */
+  function riepilogo(local){
+    var gruppi = [];
+    for (var k in local){
+      if (!Object.prototype.hasOwnProperty.call(local, k)) continue;
+      if (k.indexOf("cc.data.") !== 0) continue;
+      var gid = k.slice("cc.data.".length);
+      var d = null; try { d = JSON.parse(local[k]); } catch(e){}
+      if (!d || !d.meta) continue;
+      var recs = d.records ? Object.keys(d.records).map(function(id){ return d.records[id]; }) : [];
+      var speso = 0, nExp = 0, nPay = 0, nDel = 0;
+      recs.forEach(function(r){
+        if (!r) return;
+        if (r.deleted) nDel++;
+        if (r.kind === "expense"){ nExp++; if (!r.deleted) speso += (r.amountCents | 0); }
+        else if (r.kind === "payment"){ nPay++; }
+      });
+      var pers = null; try { pers = JSON.parse(local["cc.personali." + gid] || "null"); } catch(e){}
+      var nOut = 0; try { nOut = (JSON.parse(local["cc.outbox." + gid] || "[]") || []).length; } catch(e){}
+      gruppi.push({
+        id: gid,
+        name: (d.meta && d.meta.name) || gid,
+        membriAttivi: ((d.meta && d.meta.members) || []).filter(function(m){ return !m.deleted; }).length,
+        membriTotali: ((d.meta && d.meta.members) || []).length,
+        records: recs.length, expense: nExp, payment: nPay, tombstone: nDel,
+        totaleSpesoCents: speso,
+        personali: Array.isArray(pers) ? pers.length : 0,
+        outbox: nOut,
+        me: local["cc.me." + gid] || null
+      });
+    }
+    return { gruppiLocali: gruppi.length, gruppi: gruppi };
+  }
+
+  function build(){
+    var local = raccogliLocale();
+    return {
+      format: FORMAT,
+      schemaVersion: 0,
+      exportedAt: new Date().toISOString(),
+      app: { origin: location.origin, path: location.pathname },
+      summary: riepilogo(local),
+      limitations: [
+        "Backup del solo stato LOCALE osservabile (mirror cc.data.<gid>): non interroga il Worker.",
+        "Record presenti solo sul server o nell'outbox di un altro device non sono catturati.",
+        "Il restore ripristina lo stato locale; non rianima un gruppo gia' scaduto lato Worker (TTL KV 10 giorni, rischio noto fuori scope F0)."
+      ],
+      local: local
+    };
+  }
+
+  function scarica(payload){
+    try {
+      var blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = "calculon-legacy-backup-" + String(payload.exportedAt).replace(/[:.]/g, "-") + ".json";
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function(){ URL.revokeObjectURL(url); }, 0);
+      return true;
+    } catch(e){ return false; }
+  }
+
+  function exportLegacy(opts){
+    var payload = build();
+    if (!(opts && opts.noDownload)) scarica(payload);
+    return payload;                 // ritorna sempre il payload: serve a verifica e uso dev
+  }
+
+  function valida(payload){
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return "payload assente o non oggetto";
+    if (payload.format !== FORMAT) return "format non riconosciuto";
+    if (payload.schemaVersion !== 0) return "schemaVersion diverso da 0";
+    if (!payload.local || typeof payload.local !== "object" || Array.isArray(payload.local)) return "campo local mancante o non oggetto";
+    for (var k in payload.local){
+      if (!Object.prototype.hasOwnProperty.call(payload.local, k)) continue;
+      if (k.indexOf(PREFIX) !== 0) return "chiave fuori namespace cc.: " + k;
+      if (typeof payload.local[k] !== "string") return "valore non stringa per: " + k;
+    }
+    return null;
+  }
+
+  /* valida COMPLETAMENTE prima di scrivere: un payload invalido non produce scritture parziali */
+  function restoreLegacy(payload){
+    var err = valida(payload);
+    if (err) throw new Error("restoreLegacy: payload invalido — " + err);
+    var daRimuovere = [];
+    for (var i = 0; i < localStorage.length; i++){
+      var k = localStorage.key(i);
+      if (k && k.indexOf(PREFIX) === 0) daRimuovere.push(k);
+    }
+    daRimuovere.forEach(function(k){ localStorage.removeItem(k); });
+    var loc = payload.local;
+    for (var kk in loc){ if (Object.prototype.hasOwnProperty.call(loc, kk)) localStorage.setItem(kk, loc[kk]); }
+    return { restored: Object.keys(loc).length };
+  }
+
+  window.__calculonDev = window.__calculonDev || {};
+  window.__calculonDev.exportLegacy  = exportLegacy;
+  window.__calculonDev.restoreLegacy = restoreLegacy;
+  window.__calculonDev._buildLegacyBackup = build;    // helper per i test
+  window.__calculonDev._validate = valida;            // helper per i test
+})();
+/* F0P2-DEV-END */
+</script>
 </body>
 </html>
