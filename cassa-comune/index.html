@@ -2674,21 +2674,135 @@ if ("serviceWorker" in navigator){
     return txDone(tx);
   }
 
-  // Catena migrazioni del MODELLO (schemaVersion), separata da DB_VERSION.
-  // In F0 e' VUOTA: nessuna migrazione dei dati legacy. La 1: verra' aggiunta al Passo 4.
-  var migrations = {
-    // 1: async function(ctx){ /* legacy -> modello F0 (M1): NON in questo passo */ }
-  };
+  // ---- M1: legacy (cc.data.*) -> modello Calculon 2.0, SOLO IndexedDB ----
+  // Legge localStorage (senza modificarlo), costruisce l'intera proiezione in memoria,
+  // la valida, poi scrive tutto in UNA sola transazione IDB che porta anche
+  // schemaVersion a 1. Qualsiasi errore => rollback totale (nessuna scrittura).
+  var PERSONAL_ID = "personal:local";   // Personal Space deterministico, unico
+  function spaceIdOf(gid){ return gid; }                          // il GID e' gia' unico
+  function memberIdOf(sid, legacyId){ return sid + ":" + legacyId; }
+  function txIdOf(sid, legacyRid){ return sid + ":" + legacyRid; }
+
+  function raccogliLegacy(){
+    var out = {};
+    for (var i = 0; i < localStorage.length; i++){
+      var k = localStorage.key(i);
+      if (!k || k.indexOf("cc.data.") !== 0) continue;
+      var gid = k.slice("cc.data.".length);
+      var d = null; try { d = JSON.parse(localStorage.getItem(k)); } catch(e){ throw new Error("cc.data." + gid + " non e' JSON valido"); }
+      if (d && d.meta) out[gid] = d;
+    }
+    return out;
+  }
+
+  // Proiezione pura: nessuna scrittura. Lancia se qualcosa e' ambiguo/invalido.
+  function costruisciProiezione(legacy){
+    var spaces = [], spaceMembers = [], transactions = [];
+    // un solo Personal Space, vuoto e deterministico
+    spaces.push({ id: PERSONAL_ID, name: "Personale", kind: "personal", status: null,
+      currency: "EUR", encrypted: false, keyVersion: null, icon: null, color: null });
+
+    var gids = Object.keys(legacy).sort();   // ordine deterministico
+    for (var gi = 0; gi < gids.length; gi++){
+      var gid = gids[gi], d = legacy[gid], meta = d.meta;
+      if (!meta || !Array.isArray(meta.members)) throw new Error("meta/membri mancanti: gruppo " + gid);
+      var sid = spaceIdOf(gid);
+      var space = { id: sid, name: meta.name, kind: "experience", status: "active",
+        currency: "EUR", encrypted: false, keyVersion: null, icon: null, color: null,
+        legacyGroupId: gid,
+        version: (meta.version | 0), deviceId: (meta.deviceId != null ? meta.deviceId : null),
+        updatedAt: (meta.updatedAt != null ? meta.updatedAt : null) };
+      if (meta.dataInizio != null) space.dataInizio = meta.dataInizio;   // estensione legacy preservata
+      if (meta.dataFine   != null) space.dataFine   = meta.dataFine;
+      spaces.push(space);
+
+      for (var mi = 0; mi < meta.members.length; mi++){
+        var m = meta.members[mi];
+        var sm = { id: memberIdOf(sid, m.id), spaceId: sid, legacyMemberId: m.id,
+          name: m.name, active: !m.deleted };
+        if (m.pay)  sm.pay  = m.pay;      // preservati losslessly
+        if (m.foto) sm.foto = m.foto;
+        spaceMembers.push(sm);
+      }
+
+      var recs = d.records || {}, rids = Object.keys(recs).sort();
+      for (var ri = 0; ri < rids.length; ri++){
+        var r = recs[rids[ri]];
+        if (!r) continue;
+        if (!r.deleted){                         // i tombstone non si rivalidano
+          var ev = validaRecord(r, meta.members);
+          if (ev) throw new Error("record legacy invalido (" + gid + "/" + r.id + "): " + ev);
+        }
+        var base = { id: txIdOf(sid, r.id), spaceId: sid,
+          date: (r.date != null ? r.date : null),
+          deleted: !!r.deleted,
+          version: (r.version | 0), deviceId: (r.deviceId != null ? r.deviceId : null),
+          updatedAt: (r.updatedAt != null ? r.updatedAt : null),   // informativo
+          legacyRecordId: r.id, legacyKind: r.kind,
+          categoryId: null, accountId: null, merchant: null, tags: [], capitalMovement: false,
+          allocations: [], allocationMode: "custom" };
+        if (r.kind === "expense"){
+          base.type = "expense";
+          base.amount = r.amountCents;                     // nessuna conversione
+          base.paidById = memberIdOf(sid, r.payer);
+          base.note = (r.desc != null ? r.desc : null);    // desc -> note ; merchant resta null
+          var sh = shares(r), somma = 0, aids = Object.keys(sh);   // {} se tombstone
+          for (var ai = 0; ai < aids.length; ai++){ var lid = aids[ai]; base.allocations.push({ memberId: memberIdOf(sid, lid), amount: sh[lid] }); somma += sh[lid]; }
+          if (!r.deleted && somma !== r.amountCents) throw new Error("allocazioni != importo (" + gid + "/" + r.id + ")");
+        } else if (r.kind === "payment"){
+          base.type = "settlement";
+          base.amount = r.amountCents;
+          base.fromMemberId = memberIdOf(sid, r.from);
+          base.toMemberId   = memberIdOf(sid, r.to);
+          base.note = null;
+        } else {
+          throw new Error("kind legacy sconosciuto (" + gid + "/" + r.id + "): " + r.kind);
+        }
+        transactions.push(base);
+      }
+    }
+    return { spaces: spaces, spaceMembers: spaceMembers, transactions: transactions };
+  }
+
+  // Scrive l'intera proiezione + schemaVersion=1 in UNA transazione. Rollback su errore.
+  function runMigration1(db){
+    return new Promise(function(res, rej){
+      var proj;
+      try { proj = costruisciProiezione(raccogliLegacy()); }
+      catch(e){ rej(e); return; }                 // errore in trasformazione => ZERO write
+      var tx;
+      try { tx = db.transaction(["spaces", "spaceMembers", "transactions", "meta"], "readwrite"); }
+      catch(e){ rej(e); return; }
+      tx.oncomplete = function(){ res(1); };
+      tx.onabort    = function(){ rej(tx.error || new Error("migrazione M1 annullata (rollback)")); };
+      tx.onerror    = function(){ /* seguira' onabort */ };
+      try {
+        var sp = tx.objectStore("spaces"), sm = tx.objectStore("spaceMembers"),
+            trx = tx.objectStore("transactions"), mt = tx.objectStore("meta");
+        proj.spaces.forEach(function(x){ sp.put(x); });
+        proj.spaceMembers.forEach(function(x){ sm.put(x); });
+        proj.transactions.forEach(function(x){ trx.put(x); });
+        mt.put({ key: "schemaVersion", value: 1 });                  // stessa transazione
+        mt.put({ key: "migratedAt", value: new Date().toISOString() });
+      } catch(e){
+        try { tx.abort(); } catch(_){}
+        rej(e); return;                                              // errore in write => rollback totale
+      }
+    });
+  }
+
+  var migrations = { 1: runMigration1 };
 
   async function applicaMigrazioni(db){
     var cur = await metaGetRaw(db, "schemaVersion");
-    if (cur == null){ await metaSetRaw(db, "schemaVersion", 0); cur = 0; }  // baseline, nulla di migrato
-    // Avanza solo se esiste la migrazione successiva. Se una migrazione lancia,
-    // schemaVersion NON viene incrementata (idempotente, non lascia stato a meta').
-    while (cur < SCHEMA_TARGET && migrations[cur + 1]){
-      await migrations[cur + 1]({ db: db });
-      await metaSetRaw(db, "schemaVersion", cur + 1);
-      cur++;
+    if (cur == null) cur = 0;
+    while (cur < SCHEMA_TARGET){
+      var step = migrations[cur + 1];
+      if (!step) break;
+      await step(db);                              // esegue tutto in una sola tx e porta schemaVersion a cur+1
+      var nuovo = await metaGetRaw(db, "schemaVersion");
+      if (!(nuovo > cur)) break;                   // guardia anti-loop se una migrazione non avanza
+      cur = nuovo;
     }
     return cur;
   }
@@ -2774,6 +2888,8 @@ if ("serviceWorker" in navigator){
     close: close,
     DB_NAME: DB_NAME, DB_VERSION: DB_VERSION, SCHEMA_TARGET: SCHEMA_TARGET, STORES: STORES.slice(),
     _migrations: migrations,
+    _collectLegacy: raccogliLegacy,       // helper per i test (sola lettura)
+    _projection: costruisciProiezione,    // helper per i test (pura, nessuna scrittura)
   };
 })();
 /* F0P3-DB-END */
