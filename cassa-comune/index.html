@@ -3053,6 +3053,42 @@ if ("serviceWorker" in navigator){
 </script>
 <!-- ==== /MODULE: storage ==== -->
 
+<script>
+"use strict";
+/* F1P2-PRT-START */
+/* F1 Passo 2 — runtime del solo dominio Personale. Ogni operazione e' scoped
+   IMPLICITAMENTE a personal:local: impossibile leggere transazioni di altri spaceId.
+   Nessuna UI, nessun accesso agli spazi condivisi, nessun dual-write. */
+(function(){
+  var PID = "personal:local";
+  function db(){ return window.calculonDB; }
+  window.personalRuntime = {
+    SPACE_ID: PID,
+    getSpace: function(){ return db().get("spaces", PID); },
+    // solo transazioni del Personale, tombstone esclusi
+    listTransactions: function(){ return db().list("transactions", function(t){ return t && t.spaceId === PID && !t.deleted; }); },
+    listAccounts: function(){ return db().list("accounts"); },      // i conti non sono space-scoped nel modello (canali globali)
+    listCategories: function(){ return db().list("categories"); },  // idem categorie
+  };
+})();
+/* F1P2-PRT-END */
+</script>
+
+<script>
+"use strict";
+/* F1 Passo 2 — attivazione IndexedDB al boot SOLO per il dominio Personale.
+   Best-effort e NON bloccante: il runtime legacy e' gia' avviato dallo script APP
+   e non dipende da IndexedDB. Un errore IDB non impedisce l'avvio del legacy.
+   Nessun refresh degli spazi condivisi (restano interamente legacy). */
+(function(){
+  try {
+    if (window.calculonDB && typeof window.calculonDB.open === "function"){
+      window.calculonDB.open().catch(function(){ /* IDB non disponibile: il legacy prosegue */ });
+    }
+  } catch(e){ /* non bloccare mai il boot legacy */ }
+})();
+</script>
+
 <!-- Segnaposto vuoti per le fasi successive (nessun codice, solo confine di sezione). -->
 <!-- ==== MODULE: crypto ==== -->
 <!-- ==== /MODULE: crypto ==== -->
