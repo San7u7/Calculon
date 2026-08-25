@@ -12,6 +12,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap">
+<!-- ==== MODULE: styles ==== -->
 <style>
 /* ============================================================
    CASSA COMUNE — sistema visivo "scontrino + cartellino prezzo"
@@ -566,14 +567,18 @@ body.no-splash #app{animation:none}
   #app{animation:none}
 }
 </style>
+<!-- ==== /MODULE: styles ==== -->
 </head>
 <body>
+<!-- ==== MODULE: logo ==== -->
 <div id="splash" aria-hidden="true">
   <svg viewBox="0 0 360 145" id="sp-svg"></svg>
 </div>
+<!-- ==== /MODULE: logo ==== -->
 
 <div id="app">
 
+  <!-- ==== MODULE: shell ==== -->
   <header class="hdr" id="hdr" hidden>
     <div class="hdr-in">
     <span class="mark" aria-hidden="true">
@@ -583,9 +588,11 @@ body.no-splash #app{animation:none}
     <button class="sync" id="sync" type="button" data-st="allineato">allineato</button>
     </div>
   </header>
+  <!-- ==== /MODULE: shell ==== -->
 
   <main id="main">
 
+    <!-- ==== MODULE: group-ui ==== -->
     <!-- ============ INTRO OBBLIGATORIA ============ -->
     <section class="screen" id="s-intro" hidden>
       <h1 class="tit-logo"><span class="sr">Calculon</span>
@@ -661,6 +668,8 @@ body.no-splash #app{animation:none}
     </section>
 
     <!-- ============ SPESE ============ -->
+    <!-- ==== /MODULE: group-ui ==== -->
+    <!-- ==== MODULE: spaces ==== -->
     <section class="screen" id="s-spese" hidden>
       <div id="sp-nudge" class="nudge" hidden>
         <span id="sp-nudge-testo">Completa il profilo: foto e link per farti pagare.</span>
@@ -781,6 +790,8 @@ body.no-splash #app{animation:none}
     </section>
 
     <!-- ============ GRUPPO ============ -->
+    <!-- ==== /MODULE: spaces ==== -->
+    <!-- ==== MODULE: settings ==== -->
     <section class="screen" id="s-gruppo" hidden>
       <div class="sez sez-codice">
         <span class="sez-k">Codice del gruppo</span>
@@ -873,8 +884,10 @@ body.no-splash #app{animation:none}
       </div>
     </section>
 
+    <!-- ==== /MODULE: settings ==== -->
   </main>
 
+  <!-- ==== SEAM: shell (bottom-nav) — la nav appartiene a shell ma e' fisicamente separata dall'header; non spostata -->
   <nav class="tabs" id="tabs" hidden>
     <div class="tabs-in">
     <button type="button" data-go="spese">Spese</button>
@@ -1222,6 +1235,7 @@ function propagaIdentita(){
   }
 }
 
+<!-- ==== MODULE: sync ==== -->
 /* ---------- outbox ---------- */
 function outbox(){ return lsJson("cc.outbox." + GID, []); }
 function outboxSet(a){ lsSetJson("cc.outbox." + GID, a); }
@@ -1328,6 +1342,7 @@ function statoSync(){
   }
 }
 
+<!-- ==== /MODULE: sync ==== -->
 /* ---------- utilità ---------- */
 function membri(){ return (D && D.meta.members || []).filter(m => !m.deleted); }
 function nome(id){ const m = (D && D.meta.members || []).find(x => x.id === id); return m ? m.name : "?"; }
@@ -2621,6 +2636,7 @@ if ("serviceWorker" in navigator){
    ============================================================ */
 </script>
 
+<!-- ==== MODULE: storage ==== -->
 <!-- F0 · Passo 3 — strato di storage versionato IndexedDB.
      NON e' ancora source of truth. Non si apre al caricamento, non tocca localStorage,
      non fa rete. Il percorso legacy funziona anche se questo modulo fallisce ad aprire.
@@ -3022,5 +3038,16 @@ if ("serviceWorker" in navigator){
 })();
 /* F0P2-DEV-END */
 </script>
+<!-- ==== /MODULE: storage ==== -->
+
+<!-- Segnaposto vuoti per le fasi successive (nessun codice, solo confine di sezione). -->
+<!-- ==== MODULE: crypto ==== -->
+<!-- ==== /MODULE: crypto ==== -->
+<!-- ==== MODULE: finance-ui ==== -->
+<!-- ==== /MODULE: finance-ui ==== -->
+<!-- ==== MODULE: analytics-ui ==== -->
+<!-- ==== /MODULE: analytics-ui ==== -->
+<!-- ==== MODULE: learn-ui ==== -->
+<!-- ==== /MODULE: learn-ui ==== -->
 </body>
 </html>
