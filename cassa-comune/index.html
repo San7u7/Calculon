@@ -2621,6 +2621,164 @@ if ("serviceWorker" in navigator){
    ============================================================ */
 </script>
 
+<!-- F0 · Passo 3 — strato di storage versionato IndexedDB.
+     NON e' ancora source of truth. Non si apre al caricamento, non tocca localStorage,
+     non fa rete. Il percorso legacy funziona anche se questo modulo fallisce ad aprire.
+     DB_VERSION = versione STRUTTURALE IndexedDB.  meta.schemaVersion = versione del
+     MODELLO DATI Calculon (catena migrazioni), vuota in F0: nessun dato legacy migrato. -->
+<script>
+"use strict";
+/* F0P3-DB-START */
+(function(){
+  var DB_NAME     = "calculon";
+  var DB_VERSION  = 1;   // struttura IndexedDB (object store / indici)
+  var SCHEMA_TARGET = 1; // modello dati che la migrazione M1 introdurra' (Passo 4); NON applicata in F0
+  // Store previsti da spec v1.1 §3 per F0. spaceMembers e shareRules sono separati
+  // apposta (membership e quote non devono fondersi come array atomici).
+  var STORES = ["spaces","spaceMembers","shareRules","transactions","accounts","categories","liabilities","recurring","meta"];
+
+  function reqP(req){ return new Promise(function(res, rej){ req.onsuccess = function(){ res(req.result); }; req.onerror = function(){ rej(req.error); }; }); }
+  function txDone(tx){ return new Promise(function(res, rej){ tx.oncomplete = function(){ res(); }; tx.onerror = function(){ rej(tx.error); }; tx.onabort = function(){ rej(tx.error || new Error("transazione annullata")); }; }); }
+  function keyPathOf(store){ return store === "meta" ? "key" : "id"; }
+
+  var _db = null;   // istanza cache: aperture ripetute sono idempotenti
+
+  function apriRaw(){
+    return new Promise(function(res, rej){
+      var idb = (typeof indexedDB !== "undefined" && indexedDB) ? indexedDB
+              : (typeof self !== "undefined" && self.indexedDB) ? self.indexedDB : null;
+      if (!idb){ rej(new Error("IndexedDB non disponibile")); return; }
+      var req;
+      try { req = idb.open(DB_NAME, DB_VERSION); } catch(e){ rej(e); return; }
+      req.onupgradeneeded = function(){
+        var db = req.result;
+        for (var i = 0; i < STORES.length; i++){
+          if (!db.objectStoreNames.contains(STORES[i])){
+            db.createObjectStore(STORES[i], { keyPath: keyPathOf(STORES[i]) });   // ID espliciti, nessun autoIncrement
+          }
+        }
+      };
+      req.onsuccess = function(){ res(req.result); };
+      req.onerror   = function(){ rej(req.error); };
+      req.onblocked = function(){ /* un'altra scheda tiene aperta una versione precedente */ };
+    });
+  }
+
+  function metaGetRaw(db, key){
+    var tx = db.transaction("meta", "readonly");
+    return reqP(tx.objectStore("meta").get(key)).then(function(r){ return r ? r.value : undefined; });
+  }
+  function metaSetRaw(db, key, value){
+    var tx = db.transaction("meta", "readwrite");
+    tx.objectStore("meta").put({ key: key, value: value });
+    return txDone(tx);
+  }
+
+  // Catena migrazioni del MODELLO (schemaVersion), separata da DB_VERSION.
+  // In F0 e' VUOTA: nessuna migrazione dei dati legacy. La 1: verra' aggiunta al Passo 4.
+  var migrations = {
+    // 1: async function(ctx){ /* legacy -> modello F0 (M1): NON in questo passo */ }
+  };
+
+  async function applicaMigrazioni(db){
+    var cur = await metaGetRaw(db, "schemaVersion");
+    if (cur == null){ await metaSetRaw(db, "schemaVersion", 0); cur = 0; }  // baseline, nulla di migrato
+    // Avanza solo se esiste la migrazione successiva. Se una migrazione lancia,
+    // schemaVersion NON viene incrementata (idempotente, non lascia stato a meta').
+    while (cur < SCHEMA_TARGET && migrations[cur + 1]){
+      await migrations[cur + 1]({ db: db });
+      await metaSetRaw(db, "schemaVersion", cur + 1);
+      cur++;
+    }
+    return cur;
+  }
+
+  async function richiediPersist(db){
+    try {
+      var nav = (typeof navigator !== "undefined") ? navigator : null;
+      var supported = !!(nav && nav.storage && typeof nav.storage.persist === "function");
+      var rec = { supported: supported, granted: null, attemptedAt: new Date().toISOString() };
+      if (supported){ try { rec.granted = await nav.storage.persist(); } catch(e){ rec.granted = null; } }
+      await metaSetRaw(db, "persist", rec);   // registrato in meta, nessuna UI
+    } catch(e){ /* best-effort: non deve mai far fallire open() */ }
+  }
+
+  async function open(){
+    if (_db) return _db;                 // idempotente
+    var db = await apriRaw();
+    await applicaMigrazioni(db);
+    await richiediPersist(db);
+    _db = db;
+    return db;
+  }
+
+  function requireKey(store, record){
+    var kp = keyPathOf(store);
+    if (!record || typeof record !== "object") throw new Error("record non valido");
+    if (record[kp] == null || record[kp] === "") throw new Error("id esplicito richiesto per lo store " + store);
+    return record[kp];
+  }
+
+  async function get(store, id){
+    var db = await open();
+    var tx = db.transaction(store, "readonly");
+    return reqP(tx.objectStore(store).get(id));   // include i tombstone (deleted:true)
+  }
+
+  // put: aggiorna updatedAt automaticamente sui record di dominio, MA non tocca mai
+  // `version`; con { preserveMeta:true } scrive il record verbatim, cosi' le migrazioni
+  // future possono impostare updatedAt/version legacy senza che vengano sovrascritti.
+  async function put(store, record, opts){
+    opts = opts || {};
+    var key = requireKey(store, record);
+    if (store !== "meta" && !opts.preserveMeta){
+      record.updatedAt = Date.now();   // solo updatedAt, mai version
+    }
+    var db = await open();
+    var tx = db.transaction(store, "readwrite");
+    tx.objectStore(store).put(record);
+    await txDone(tx);
+    return key;
+  }
+
+  // del: tombstone, mai rimozione fisica.
+  async function del(store, id, opts){
+    opts = opts || {};
+    var db = await open();
+    var tx = db.transaction(store, "readwrite");
+    var st = tx.objectStore(store);
+    var esistente = await reqP(st.get(id));
+    var rec = esistente || (function(){ var o = {}; o[keyPathOf(store)] = id; return o; })();
+    rec.deleted = true;
+    if (store !== "meta" && !opts.preserveMeta) rec.updatedAt = Date.now();
+    st.put(rec);
+    await txDone(tx);
+    return id;
+  }
+
+  async function list(store, filterFn){
+    var db = await open();
+    var tx = db.transaction(store, "readonly");
+    var tutti = await reqP(tx.objectStore(store).getAll());
+    return (typeof filterFn === "function") ? tutti.filter(filterFn) : tutti;
+  }
+
+  async function metaGet(key){ var db = await open(); return metaGetRaw(db, key); }
+  async function metaSet(key, value){ var db = await open(); await metaSetRaw(db, key, value); return key; }
+
+  async function close(){ if (_db){ try { _db.close(); } catch(e){} _db = null; } }
+
+  window.calculonDB = {
+    open: open, get: get, put: put, del: del, list: list,
+    meta: { get: metaGet, set: metaSet },
+    close: close,
+    DB_NAME: DB_NAME, DB_VERSION: DB_VERSION, SCHEMA_TARGET: SCHEMA_TARGET, STORES: STORES.slice(),
+    _migrations: migrations,
+  };
+})();
+/* F0P3-DB-END */
+</script>
+
 <!-- F0 · Passo 2 — rete di sicurezza backup/restore legacy.
      Non visibile in UI, non tocca lo storage al caricamento, non partecipa al normale
      funzionamento: vive solo su window.__calculonDev. Dump VERBATIM delle chiavi cc.*,
