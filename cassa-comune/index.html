@@ -680,6 +680,46 @@ body.no-splash #app{animation:none}
 .qa-preview{background:rgba(255,255,255,.45);border-radius:var(--r-sm);padding:16px 16px 8px;margin-bottom:16px}
 .qa-preview .importo-wrap{margin-bottom:6px}
 .qa-preview .due{gap:12px;margin-bottom:0}
+
+/* ---------- F1P12 · Home + nav shell ---------- */
+.home-screen{position:fixed;inset:0;z-index:55;background:var(--carta);display:flex;flex-direction:column;
+  padding-top:env(safe-area-inset-top);animation:subEntra .28s var(--curva-morbida)}
+@media (prefers-reduced-motion:reduce){ .home-screen{animation:none} }
+.home-screen .sub-body{padding-bottom:calc(104px + env(safe-area-inset-bottom))}
+.home-head{display:flex;align-items:baseline;justify-content:space-between;margin:16px 0 22px}
+.home-brand{font-size:24px;font-weight:800;letter-spacing:-.03em}
+.home-month{font-size:14px;color:var(--grigio);font-weight:600;text-transform:capitalize}
+.home-msg{font-size:17px;line-height:1.45;font-weight:600;margin:0 0 26px;overflow-wrap:anywhere}
+.home-hero{text-align:center;margin:0 0 26px}
+.home-hero-v{display:block;font-size:44px;font-weight:800;letter-spacing:-.04em;font-variant-numeric:tabular-nums}
+.home-hero-v.pos{color:var(--viola)}
+.home-hero-v.neg{color:var(--rosso)}
+.home-hero-lbl{display:block;margin-top:8px;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--grigio);font-weight:600}
+.home-io{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:0 0 22px}
+.home-io-cell{display:flex;flex-direction:column;gap:5px}
+.home-io-cell .sez-k{margin:0}
+.home-io-v{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}
+.home-io-v.pos{color:var(--viola)}
+.home-recent{margin-top:28px}
+.home-recent-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.home-link{background:transparent;border:0;color:var(--viola);font-weight:700;font-size:13px;padding:6px 2px}
+.home-link:active{opacity:.7}
+.home-settings{margin-top:30px;border-top:1px solid var(--linea);padding-top:18px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.home-settings .sez-k{margin:0;flex-basis:100%}
+.shell{position:fixed;left:0;right:0;bottom:0;z-index:56;display:flex;justify-content:space-around;align-items:center;
+  padding:8px 14px calc(8px + env(safe-area-inset-bottom));
+  background:rgba(255,255,255,.82);-webkit-backdrop-filter:blur(18px) saturate(1.6);backdrop-filter:blur(18px) saturate(1.6);
+  border-top:1px solid var(--linea)}
+.shell-btn{background:transparent;border:0;font-weight:700;font-size:13px;color:var(--grigio);
+  min-height:44px;padding:6px 20px;border-radius:99px;transition:transform .3s var(--curva)}
+.shell-btn[aria-current="page"]{color:var(--inchiostro)}
+.shell-btn:active{transform:scale(.94)}
+.shell-plus{width:52px;height:52px;min-height:52px;border-radius:50%;background:var(--sole);color:#fff;
+  font-size:26px;font-weight:400;padding:0;box-shadow:0 8px 22px rgba(123,92,255,.35)}
+.shell-back{position:fixed;top:calc(12px + env(safe-area-inset-top));left:14px;z-index:56;
+  background:rgba(255,255,255,.82);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);border:0;border-radius:99px;
+  min-height:40px;padding:8px 16px;font-weight:700;font-size:14px;color:var(--inchiostro);box-shadow:0 4px 14px rgba(26,18,48,.12)}
+.shell-back:active{transform:scale(.93)}
 </style>
 <!-- ==== /MODULE: styles ==== -->
 </head>
@@ -1240,6 +1280,45 @@ body.no-splash #app{animation:none}
     </div>
   </div>
 </div>
+
+<!-- ============ F1P12 · HOME (landing Calculon 2.0) ============ -->
+<div class="home-screen" id="ov-home" hidden>
+  <div class="sub-body">
+    <div class="home-head">
+      <span class="home-brand">Calculon</span>
+      <span class="home-month" id="home-month">—</span>
+    </div>
+    <p class="home-msg" id="home-msg">—</p>
+    <div class="home-hero">
+      <span class="home-hero-v" id="home-hero">—</span>
+      <span class="home-hero-lbl">Questo mese, finora</span>
+    </div>
+    <div class="home-io">
+      <div class="home-io-cell"><span class="sez-k">Entrate</span><span class="home-io-v pos" id="home-in">—</span></div>
+      <div class="home-io-cell"><span class="sez-k">Uscite</span><span class="home-io-v" id="home-out">—</span></div>
+    </div>
+    <div class="home-recent">
+      <div class="home-recent-head">
+        <span class="sez-k">Ultimi movimenti</span>
+        <button class="home-link" type="button" id="home-see-month">Vedi il mese</button>
+      </div>
+      <div id="home-list"></div>
+      <p class="nota" id="home-empty" hidden>Nessun movimento questo mese.</p>
+    </div>
+    <div class="home-settings">
+      <span class="sez-k">Impostazioni</span>
+      <button class="home-link" type="button" id="home-conti">Conti</button>
+      <button class="home-link" type="button" id="home-categorie">Categorie</button>
+    </div>
+  </div>
+</div>
+
+<nav class="shell" id="shell" hidden>
+  <button type="button" class="shell-btn" data-shell="home">Home</button>
+  <button type="button" class="shell-btn shell-plus" data-shell="add" aria-label="Aggiungi">+</button>
+  <button type="button" class="shell-btn" data-shell="spazi">Spazi</button>
+</nav>
+<button type="button" class="shell-back" id="shell-back" hidden>‹ Home</button>
 
 <div class="sub-toast" id="sub-toast" role="status" aria-live="polite" hidden></div>
 
@@ -4204,18 +4283,20 @@ if ("serviceWorker" in navigator){
       if (txnState.id) await PR.transactions.update(txnState.id, data);
       else await PR.transactions.create(data);
     } catch(ex){ err.textContent = String((ex && ex.message) || ex); err.hidden = false; return; }
-    closeTxn(); await renderMese(); showToast("Movimento salvato");
+    closeTxn(); await renderMese(); refreshHome(); showToast("Movimento salvato");
   });
 
   $("txn-delete").onclick = async function(){
     var id = txnState.id; if (!id) return;
     try { await PR.transactions.delete(id); } catch(e){ return; }
-    closeTxn(); await renderMese();
+    closeTxn(); await renderMese(); refreshHome();
     showToast("Movimento eliminato", { label: "Annulla", onClick: async function(){
       try { await PR.transactions.restore(id); } catch(e){}
-      await renderMese(); showToast("Movimento ripristinato");
+      await renderMese(); refreshHome(); showToast("Movimento ripristinato");
     }});
   };
+
+  function refreshHome(){ if (window.calculonHome && window.calculonHome.render) window.calculonHome.render(); }
 
   /* ---- navigazione mese + apertura ---- */
   $("mese-prev").onclick = function(){ curMonth = shiftMonth(curMonth, -1); renderMese(); };
@@ -4424,13 +4505,14 @@ if ("serviceWorker" in navigator){
     try { id = await PR.transactions.create(draft); }
     catch(ex){ err.textContent = String((ex && ex.message) || ex); err.hidden = false; return; }
     closeQuick();
-    await M.renderMese();
+    await M.renderMese(); refreshHome();
     // Undo di un CREATE = eliminare la transazione appena creata (tombstone).
     M.toast("Movimento salvato", { label:"Annulla", onClick: async function(){
       try { await PR.transactions.delete(id); } catch(e){}
-      await M.renderMese(); M.toast("Movimento annullato");
+      await M.renderMese(); refreshHome(); M.toast("Movimento annullato");
     }});
   };
+  function refreshHome(){ if (window.calculonHome && window.calculonHome.render) window.calculonHome.render(); }
 
   $("qa-more").onclick = function(){
     var draft = draftFromPreview();
@@ -4442,11 +4524,150 @@ if ("serviceWorker" in navigator){
   $("mese-add").onclick = function(){ openQuick(); };
   if ($("mese-add-first")) $("mese-add-first").onclick = function(){ openQuick(); };
 
+  // Hook per la Home (F1P12): il pulsante centrale + e il CTA della Home aprono Quick Add.
+  window.calculonQuickAdd = { open: openQuick };
+
   Array.prototype.forEach.call(doc.querySelectorAll("[data-quick-back]"), function(btn){
     btn.onclick = function(){ closeQuick(); };
   });
 })();
 /* F1P10-QUICKADD-END */
+</script>
+
+<script>
+"use strict";
+/* F1P12-HOME-START */
+/* F1 Passo 12 — nuova Home Calculon 2.0 come landing predefinito + nav shell
+   (Home · + · Spazi). Solo dati certi via personalRuntime; niente budget/forecast/
+   insight, niente dati simulati. Wiring NON distruttivo: la Home e lo shell sono
+   overlay/barre sopra il legacy; "Spazi" li nasconde e rivela il runtime gruppi
+   legacy INTATTO (nessuna modifica a render()/vaiA()/boot legacy). */
+(function(){
+  var PR = window.personalRuntime, M = window.calculonMese;
+  var doc = document;
+  function $(id){ return doc.getElementById(id); }
+  var ovHome = $("ov-home"), shell = $("shell"), shellBack = $("shell-back");
+  if (!PR || !PR.transactions || !M || !ovHome || !shell) return;
+
+  function pad2(n){ return (n < 10 ? "0" : "") + n; }
+  function todayStr(){ var d = new Date(); return d.getFullYear() + "-" + pad2(d.getMonth()+1) + "-" + pad2(d.getDate()); }
+  function curMonthKey(){ return todayStr().slice(0, 7); }
+  function monthName(key){
+    var p = key.split("-"), d = new Date(+p[0], +p[1]-1, 1);
+    var s = d.toLocaleDateString("it-IT", { month:"long" });
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+  function monthYear(key){
+    var p = key.split("-"), d = new Date(+p[0], +p[1]-1, 1);
+    var s = d.toLocaleDateString("it-IT", { month:"long", year:"numeric" });
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+  function euro(cents){ return (cents/100).toLocaleString("it-IT", { minimumFractionDigits:2, maximumFractionDigits:2 }) + " €"; }
+  function dayLabel(dateStr){ var p = dateStr.split("-"), d = new Date(+p[0], +p[1]-1, +p[2]); return d.toLocaleDateString("it-IT", { day:"numeric", month:"short" }); }
+
+  // Messaggi Calculon (uno solo per volta), coerenti con lo stato dei dati.
+  function messageFor(state, monthKey){
+    switch(state){
+      case "ZERO_DATA_EVER":  return "Qui è ancora tutto troppo tranquillo. Dammi un numero e cominciamo.";
+      case "ZERO_DATA_MONTH": return monthName(monthKey) + " non ha ancora detto niente.";
+      case "POSITIVE_DIFFERENCE": return "Per ora entra più di quanto esce. Segno.";
+      case "NEGATIVE_DIFFERENCE": return "Ehm. Finora è uscito più di quanto è entrato.";
+      case "EVEN": return "Perfettamente in pari. Quasi sospetto.";
+    }
+    return "";
+  }
+
+  // Risoluzione stato SOLO da dati certi.
+  async function resolveState(monthKey){
+    var rows = await PR.transactions.listMonth(monthKey);
+    if (rows.length === 0){
+      var ever = await PR.transactions.listAll();
+      return { state: ever.length === 0 ? "ZERO_DATA_EVER" : "ZERO_DATA_MONTH", totals:{ income:0, expense:0, difference:0 }, rows: [] };
+    }
+    var t = await PR.transactions.monthTotals(monthKey);
+    var state = t.difference > 0 ? "POSITIVE_DIFFERENCE" : (t.difference < 0 ? "NEGATIVE_DIFFERENCE" : "EVEN");
+    return { state: state, totals: t, rows: rows };
+  }
+
+  function movRow(tx, accMap, catMap){
+    var cat = tx.categoryId ? catMap[tx.categoryId] : null, acc = tx.accountId ? accMap[tx.accountId] : null;
+    var btn = doc.createElement("button"); btn.type = "button"; btn.className = "mov-row";
+    var dot = doc.createElement("span"); dot.className = "sub-dot";
+    if (cat && cat.color) dot.style.background = cat.color;
+    if (cat && cat.icon) dot.textContent = cat.icon;
+    btn.appendChild(dot);
+    var main = doc.createElement("span"); main.className = "mov-main";
+    var desc = doc.createElement("span"); desc.className = "mov-desc";
+    desc.textContent = tx.merchant || (cat ? cat.name : "Movimento");
+    main.appendChild(desc);
+    var meta = doc.createElement("span"); meta.className = "mov-meta";
+    var parts = []; if (cat) parts.push(cat.name); if (acc) parts.push(acc.name); parts.push(dayLabel(tx.date));
+    meta.textContent = parts.join(" · "); main.appendChild(meta);
+    btn.appendChild(main);
+    var amt = doc.createElement("span"); amt.className = "mov-amt " + (tx.type === "income" ? "pos" : "neg");
+    amt.textContent = (tx.type === "income" ? "+" : "−") + euro(tx.amount);
+    btn.appendChild(amt);
+    btn.onclick = function(){ M.openTxnForm(tx.id); };
+    return btn;
+  }
+
+  async function renderHome(){
+    var mk = curMonthKey();
+    $("home-month").textContent = monthYear(mk);
+    var r = await resolveState(mk);
+    $("home-msg").textContent = messageFor(r.state, mk);
+    var hero = $("home-hero");
+    hero.textContent = euro(r.totals.difference);
+    hero.classList.toggle("pos", r.totals.difference >= 0);
+    hero.classList.toggle("neg", r.totals.difference < 0);
+    $("home-in").textContent = euro(r.totals.income);
+    $("home-out").textContent = euro(r.totals.expense);
+    // ultimi 3 movimenti
+    var accs = await PR.accounts.listAll(), cats = await PR.categories.listAll();
+    var accMap = {}, catMap = {};
+    accs.forEach(function(a){ accMap[a.id] = a; }); cats.forEach(function(c){ catMap[c.id] = c; });
+    var list = $("home-list"); list.textContent = "";
+    var recent = r.rows.slice(0, 3);   // listMonth e' gia' ordinata per data desc
+    recent.forEach(function(tx){ list.appendChild(movRow(tx, accMap, catMap)); });
+    $("home-empty").hidden = recent.length > 0;
+  }
+
+  // ---- navigazione shell / coesistenza legacy ----
+  function paintShell(active){
+    Array.prototype.forEach.call(shell.children, function(b){
+      if (b.dataset.shell === active) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
+    });
+  }
+  function goHome(){
+    shellBack.hidden = true;
+    ovHome.hidden = false; shell.hidden = false; paintShell("home");
+    renderHome();
+  }
+  function goSpazi(){
+    // rivela il runtime legacy intatto: nasconde solo il layer Calculon
+    ovHome.hidden = true; shell.hidden = true; shellBack.hidden = false;
+    doc.body.style.overflow = "";
+  }
+
+  shell.addEventListener("click", function(e){
+    var b = e.target.closest(".shell-btn"); if (!b) return;
+    var slot = b.dataset.shell;
+    if (slot === "home") goHome();
+    else if (slot === "spazi") goSpazi();
+    else if (slot === "add"){ if (window.calculonQuickAdd) window.calculonQuickAdd.open(); }
+  });
+  shellBack.onclick = goHome;
+
+  $("home-see-month").onclick = function(){ M.openMese(); };
+  $("home-conti").onclick = function(){ var b = $("btn-open-conti"); if (b) b.click(); };
+  $("home-categorie").onclick = function(){ var b = $("btn-open-categorie"); if (b) b.click(); };
+
+  window.calculonHome = { render: renderHome, show: goHome, hide: goSpazi };
+
+  // Landing predefinito: mostra la Home al boot (sotto lo splash z-index 300).
+  goHome();
+})();
+/* F1P12-HOME-END */
 </script>
 
 <!-- Segnaposto vuoti per le fasi successive (nessun codice, solo confine di sezione). -->
