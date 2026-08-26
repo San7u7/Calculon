@@ -4021,6 +4021,166 @@ if ("serviceWorker" in navigator){
 
 <script>
 "use strict";
+/* F2P3-RECUR-START */
+/* F2 Passo 3 — ricorrenze Personale (store "recurring", gia' esistente: nessuna
+   migrazione). Le ricorrenze sono PIANO: non generano transazioni, nessun matching
+   automatico con transazioni reali, nessun forecast. Solo personalRuntime. */
+(function(){
+  var DB = window.calculonDB;
+  if (!DB) return;
+  var PID = "personal:local";
+  var TYPES = ["expense", "income"];
+
+  function nowMs(){ return Date.now(); }
+  function uid(){
+    var rnd = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID()
+            : (nowMs().toString(36) + Math.random().toString(36).slice(2, 8));
+    return "rec:" + rnd;
+  }
+  function optText(v){ var x = (v == null ? "" : String(v)).trim(); return x ? x : null; }
+  function isPersonal(r){ return !!r && r.spaceId === PID && !r.deleted; }
+  function validType(t){ return TYPES.indexOf(t) >= 0; }
+  function validAmount(a){ return typeof a === "number" && isFinite(a) && Math.floor(a) === a && a > 0; }
+  function validMonth(m){ return typeof m === "string" && /^\d{4}-(0[1-9]|1[0-2])$/.test(m); }
+  function validDay(d){ return typeof d === "number" && Math.floor(d) === d && d >= 1 && d <= 31; }
+
+  // Ultimo giorno del mese: Date.UTC(anno, meseT1based, 0) = giorno 0 del mese successivo.
+  function lastDayOfMonth(month){ var p = month.split("-"); return new Date(Date.UTC(+p[0], +p[1], 0)).getUTCDate(); }
+  // Scadenza nel mese: se il giorno non esiste (es. 31 a febbraio) usa l'ultimo giorno.
+  function dueDateStr(month, dayOfMonth){
+    var d = Math.min(dayOfMonth, lastDayOfMonth(month));
+    return month + "-" + (d < 10 ? "0" : "") + d;
+  }
+
+  async function refExists(store, id, requireKind){
+    var x = await DB.get(store, id);
+    if (!x || x.deleted) return { ok:false };            // archiviato ammesso, deleted no
+    if (requireKind && x.kind !== requireKind) return { ok:false, kindMismatch:true };
+    return { ok:true };
+  }
+
+  async function buildValidated(input){
+    input = input || {};
+    var type = input.type;
+    if (!validType(type)) throw new Error("type deve essere expense|income");
+    if (!validAmount(input.amount)) throw new Error("amount deve essere un intero > 0 (centesimi)");
+    if (input.cadence !== "monthly") throw new Error("cadence deve essere \"monthly\"");
+    if (!validDay(input.dayOfMonth)) throw new Error("dayOfMonth deve essere 1..31");
+    if (!validMonth(input.startMonth)) throw new Error("startMonth deve essere YYYY-MM valido");
+    var endMonth = (input.endMonth != null && input.endMonth !== "") ? input.endMonth : null;
+    if (endMonth !== null){
+      if (!validMonth(endMonth)) throw new Error("endMonth deve essere YYYY-MM valido o null");
+      if (endMonth < input.startMonth) throw new Error("endMonth non puo' precedere startMonth");
+    }
+    var accountId  = (input.accountId  != null && input.accountId  !== "") ? input.accountId  : null;
+    var categoryId = (input.categoryId != null && input.categoryId !== "") ? input.categoryId : null;
+    if (accountId != null){
+      var ar = await refExists("accounts", accountId);
+      if (!ar.ok) throw new Error("conto inesistente: " + accountId);
+    }
+    if (categoryId != null){
+      var cr = await refExists("categories", categoryId, type);   // kind coerente col type
+      if (!cr.ok) throw new Error(cr.kindMismatch ? "categoria non coerente col tipo" : "categoria inesistente: " + categoryId);
+    }
+    return { type:type, amount:input.amount, categoryId:categoryId, accountId:accountId,
+      merchant:optText(input.merchant), cadence:"monthly", dayOfMonth:input.dayOfMonth,
+      startMonth:input.startMonth, endMonth:endMonth };
+  }
+
+  function byCreated(a, b){ return (a.createdAt || 0) - (b.createdAt || 0); }
+  async function listAll(){ return (await DB.list("recurring", isPersonal)).sort(byCreated); }
+  async function listActive(){ return (await DB.list("recurring", function(r){ return isPersonal(r) && !r.archived; })).sort(byCreated); }
+  async function get(id){ var r = await DB.get("recurring", id); return isPersonal(r) ? r : null; }
+
+  async function create(data){
+    var v = await buildValidated(data || {});
+    var rec = { id:uid(), spaceId:PID, type:v.type, amount:v.amount,
+      categoryId:v.categoryId, accountId:v.accountId, merchant:v.merchant,
+      cadence:v.cadence, dayOfMonth:v.dayOfMonth, startMonth:v.startMonth, endMonth:v.endMonth,
+      archived:false, deleted:false, createdAt:nowMs() };
+    await DB.put("recurring", rec);
+    return rec.id;
+  }
+
+  async function update(id, patch){
+    patch = patch || {};
+    if ("spaceId" in patch && patch.spaceId !== PID) throw new Error("spaceId non modificabile");
+    var cur = await DB.get("recurring", id);
+    if (!isPersonal(cur)) throw new Error("ricorrenza inesistente: " + id);
+    var merged = {
+      type:       ("type"       in patch) ? patch.type       : cur.type,
+      amount:     ("amount"     in patch) ? patch.amount     : cur.amount,
+      categoryId: ("categoryId" in patch) ? patch.categoryId : cur.categoryId,
+      accountId:  ("accountId"  in patch) ? patch.accountId  : cur.accountId,
+      merchant:   ("merchant"   in patch) ? patch.merchant   : cur.merchant,
+      cadence:    ("cadence"    in patch) ? patch.cadence    : cur.cadence,
+      dayOfMonth: ("dayOfMonth" in patch) ? patch.dayOfMonth : cur.dayOfMonth,
+      startMonth: ("startMonth" in patch) ? patch.startMonth : cur.startMonth,
+      endMonth:   ("endMonth"   in patch) ? patch.endMonth   : cur.endMonth
+    };
+    var v = await buildValidated(merged);
+    cur.type = v.type; cur.amount = v.amount; cur.categoryId = v.categoryId; cur.accountId = v.accountId;
+    cur.merchant = v.merchant; cur.cadence = v.cadence; cur.dayOfMonth = v.dayOfMonth;
+    cur.startMonth = v.startMonth; cur.endMonth = v.endMonth; cur.spaceId = PID;
+    await DB.put("recurring", cur);
+    return cur.id;
+  }
+
+  async function setArchived(id, val){
+    var cur = await DB.get("recurring", id);
+    if (!isPersonal(cur)) throw new Error("ricorrenza inesistente: " + id);
+    cur.archived = !!val;
+    await DB.put("recurring", cur);
+    return id;
+  }
+  function archive(id){ return setArchived(id, true); }
+  function restore(id){ return setArchived(id, false); }   // pair di archive (riattiva)
+
+  async function del(id){
+    var cur = await DB.get("recurring", id);
+    if (!isPersonal(cur)) throw new Error("ricorrenza inesistente: " + id);
+    await DB.del("recurring", id);   // tombstone
+    return id;
+  }
+
+  // Ricorrenze attive nel mese (start<=M<=end), con dueDate calcolata per quel mese.
+  async function forMonth(month){
+    var recs = await listActive();
+    var out = [];
+    recs.forEach(function(r){
+      if (r.startMonth && month < r.startMonth) return;
+      if (r.endMonth && month > r.endMonth) return;
+      out.push(Object.assign({}, r, { dueDate: dueDateStr(month, r.dayOfMonth) }));
+    });
+    return out;
+  }
+
+  // Compromessi CERTI ancora da arrivare. Mese corrente: solo scadenze > referenceDate.
+  // Mese futuro: tutte. Mese passato: zero. referenceDate = "YYYY-MM-DD".
+  async function certainRemaining(month, referenceDate){
+    var items = await forMonth(month);
+    var refMonth = String(referenceDate).slice(0, 7);
+    var considered;
+    if (month > refMonth) considered = items;                                        // futuro
+    else if (month < refMonth) considered = [];                                      // passato
+    else considered = items.filter(function(it){ return it.dueDate > referenceDate; }); // corrente: dopo oggi
+    var income = 0, expense = 0;
+    considered.forEach(function(it){ if (it.type === "income") income += it.amount; else if (it.type === "expense") expense += it.amount; });
+    return { month:month, income:income, expense:expense, items:considered };
+  }
+
+  window.personalRuntime = window.personalRuntime || {};
+  window.personalRuntime.recurring = {
+    listAll: listAll, listActive: listActive, get: get,
+    create: create, update: update, archive: archive, restore: restore, delete: del,
+    forMonth: forMonth, certainRemaining: certainRemaining
+  };
+})();
+/* F2P3-RECUR-END */
+</script>
+
+<script>
+"use strict";
 /* F1P5-UI-START */
 /* F1 Passo 5 — UI Conti + Categorie (sotto-schermate del Profilo). Usa ESCLUSIVAMENTE
    personalRuntime.accounts / personalRuntime.categories: nessun accesso diretto a
