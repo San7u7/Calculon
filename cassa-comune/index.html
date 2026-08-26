@@ -3470,6 +3470,138 @@ if ("serviceWorker" in navigator){
 
 <script>
 "use strict";
+/* F1P7-TXN-START */
+/* F1 Passo 7 — data layer delle transazioni personali. Estende
+   personalRuntime.transactions usando SOLO calculonDB. Nessuna UI, nessun cambio
+   DB_VERSION, nessun tocco a Worker/wire/legacy, niente budget/forecast/insight,
+   niente Quick Add. Semantica F1: solo expense|income; amount intero > 0 in centesimi;
+   spaceId fisso "personal:local" e non modificabile; date YYYY-MM-DD; account e
+   categoria opzionali; se la categoria e' presente, il suo kind deve coincidere col
+   type; merchant/note opzionali; capitalMovement=false; nessun transfer. */
+(function(){
+  var DB = window.calculonDB;
+  if (!DB) return;
+  var PID = "personal:local";
+  var TYPES = ["expense", "income"];
+
+  function nowMs(){ return Date.now(); }
+  function uid(){
+    var rnd = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID()
+            : (nowMs().toString(36) + Math.random().toString(36).slice(2, 8));
+    return "txn:" + rnd;
+  }
+  function monthOf(d){ return String(d).slice(0, 7); }
+  function isPersonal(t){ return !!t && t.spaceId === PID && !t.deleted; }   // esclude tombstone + altri spazi
+  function byDateDesc(a, b){
+    if (a.date !== b.date) return a.date < b.date ? 1 : -1;
+    return (b.createdAt || 0) - (a.createdAt || 0);
+  }
+  function optText(v){ var x = (v == null ? "" : String(v)).trim(); return x ? x : null; }
+
+  function validType(t){ return TYPES.indexOf(t) >= 0; }
+  function validAmount(a){ return typeof a === "number" && isFinite(a) && Math.floor(a) === a && a > 0; }
+  function validDate(d){
+    if (typeof d !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(d)) return false;
+    var p = d.split("-"), y = +p[0], m = +p[1], day = +p[2];
+    if (m < 1 || m > 12 || day < 1 || day > 31) return false;
+    var dt = new Date(Date.UTC(y, m - 1, day));   // rifiuta 2026-02-30 e simili
+    return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === day;
+  }
+
+  // Riferimenti opzionali: archiviati AMMESSI (solo !deleted). La coerenza kind vale
+  // anche su categorie archiviate, cosi' la modifica di una transazione storica non si rompe.
+  async function checkRefs(type, accountId, categoryId){
+    if (accountId != null){
+      var acc = await DB.get("accounts", accountId);
+      if (!acc || acc.deleted) throw new Error("conto inesistente: " + accountId);
+    }
+    if (categoryId != null){
+      var cat = await DB.get("categories", categoryId);
+      if (!cat || cat.deleted) throw new Error("categoria inesistente: " + categoryId);
+      if (cat.kind !== type) throw new Error("categoria non coerente col tipo (" + type + " != " + cat.kind + ")");
+    }
+  }
+
+  async function buildValidated(input){
+    var type = input.type;
+    if (!validType(type)) throw new Error("type deve essere expense|income");
+    if (!validAmount(input.amount)) throw new Error("amount deve essere un intero > 0 (centesimi)");
+    if (!validDate(input.date)) throw new Error("date deve essere YYYY-MM-DD valida");
+    var accountId  = (input.accountId  != null && input.accountId  !== "") ? input.accountId  : null;
+    var categoryId = (input.categoryId != null && input.categoryId !== "") ? input.categoryId : null;
+    await checkRefs(type, accountId, categoryId);
+    return { type:type, amount:input.amount, date:input.date, accountId:accountId,
+      categoryId:categoryId, merchant:optText(input.merchant), note:optText(input.note) };
+  }
+
+  async function listAll(){ return (await DB.list("transactions", isPersonal)).sort(byDateDesc); }
+  async function listMonth(m){
+    return (await DB.list("transactions", function(t){ return isPersonal(t) && monthOf(t.date) === m; })).sort(byDateDesc);
+  }
+  async function getTxn(id){ var t = await DB.get("transactions", id); return isPersonal(t) ? t : null; }
+
+  async function create(data){
+    var v = await buildValidated(data || {});
+    var rec = { id:uid(), spaceId:PID, type:v.type, amount:v.amount, date:v.date,
+      accountId:v.accountId, categoryId:v.categoryId, merchant:v.merchant, note:v.note,
+      tags:[], capitalMovement:false, deleted:false, createdAt:nowMs() };
+    await DB.put("transactions", rec);   // put imposta updatedAt
+    return rec.id;
+  }
+
+  async function update(id, patch){
+    patch = patch || {};
+    if ("spaceId" in patch && patch.spaceId !== PID) throw new Error("spaceId non modificabile");
+    var cur = await DB.get("transactions", id);
+    if (!isPersonal(cur)) throw new Error("transazione inesistente: " + id);
+    var merged = {
+      type:       ("type"       in patch) ? patch.type       : cur.type,
+      amount:     ("amount"     in patch) ? patch.amount     : cur.amount,
+      date:       ("date"       in patch) ? patch.date       : cur.date,
+      accountId:  ("accountId"  in patch) ? patch.accountId  : cur.accountId,
+      categoryId: ("categoryId" in patch) ? patch.categoryId : cur.categoryId,
+      merchant:   ("merchant"   in patch) ? patch.merchant   : cur.merchant,
+      note:       ("note"       in patch) ? patch.note       : cur.note
+    };
+    var v = await buildValidated(merged);
+    cur.type = v.type; cur.amount = v.amount; cur.date = v.date;
+    cur.accountId = v.accountId; cur.categoryId = v.categoryId;
+    cur.merchant = v.merchant; cur.note = v.note;
+    cur.spaceId = PID; cur.capitalMovement = false;   // invarianti forzate
+    await DB.put("transactions", cur);
+    return cur.id;
+  }
+
+  async function del(id){
+    var cur = await DB.get("transactions", id);
+    if (!isPersonal(cur)) throw new Error("transazione inesistente: " + id);
+    await DB.del("transactions", id);   // tombstone (deleted:true), mai rimozione fisica
+    return id;
+  }
+
+  async function monthTotals(m){
+    var rows = await listMonth(m);   // gia' personal + !deleted
+    var income = 0, expense = 0;
+    for (var i = 0; i < rows.length; i++){
+      if (rows[i].type === "income") income += rows[i].amount;
+      else if (rows[i].type === "expense") expense += rows[i].amount;
+      // type futuri (transfer/...) esclusi dai totali
+    }
+    return { month:m, income:income, expense:expense, difference: income - expense };
+  }
+
+  window.personalRuntime = window.personalRuntime || {};
+  window.personalRuntime.transactions = {
+    listAll: listAll, listMonth: listMonth, get: getTxn,
+    create: create, update: update, delete: del,
+    monthTotals: monthTotals
+  };
+})();
+/* F1P7-TXN-END */
+</script>
+
+<script>
+"use strict";
 /* F1P5-UI-START */
 /* F1 Passo 5 — UI Conti + Categorie (sotto-schermate del Profilo). Usa ESCLUSIVAMENTE
    personalRuntime.accounts / personalRuntime.categories: nessun accesso diretto a
