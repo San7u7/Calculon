@@ -3089,6 +3089,220 @@ if ("serviceWorker" in navigator){
 })();
 </script>
 
+<script>
+"use strict";
+/* F1P4-DATA-START */
+/* F1 Passo 4 — data layer operativo di Conti e Categorie del dominio Personale.
+   Solo modello + CRUD + seed idempotente. Nessuna UI, nessun cambio DB_VERSION,
+   nessun tocco a Worker/wire/legacy. Gli object store accounts/categories esistono
+   gia' dal Passo F0P3. Conti e categorie NON sono space-scoped (risorse globali del
+   modello): in F1 il dominio Personale e' l'unico consumatore.
+   Archiviazione = flag `archived`, MAI tombstone: nessuna delete e' esposta, cosi'
+   un conto/categoria resta risolvibile sulle transazioni storiche. */
+(function(){
+  var DB = window.calculonDB;
+  if (!DB) return;   // storage assente: il legacy prosegue, nessun data layer
+
+  function nowMs(){ return Date.now(); }
+  function nowISO(){ return new Date().toISOString(); }
+  function uid(prefix){
+    var rnd = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID()
+            : (nowMs().toString(36) + Math.random().toString(36).slice(2, 8));
+    return prefix + ":" + rnd;
+  }
+  function vivo(r){ return !!r && !r.deleted; }              // esclude i tombstone
+  function attivo(r){ return vivo(r) && !r.archived; }       // esclude anche gli archiviati
+  function testo(v){ return (v == null ? "" : String(v)).trim(); }
+  function perOrdine(a, b){
+    var oa = (typeof a.order === "number" ? a.order : 0);
+    var ob = (typeof b.order === "number" ? b.order : 0);
+    if (oa !== ob) return oa - ob;
+    return (a.createdAt || 0) - (b.createdAt || 0);
+  }
+  function nextOrder(records){
+    var m = -1; records.forEach(function(r){ if (typeof r.order === "number" && r.order > m) m = r.order; });
+    return m + 1;
+  }
+
+  /* ---- CONTI (accounts) ---- */
+  var ACCOUNT_TYPES = ["cash", "bank", "card", "other"];
+  function normType(t){ t = testo(t); return ACCOUNT_TYPES.indexOf(t) >= 0 ? t : "other"; }
+
+  async function accListAll(){ return (await DB.list("accounts", vivo)).sort(perOrdine); }
+  async function accListActive(){ return (await DB.list("accounts", attivo)).sort(perOrdine); }
+
+  async function accCreate(input){
+    input = input || {};
+    var name = testo(input.name);
+    if (!name) throw new Error("conto: nome obbligatorio");
+    var all = await DB.list("accounts", vivo);
+    var rec = {
+      id: uid("acc"), name: name, type: normType(input.type),
+      color: (input.color != null ? input.color : null),
+      icon:  (input.icon  != null ? input.icon  : null),
+      archived: false, order: nextOrder(all), seeded: false, createdAt: nowMs()
+    };
+    await DB.put("accounts", rec);   // put imposta updatedAt automaticamente
+    return rec.id;
+  }
+
+  async function accUpdate(id, patch){
+    patch = patch || {};
+    var rec = await DB.get("accounts", id);
+    if (!vivo(rec)) throw new Error("conto inesistente: " + id);
+    if ("name"  in patch){ var n = testo(patch.name); if (!n) throw new Error("conto: nome obbligatorio"); rec.name = n; }
+    if ("type"  in patch) rec.type  = normType(patch.type);
+    if ("color" in patch) rec.color = patch.color;
+    if ("icon"  in patch) rec.icon  = patch.icon;
+    if ("order" in patch && typeof patch.order === "number") rec.order = patch.order;
+    await DB.put("accounts", rec);
+    return rec.id;
+  }
+
+  async function accSetArchived(id, val){
+    var rec = await DB.get("accounts", id);
+    if (!vivo(rec)) throw new Error("conto inesistente: " + id);
+    rec.archived = !!val;
+    await DB.put("accounts", rec);
+    return rec.id;
+  }
+  function accArchive(id){ return accSetArchived(id, true); }
+  function accRestore(id){ return accSetArchived(id, false); }
+
+  /* ---- CATEGORIE (categories) ---- */
+  var CATEGORY_KINDS = ["expense", "income"];
+  function normKind(k){
+    k = testo(k);
+    if (CATEGORY_KINDS.indexOf(k) < 0) throw new Error("categoria: kind deve essere expense|income");
+    return k;
+  }
+
+  async function catListAll(kind){
+    var recs = (await DB.list("categories", vivo)).sort(perOrdine);
+    return kind ? recs.filter(function(r){ return r.kind === kind; }) : recs;
+  }
+  async function catListActive(kind){
+    var recs = (await DB.list("categories", attivo)).sort(perOrdine);
+    return kind ? recs.filter(function(r){ return r.kind === kind; }) : recs;
+  }
+
+  async function catCreate(input){
+    input = input || {};
+    var name = testo(input.name);
+    if (!name) throw new Error("categoria: nome obbligatorio");
+    var kind = normKind(input.kind);   // obbligatorio
+    var all = await DB.list("categories", vivo);
+    var rec = {
+      id: uid("cat"), name: name, kind: kind,
+      color: (input.color != null ? input.color : null),
+      icon:  (input.icon  != null ? input.icon  : null),
+      archived: false, order: nextOrder(all), seeded: false, createdAt: nowMs()
+    };
+    await DB.put("categories", rec);
+    return rec.id;
+  }
+
+  async function catUpdate(id, patch){
+    patch = patch || {};
+    var rec = await DB.get("categories", id);
+    if (!vivo(rec)) throw new Error("categoria inesistente: " + id);
+    if ("name"  in patch){ var n = testo(patch.name); if (!n) throw new Error("categoria: nome obbligatorio"); rec.name = n; }
+    if ("kind"  in patch) rec.kind  = normKind(patch.kind);
+    if ("color" in patch) rec.color = patch.color;
+    if ("icon"  in patch) rec.icon  = patch.icon;
+    if ("order" in patch && typeof patch.order === "number") rec.order = patch.order;
+    await DB.put("categories", rec);
+    return rec.id;
+  }
+
+  async function catSetArchived(id, val){
+    var rec = await DB.get("categories", id);
+    if (!vivo(rec)) throw new Error("categoria inesistente: " + id);
+    rec.archived = !!val;
+    await DB.put("categories", rec);
+    return rec.id;
+  }
+  function catArchive(id){ return catSetArchived(id, true); }
+  function catRestore(id){ return catSetArchived(id, false); }
+
+  /* ---- SEED: una sola volta, idempotente ---- */
+  var ACCOUNT_DEFAULTS = [
+    { id: "acc:seed:contanti", name: "Contanti", type: "cash" },
+    { id: "acc:seed:banca",    name: "Banca",    type: "bank" },
+    { id: "acc:seed:carta",    name: "Carta",    type: "card" }
+  ];
+  var CATEGORY_DEFAULTS = [
+    { id: "cat:seed:alimentari",    name: "Alimentari",    kind: "expense" },
+    { id: "cat:seed:casa",          name: "Casa",          kind: "expense" },
+    { id: "cat:seed:trasporti",     name: "Trasporti",     kind: "expense" },
+    { id: "cat:seed:salute",        name: "Salute",        kind: "expense" },
+    { id: "cat:seed:svago",         name: "Svago",         kind: "expense" },
+    { id: "cat:seed:altro",         name: "Altro",         kind: "expense" },
+    { id: "cat:seed:stipendio",     name: "Stipendio",     kind: "income" },
+    { id: "cat:seed:altre-entrate", name: "Altre entrate", kind: "income" }
+  ];
+
+  // Doppia garanzia di idempotenza:
+  //  1) marker in meta -> il seed di uno store gira UNA sola volta nella vita del DB;
+  //  2) put SOLO se il record e' assente -> anche senza marker, un default archiviato o
+  //     modificato dall'utente non viene MAI riscritto.
+  async function seedStore(store, defaults, marker, build){
+    if (await DB.meta.get(marker)) return { seeded: 0, skipped: defaults.length };
+    var seeded = 0;
+    for (var i = 0; i < defaults.length; i++){
+      var d = defaults[i];
+      var ex = await DB.get(store, d.id);
+      if (ex) continue;                       // gia' presente (anche archiviato/modificato): intatto
+      await DB.put(store, build(d, i));
+      seeded++;
+    }
+    await DB.meta.set(marker, { at: nowISO(), count: defaults.length, seeded: seeded });
+    return { seeded: seeded, skipped: defaults.length - seeded };
+  }
+
+  function buildAccount(d, i){
+    return { id: d.id, name: d.name, type: normType(d.type), color: null, icon: null,
+      archived: false, order: i, seeded: true, createdAt: nowMs() };
+  }
+  function buildCategory(d, i){
+    return { id: d.id, name: d.name, kind: d.kind, color: null, icon: null,
+      archived: false, order: i, seeded: true, createdAt: nowMs() };
+  }
+
+  async function seedDefaults(){
+    var a = await seedStore("accounts",   ACCOUNT_DEFAULTS,  "seeded:accounts",   buildAccount);
+    var c = await seedStore("categories", CATEGORY_DEFAULTS, "seeded:categories", buildCategory);
+    return { accounts: a, categories: c };
+  }
+
+  /* ---- estensione esplicita di personalRuntime ---- */
+  window.personalRuntime = window.personalRuntime || {};
+  window.personalRuntime.accounts = {
+    listActive: accListActive, listAll: accListAll,
+    create: accCreate, update: accUpdate, archive: accArchive, restore: accRestore
+  };
+  window.personalRuntime.categories = {
+    listActive: catListActive, listAll: catListAll,
+    create: catCreate, update: catUpdate, archive: catArchive, restore: catRestore
+  };
+  window.personalRuntime.seedDefaults = seedDefaults;
+})();
+/* F1P4-DATA-END */
+</script>
+
+<script>
+"use strict";
+/* F1 Passo 4 — seed dei default al boot, best-effort e NON bloccante.
+   Non deve mai impedire l'avvio del legacy ne' del runtime Personale. */
+(function(){
+  try {
+    if (window.personalRuntime && typeof window.personalRuntime.seedDefaults === "function"){
+      window.personalRuntime.seedDefaults().catch(function(){ /* seed best-effort */ });
+    }
+  } catch(e){ /* mai bloccare il boot */ }
+})();
+</script>
+
 <!-- Segnaposto vuoti per le fasi successive (nessun codice, solo confine di sezione). -->
 <!-- ==== MODULE: crypto ==== -->
 <!-- ==== /MODULE: crypto ==== -->
