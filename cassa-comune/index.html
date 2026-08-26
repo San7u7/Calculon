@@ -627,6 +627,49 @@ body.no-splash #app{animation:none}
   box-shadow:0 10px 30px rgba(26,18,48,.3);opacity:0;pointer-events:none;
   transition:opacity .25s ease,transform .25s var(--curva-morbida)}
 .sub-toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.sub-toast{display:flex;align-items:center;gap:16px}
+.sub-toast-act{background:transparent;border:0;color:#fff;font-weight:800;font-size:14px;
+  text-decoration:underline;text-underline-offset:3px;padding:2px 2px}
+.sub-toast-act:active{opacity:.7}
+
+/* ---------- F1P8 · superficie Mese + movimenti ---------- */
+.mese-nav{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:6px 0 22px}
+.mese-arrow{flex:none;width:44px;height:44px;border-radius:50%;border:0;
+  background:rgba(255,255,255,.72);color:var(--inchiostro);font-size:22px;line-height:1;
+  box-shadow:0 4px 14px rgba(26,18,48,.08);transition:transform .3s var(--curva),opacity .2s ease}
+.mese-arrow:active{transform:scale(.9)}
+.mese-arrow[disabled]{opacity:.3;box-shadow:none;cursor:not-allowed}
+.mese-label{flex:1;text-align:center;font-size:19px;font-weight:700;letter-spacing:-.02em;text-transform:capitalize}
+.mese-tot{display:grid;grid-template-columns:1fr 1fr;gap:12px 16px;margin:0 0 22px}
+.mese-tot-cell{display:flex;flex-direction:column;gap:5px}
+.mese-tot-cell .sez-k{margin:0}
+.mese-tot-diff{grid-column:1 / -1;border-top:1px solid var(--linea);padding-top:14px;margin-top:2px}
+.mese-tot-v{font-size:22px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.mese-tot-v.big{font-size:28px}
+.mese-tot-v.pos{color:var(--viola)}
+.mese-tot-v.neg{color:var(--rosso)}
+.mese-empty{padding:30px 4px 6px;text-align:center}
+.mese-empty .nota{margin:0 0 18px}
+#mese-list{margin-top:20px}
+.mov-row{display:flex;align-items:center;gap:12px;width:100%;text-align:left;
+  background:rgba(255,255,255,.72);border:0;border-radius:var(--r-sm);
+  padding:11px 13px;margin-bottom:10px;box-shadow:0 4px 14px rgba(26,18,48,.06);
+  transition:transform .3s var(--curva)}
+.mov-row:active{transform:scale(.98)}
+.mov-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.mov-desc{font-weight:600;font-size:15px;overflow-wrap:anywhere}
+.mov-meta{font-size:12px;color:var(--grigio);overflow-wrap:anywhere}
+.mov-amt{flex:none;font-weight:700;font-size:15px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.mov-amt.pos{color:var(--viola)}
+.mov-amt.neg{color:var(--inchiostro)}
+.seg{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:2px 0 6px}
+.seg-btn{min-height:var(--tap);border:0;border-radius:var(--r-sm);font-weight:700;font-size:15px;
+  background:rgba(255,255,255,.7);color:var(--grigio);box-shadow:0 4px 14px rgba(26,18,48,.06);
+  transition:transform .3s var(--curva)}
+.seg-btn:active{transform:scale(.95)}
+.seg-btn.is-on{background:var(--sole);color:#fff;box-shadow:0 8px 22px rgba(123,92,255,.28)}
+#txn-form .importo-wrap{margin-bottom:8px}
+#txn-delete{margin-top:22px}
 </style>
 <!-- ==== /MODULE: styles ==== -->
 </head>
@@ -904,6 +947,11 @@ body.no-splash #app{animation:none}
       <div class="divisore"></div>
 
       <div class="sez">
+        <span class="sez-k">Spazio personale</span>
+        <button class="btn btn-primary w" id="btn-open-mese" type="button">Il mio mese</button>
+      </div>
+
+      <div class="sez">
         <span class="sez-k">La tua foto</span>
         <p class="nota">Vale per tutti i tuoi gruppi.</p>
         <div class="foto-mia">
@@ -1071,6 +1119,70 @@ body.no-splash #app{animation:none}
         <button class="btn btn-ghost" type="button" data-form-cancel>Annulla</button>
         <button class="btn btn-primary" type="submit">Salva</button>
       </div>
+    </form>
+  </div>
+</div>
+
+<!-- ============ F1P8 · MESE (superficie autonoma del dominio Personale) ============ -->
+<div class="subscreen" id="ov-mese" hidden>
+  <div class="sub-head">
+    <button class="sub-back" type="button" data-p8-back>‹ Indietro</button>
+    <span class="sub-title">Il mio mese</span>
+  </div>
+  <div class="sub-body">
+    <div class="mese-nav">
+      <button class="mese-arrow" type="button" id="mese-prev" aria-label="Mese precedente">‹</button>
+      <span class="mese-label" id="mese-label">—</span>
+      <button class="mese-arrow" type="button" id="mese-next" aria-label="Mese successivo">›</button>
+    </div>
+    <div class="mese-tot">
+      <div class="mese-tot-cell"><span class="sez-k">Entrate</span><span class="mese-tot-v pos" id="mese-in">—</span></div>
+      <div class="mese-tot-cell"><span class="sez-k">Uscite</span><span class="mese-tot-v" id="mese-out">—</span></div>
+      <div class="mese-tot-cell mese-tot-diff"><span class="sez-k">Differenza</span><span class="mese-tot-v big" id="mese-diff">—</span></div>
+    </div>
+    <button class="btn btn-primary w" type="button" id="mese-add">+ Aggiungi</button>
+    <div class="mese-empty" id="mese-empty" hidden>
+      <p class="nota" id="mese-empty-txt">Nessun movimento in questo mese.</p>
+      <button class="btn btn-ghost w" type="button" id="mese-add-first">Aggiungi il primo</button>
+    </div>
+    <div id="mese-list"></div>
+  </div>
+</div>
+
+<!-- ============ F1P8 · FORM TRANSAZIONE ============ -->
+<div class="subscreen" id="ov-txn" hidden>
+  <div class="sub-head">
+    <button class="sub-back" type="button" data-p8-back>‹ Indietro</button>
+    <span class="sub-title" id="txn-title">Nuovo movimento</span>
+  </div>
+  <div class="sub-body">
+    <form class="sub-form" id="txn-form" novalidate>
+      <label class="lbl" for="txn-amt">Importo</label>
+      <div class="importo-wrap">
+        <input id="txn-amt" class="importo" type="text" inputmode="decimal" placeholder="0,00" autocomplete="off">
+        <span class="sim">€</span>
+      </div>
+      <label class="lbl">Tipo</label>
+      <div class="seg" id="txn-type">
+        <button type="button" class="seg-btn is-on" data-type="expense">Spesa</button>
+        <button type="button" class="seg-btn" data-type="income">Entrata</button>
+      </div>
+      <label class="lbl" for="txn-date">Data</label>
+      <input id="txn-date" type="date">
+      <label class="lbl" for="txn-account">Conto <span class="lbl-opt">(opzionale)</span></label>
+      <select id="txn-account"></select>
+      <label class="lbl" for="txn-category">Categoria <span class="lbl-opt">(opzionale)</span></label>
+      <select id="txn-category"></select>
+      <label class="lbl" for="txn-merchant">Descrizione</label>
+      <input id="txn-merchant" type="text" autocomplete="off" placeholder="Es. Spesa al Conad" maxlength="80">
+      <label class="lbl" for="txn-note">Nota <span class="lbl-opt">(opzionale)</span></label>
+      <input id="txn-note" type="text" autocomplete="off" maxlength="140">
+      <p class="err" id="txn-err" hidden></p>
+      <div class="due">
+        <button class="btn btn-ghost" type="button" data-p8-back>Annulla</button>
+        <button class="btn btn-primary" type="submit">Salva</button>
+      </div>
+      <button class="btn btn-ghost w" type="button" id="txn-delete" hidden>Elimina movimento</button>
     </form>
   </div>
 </div>
@@ -3579,6 +3691,17 @@ if ("serviceWorker" in navigator){
     return id;
   }
 
+  // Undo di una delete: rimuove il tombstone. Legge il record grezzo (anche deleted),
+  // solo se personale. Nessun cambio schema.
+  async function restore(id){
+    var cur = await DB.get("transactions", id);
+    if (!cur || cur.spaceId !== PID) throw new Error("transazione inesistente: " + id);
+    if (!cur.deleted) return id;
+    cur.deleted = false;
+    await DB.put("transactions", cur);
+    return id;
+  }
+
   async function monthTotals(m){
     var rows = await listMonth(m);   // gia' personal + !deleted
     var income = 0, expense = 0;
@@ -3593,7 +3716,7 @@ if ("serviceWorker" in navigator){
   window.personalRuntime = window.personalRuntime || {};
   window.personalRuntime.transactions = {
     listAll: listAll, listMonth: listMonth, get: getTxn,
-    create: create, update: update, delete: del,
+    create: create, update: update, delete: del, restore: restore,
     monthTotals: monthTotals
   };
 })();
@@ -3840,6 +3963,224 @@ if ("serviceWorker" in navigator){
   });
 })();
 /* F1P5-UI-END */
+</script>
+
+<script>
+"use strict";
+/* F1P8-MESE-START */
+/* F1 Passo 8 — superficie Mese + form transazione. Usa SOLO personalRuntime
+   (transactions/accounts/categories): nessun accesso diretto a IndexedDB, niente
+   Quick Add intelligente, niente transfer, niente F2 (budget/ritmo/forecast/insight),
+   nessun tocco al runtime condiviso/legacy. Overlay fissi autonomi, raggiunti da un
+   collegamento discreto nel Profilo; nessuna nuova Home, nessun cambio macro-nav. */
+(function(){
+  var PR = window.personalRuntime;
+  if (!PR || !PR.transactions || !PR.accounts || !PR.categories) return;
+  var doc = document;
+  function $(id){ return doc.getElementById(id); }
+  var ovMese = $("ov-mese"), ovTxn = $("ov-txn");
+  if (!ovMese || !ovTxn || !$("btn-open-mese")) return;
+
+  var curMonth = null;
+  var txnState = { id:null, type:"expense" };
+
+  /* ---- formattazione ---- */
+  function pad2(n){ return (n < 10 ? "0" : "") + n; }
+  function todayStr(){ var d = new Date(); return d.getFullYear() + "-" + pad2(d.getMonth()+1) + "-" + pad2(d.getDate()); }
+  function curMonthKey(){ return todayStr().slice(0, 7); }
+  function shiftMonth(key, delta){
+    var p = key.split("-"), y = +p[0], m = (+p[1] - 1) + delta;
+    y += Math.floor(m / 12); m = ((m % 12) + 12) % 12;
+    return y + "-" + pad2(m + 1);
+  }
+  function monthLabel(key){
+    var p = key.split("-"), d = new Date(+p[0], +p[1]-1, 1);
+    var s = d.toLocaleDateString("it-IT", { month:"long", year:"numeric" });
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+  function euro(cents){ return (cents/100).toLocaleString("it-IT", { minimumFractionDigits:2, maximumFractionDigits:2 }) + " €"; }
+  function dayLabel(dateStr){
+    var p = dateStr.split("-"), d = new Date(+p[0], +p[1]-1, +p[2]);
+    return d.toLocaleDateString("it-IT", { day:"numeric", month:"short" });
+  }
+  // virgola = separatore decimale (IT), punto = migliaia se presente la virgola, altrimenti decimale.
+  function parseCents(str){
+    var v = (str == null ? "" : String(str)).trim(); if (!v) return NaN;
+    if (v.indexOf(",") >= 0) v = v.replace(/\./g, "").replace(",", ".");
+    if (!/^\d*\.?\d*$/.test(v)) return NaN;
+    var f = parseFloat(v); if (!isFinite(f)) return NaN;
+    return Math.round(f * 100);
+  }
+
+  /* ---- lock scroll di sfondo ---- */
+  var locks = 0;
+  function lock(){ locks++; doc.body.style.overflow = "hidden"; }
+  function unlock(){ locks = Math.max(0, locks - 1); if (!locks) doc.body.style.overflow = ""; }
+
+  /* ---- toast (con azione opzionale per Undo) ---- */
+  var toastEl = $("sub-toast"), toastT = null;
+  function hideToast(){ if (!toastEl) return; toastEl.classList.remove("show"); setTimeout(function(){ toastEl.hidden = true; toastEl.textContent = ""; }, 260); }
+  function showToast(msg, action){
+    if (!toastEl) return;
+    toastEl.textContent = "";
+    var span = doc.createElement("span"); span.textContent = msg; toastEl.appendChild(span);
+    if (action){
+      var b = doc.createElement("button"); b.type = "button"; b.className = "sub-toast-act"; b.textContent = action.label;
+      b.onclick = function(){ if (toastT) clearTimeout(toastT); hideToast(); action.onClick(); };
+      toastEl.appendChild(b);
+    }
+    toastEl.hidden = false; void toastEl.offsetWidth; toastEl.classList.add("show");
+    if (toastT) clearTimeout(toastT);
+    toastT = setTimeout(hideToast, action ? 5000 : 1600);
+  }
+
+  /* ---- MESE ---- */
+  async function renderMese(){
+    $("mese-label").textContent = monthLabel(curMonth);
+    $("mese-next").disabled = curMonth >= curMonthKey();   // avanti solo fino al mese corrente
+    var t = await PR.transactions.monthTotals(curMonth);
+    $("mese-in").textContent  = euro(t.income);
+    $("mese-out").textContent = euro(t.expense);
+    var diff = $("mese-diff");
+    diff.textContent = euro(t.difference);
+    diff.classList.toggle("neg", t.difference < 0);
+    diff.classList.toggle("pos", t.difference >= 0);
+    var rows = await PR.transactions.listMonth(curMonth);
+    var accs = await PR.accounts.listAll(), cats = await PR.categories.listAll();
+    var accMap = {}, catMap = {};
+    accs.forEach(function(a){ accMap[a.id] = a; });
+    cats.forEach(function(c){ catMap[c.id] = c; });
+    var list = $("mese-list"); list.textContent = "";
+    $("mese-empty").hidden = rows.length > 0;
+    $("mese-empty-txt").textContent = "Nessun movimento in " + monthLabel(curMonth) + ".";
+    rows.forEach(function(tx){ list.appendChild(movRow(tx, accMap, catMap)); });
+  }
+
+  function movRow(tx, accMap, catMap){
+    var cat = tx.categoryId ? catMap[tx.categoryId] : null;
+    var acc = tx.accountId ? accMap[tx.accountId] : null;
+    var btn = doc.createElement("button"); btn.type = "button"; btn.className = "mov-row";
+    var dot = doc.createElement("span"); dot.className = "sub-dot";
+    if (cat && cat.color) dot.style.background = cat.color;
+    if (cat && cat.icon) dot.textContent = cat.icon;
+    btn.appendChild(dot);
+    var main = doc.createElement("span"); main.className = "mov-main";
+    var desc = doc.createElement("span"); desc.className = "mov-desc";
+    desc.textContent = tx.merchant || (cat ? cat.name : "Movimento");
+    main.appendChild(desc);
+    var meta = doc.createElement("span"); meta.className = "mov-meta";
+    var parts = []; if (cat) parts.push(cat.name); if (acc) parts.push(acc.name); parts.push(dayLabel(tx.date));
+    meta.textContent = parts.join(" · ");
+    main.appendChild(meta);
+    btn.appendChild(main);
+    var amt = doc.createElement("span");
+    amt.className = "mov-amt " + (tx.type === "income" ? "pos" : "neg");
+    amt.textContent = (tx.type === "income" ? "+" : "−") + euro(tx.amount);
+    btn.appendChild(amt);
+    btn.onclick = function(){ openTxn(tx.id); };
+    return btn;
+  }
+
+  /* ---- FORM TRANSAZIONE ---- */
+  async function fillAccountSelect(selectedId){
+    var sel = $("txn-account"); sel.textContent = "";
+    var none = doc.createElement("option"); none.value = ""; none.textContent = "— Nessuno —"; sel.appendChild(none);
+    var active = await PR.accounts.listActive(), present = {};
+    active.forEach(function(a){ present[a.id] = true; var o = doc.createElement("option"); o.value = a.id; o.textContent = a.name; sel.appendChild(o); });
+    if (selectedId && !present[selectedId]){
+      var all = await PR.accounts.listAll(), arch = all.filter(function(a){ return a.id === selectedId; })[0];
+      if (arch){ var o = doc.createElement("option"); o.value = arch.id; o.textContent = arch.name + " (archiviato)"; sel.appendChild(o); }
+    }
+    sel.value = selectedId || "";
+  }
+  async function fillCategorySelect(kind, selectedId){
+    var sel = $("txn-category"); sel.textContent = "";
+    var none = doc.createElement("option"); none.value = ""; none.textContent = "— Nessuna —"; sel.appendChild(none);
+    var active = await PR.categories.listActive(kind), present = {};
+    active.forEach(function(c){ present[c.id] = true; var o = doc.createElement("option"); o.value = c.id; o.textContent = c.name; sel.appendChild(o); });
+    if (selectedId && !present[selectedId]){
+      var all = await PR.categories.listAll(), arch = all.filter(function(c){ return c.id === selectedId; })[0];
+      if (arch && arch.kind === kind){ var o = doc.createElement("option"); o.value = arch.id; o.textContent = arch.name + " (archiviata)"; sel.appendChild(o); }
+    }
+    sel.value = selectedId || "";
+  }
+  function paintType(){
+    Array.prototype.forEach.call($("txn-type").children, function(b){ b.classList.toggle("is-on", b.dataset.type === txnState.type); });
+  }
+
+  async function openTxn(id){
+    var rec = id ? await PR.transactions.get(id) : null;
+    if (id && !rec) return;   // eliminata nel frattempo
+    txnState.id = rec ? rec.id : null;
+    txnState.type = rec ? rec.type : "expense";
+    $("txn-title").textContent = rec ? "Modifica movimento" : "Nuovo movimento";
+    $("txn-amt").value = rec ? (rec.amount/100).toFixed(2).replace(".", ",") : "";
+    $("txn-date").value = rec ? rec.date : todayStr();
+    $("txn-merchant").value = rec ? (rec.merchant || "") : "";
+    $("txn-note").value = rec ? (rec.note || "") : "";
+    $("txn-err").hidden = true;
+    paintType();
+    await fillAccountSelect(rec ? rec.accountId : null);
+    await fillCategorySelect(txnState.type, rec ? rec.categoryId : null);
+    $("txn-delete").hidden = !rec;
+    lock(); ovTxn.hidden = false; ovTxn.querySelector(".sub-body").scrollTop = 0;
+    setTimeout(function(){ $("txn-amt").focus(); }, 60);
+  }
+  function closeTxn(){ ovTxn.hidden = true; unlock(); }
+
+  $("txn-type").addEventListener("click", function(e){
+    var b = e.target.closest(".seg-btn"); if (!b || b.dataset.type === txnState.type) return;
+    txnState.type = b.dataset.type; paintType();
+    fillCategorySelect(txnState.type, null);   // categoria non piu' coerente -> azzerata
+  });
+
+  $("txn-form").addEventListener("submit", async function(e){
+    e.preventDefault();
+    var err = $("txn-err");
+    var cents = parseCents($("txn-amt").value);
+    if (!(typeof cents === "number" && isFinite(cents) && Math.floor(cents) === cents && cents > 0)){
+      err.textContent = "Inserisci un importo valido."; err.hidden = false; return;
+    }
+    var data = { type: txnState.type, amount: cents, date: $("txn-date").value,
+      accountId: $("txn-account").value || null, categoryId: $("txn-category").value || null,
+      merchant: $("txn-merchant").value.trim() || null, note: $("txn-note").value.trim() || null };
+    try {
+      if (txnState.id) await PR.transactions.update(txnState.id, data);
+      else await PR.transactions.create(data);
+    } catch(ex){ err.textContent = String((ex && ex.message) || ex); err.hidden = false; return; }
+    closeTxn(); await renderMese(); showToast("Movimento salvato");
+  });
+
+  $("txn-delete").onclick = async function(){
+    var id = txnState.id; if (!id) return;
+    try { await PR.transactions.delete(id); } catch(e){ return; }
+    closeTxn(); await renderMese();
+    showToast("Movimento eliminato", { label: "Annulla", onClick: async function(){
+      try { await PR.transactions.restore(id); } catch(e){}
+      await renderMese(); showToast("Movimento ripristinato");
+    }});
+  };
+
+  /* ---- navigazione mese + apertura ---- */
+  $("mese-prev").onclick = function(){ curMonth = shiftMonth(curMonth, -1); renderMese(); };
+  $("mese-next").onclick = function(){ if (curMonth >= curMonthKey()) return; curMonth = shiftMonth(curMonth, 1); renderMese(); };
+  $("mese-add").onclick = function(){ openTxn(null); };
+  $("mese-add-first").onclick = function(){ openTxn(null); };
+
+  async function openMese(){
+    lock(); ovMese.hidden = false; curMonth = curMonthKey();
+    ovMese.querySelector(".sub-body").scrollTop = 0;
+    try { await PR.seedDefaults(); } catch(e){}
+    await renderMese();
+  }
+  function closeMese(){ ovMese.hidden = true; unlock(); }
+  $("btn-open-mese").onclick = function(){ openMese(); };
+
+  Array.prototype.forEach.call(doc.querySelectorAll("[data-p8-back]"), function(btn){
+    btn.onclick = function(){ var ov = btn.closest(".subscreen"); if (ov === ovTxn) closeTxn(); else closeMese(); };
+  });
+})();
+/* F1P8-MESE-END */
 </script>
 
 <!-- Segnaposto vuoti per le fasi successive (nessun codice, solo confine di sezione). -->
