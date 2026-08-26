@@ -3062,11 +3062,13 @@ if ("serviceWorker" in navigator){
 /* F0P3-DB-START */
 (function(){
   var DB_NAME     = "calculon";
-  var DB_VERSION  = 1;   // struttura IndexedDB (object store / indici)
+  var DB_VERSION  = 2;   // struttura IndexedDB (F2.2: +store "budgets", migrazione additiva 1->2)
   var SCHEMA_TARGET = 1; // modello dati che la migrazione M1 introdurra' (Passo 4); NON applicata in F0
   // Store previsti da spec v1.1 §3 per F0. spaceMembers e shareRules sono separati
   // apposta (membership e quote non devono fondersi come array atomici).
-  var STORES = ["spaces","spaceMembers","shareRules","transactions","accounts","categories","liabilities","recurring","meta"];
+  // F2.2: "budgets" aggiunto in coda. onupgradeneeded crea SOLO gli store mancanti
+  // (create-if-absent), quindi l'upgrade 1->2 aggiunge budgets senza toccare gli altri.
+  var STORES = ["spaces","spaceMembers","shareRules","transactions","accounts","categories","liabilities","recurring","budgets","meta"];
 
   function reqP(req){ return new Promise(function(res, rej){ req.onsuccess = function(){ res(req.result); }; req.onerror = function(){ rej(req.error); }; }); }
   function txDone(tx){ return new Promise(function(res, rej){ tx.oncomplete = function(){ res(); }; tx.onerror = function(){ rej(tx.error); }; tx.onabort = function(){ rej(tx.error || new Error("transazione annullata")); }; }); }
@@ -3894,6 +3896,127 @@ if ("serviceWorker" in navigator){
   };
 })();
 /* F1P7-TXN-END */
+</script>
+
+<script>
+"use strict";
+/* F2P2-BUDGET-START */
+/* F2 Passo 2 — dominio budget mensile Personale. Store dedicato "budgets" (creato
+   dalla migrazione additiva DB_VERSION 1->2 in F0P3). Budget expense-only, no rollover.
+   ID DETERMINISTICI -> l'unicita' e' STRUTTURALE (stesso mese+scope[+categoria] = stesso
+   id = upsert). Il "consumo" viene SOLO da transazioni expense reali (!capitalMovement,
+   !deleted); transfer/income/capitale/tombstone contano zero. monthTotals() NON toccato.
+   Solo personalRuntime, nessun accesso IndexedDB diretto dalla UI, nessuna UI qui. */
+(function(){
+  var DB = window.calculonDB;
+  if (!DB) return;
+  var PID = "personal:local";
+
+  function nowMs(){ return Date.now(); }
+  function validMonth(m){ return typeof m === "string" && /^\d{4}-(0[1-9]|1[0-2])$/.test(m); }
+  function validAmount(a){ return typeof a === "number" && isFinite(a) && Math.floor(a) === a && a >= 0; }
+  function budgetId(month, scope, categoryId){
+    return scope === "total" ? ("budget:" + month + ":total") : ("budget:" + month + ":cat:" + categoryId);
+  }
+
+  // Validazione + normalizzazione. Eleggibilita' categoria = convenzione esistente delle
+  // transazioni: la categoria deve esistere e NON essere deleted; archiviata AMMESSA.
+  // In piu' il budget e' expense-only -> la categoria deve essere di kind "expense".
+  async function buildValidated(input){
+    input = input || {};
+    if (!validMonth(input.month)) throw new Error("month deve essere YYYY-MM valido");
+    if (!validAmount(input.amount)) throw new Error("amount deve essere un intero >= 0 (centesimi)");
+    var scope = input.scope;
+    if (scope !== "total" && scope !== "category") throw new Error("scope deve essere total|category");
+    var categoryId = (input.categoryId != null && input.categoryId !== "") ? input.categoryId : null;
+    if (scope === "total"){
+      if (categoryId !== null) throw new Error("budget total: categoryId deve essere null");
+    } else {
+      if (categoryId === null) throw new Error("budget category: categoryId obbligatorio");
+      var cat = await DB.get("categories", categoryId);
+      if (!cat || cat.deleted) throw new Error("categoria inesistente: " + categoryId);   // archiviata ammessa
+      if (cat.kind !== "expense") throw new Error("budget expense-only: la categoria deve essere di tipo expense");
+    }
+    return { month: input.month, amount: input.amount, scope: scope, categoryId: categoryId };
+  }
+
+  // Upsert deterministico (create-or-set): e' l'operazione canonica per gli id deterministici.
+  async function set(input){
+    var v = await buildValidated(input);
+    var id = budgetId(v.month, v.scope, v.categoryId);
+    var existing = await DB.get("budgets", id);
+    var rec = (existing && existing.spaceId === PID) ? existing
+            : { id: id, spaceId: PID, createdAt: nowMs() };
+    rec.month = v.month; rec.scope = v.scope; rec.categoryId = v.categoryId;
+    rec.amount = v.amount; rec.kind = "expense"; rec.rollover = false; rec.deleted = false;
+    if (!rec.createdAt) rec.createdAt = nowMs();
+    await DB.put("budgets", rec);   // put imposta updatedAt
+    return id;
+  }
+
+  // update(id, patch): l'identita' (month/scope/categoryId) e' codificata nell'id ed e'
+  // immutabile; qui si edita l'amount. Per un budget diverso usare set().
+  async function update(id, patch){
+    patch = patch || {};
+    var cur = await DB.get("budgets", id);
+    if (!cur || cur.spaceId !== PID || cur.deleted) throw new Error("budget inesistente: " + id);
+    if ("spaceId"    in patch && patch.spaceId !== PID) throw new Error("spaceId non modificabile");
+    if ("month"      in patch && patch.month !== cur.month) throw new Error("month non modificabile (usa set)");
+    if ("scope"      in patch && patch.scope !== cur.scope) throw new Error("scope non modificabile");
+    if ("categoryId" in patch && (patch.categoryId || null) !== (cur.categoryId || null)) throw new Error("categoryId non modificabile");
+    var amount = ("amount" in patch) ? patch.amount : cur.amount;
+    if (!validAmount(amount)) throw new Error("amount deve essere un intero >= 0 (centesimi)");
+    cur.amount = amount; cur.kind = "expense"; cur.rollover = false; cur.spaceId = PID;
+    await DB.put("budgets", cur);
+    return id;
+  }
+
+  async function get(id){ var b = await DB.get("budgets", id); return (b && b.spaceId === PID && !b.deleted) ? b : null; }
+  async function getTotal(month){ return get(budgetId(month, "total", null)); }
+  async function getCategory(month, categoryId){ return categoryId ? get(budgetId(month, "category", categoryId)) : null; }
+  async function listMonth(month){
+    return await DB.list("budgets", function(b){ return b && b.spaceId === PID && !b.deleted && b.month === month; });
+  }
+
+  // Tombstone (convenzione di dominio esistente), con restore per simmetria.
+  async function del(id){
+    var cur = await DB.get("budgets", id);
+    if (!cur || cur.spaceId !== PID) throw new Error("budget inesistente: " + id);
+    await DB.del("budgets", id);   // deleted:true, mai rimozione fisica
+    return id;
+  }
+  async function restore(id){
+    var cur = await DB.get("budgets", id);
+    if (!cur || cur.spaceId !== PID) throw new Error("budget inesistente: " + id);
+    if (cur.deleted){ cur.deleted = false; await DB.put("budgets", cur); }
+    return id;
+  }
+
+  // Consumo del budget: SOLO spesa reale. Riusa il repo transazioni (niente pattern
+  // paralleli): listMonth e' gia' personal + !deleted. categoryId null/omesso => totale.
+  async function spent(month, categoryId){
+    var TX = window.personalRuntime && window.personalRuntime.transactions;
+    if (!TX) return 0;
+    var rows = await TX.listMonth(month);
+    var sum = 0;
+    for (var i = 0; i < rows.length; i++){
+      var t = rows[i];
+      if (t.type !== "expense" || t.capitalMovement) continue;   // transfer/income/capitale esclusi
+      if (categoryId != null && t.categoryId !== categoryId) continue;
+      sum += t.amount;
+    }
+    return sum;
+  }
+
+  window.personalRuntime = window.personalRuntime || {};
+  window.personalRuntime.budgets = {
+    set: set, update: update,
+    get: get, getTotal: getTotal, getCategory: getCategory, listMonth: listMonth,
+    delete: del, restore: restore,
+    spent: spent
+  };
+})();
+/* F2P2-BUDGET-END */
 </script>
 
 <script>
