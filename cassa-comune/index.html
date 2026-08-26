@@ -670,6 +670,16 @@ body.no-splash #app{animation:none}
 .seg-btn.is-on{background:var(--sole);color:#fff;box-shadow:0 8px 22px rgba(123,92,255,.28)}
 #txn-form .importo-wrap{margin-bottom:8px}
 #txn-delete{margin-top:22px}
+
+/* ---------- F1P10 · Quick Add ---------- */
+.qa-input{width:100%;min-height:56px;padding:15px 18px;font-size:18px;font-weight:600;
+  background:rgba(255,255,255,.85);border:0;border-radius:var(--r-sm);
+  box-shadow:0 6px 18px rgba(26,18,48,.08);margin:6px 0 14px}
+.qa-input:focus{outline:2px solid var(--viola);outline-offset:1px}
+.qa-hint{font-size:13px;color:var(--rosso);font-weight:600;margin:0 0 14px}
+.qa-preview{background:rgba(255,255,255,.45);border-radius:var(--r-sm);padding:16px 16px 8px;margin-bottom:16px}
+.qa-preview .importo-wrap{margin-bottom:6px}
+.qa-preview .due{gap:12px;margin-bottom:0}
 </style>
 <!-- ==== /MODULE: styles ==== -->
 </head>
@@ -1184,6 +1194,50 @@ body.no-splash #app{animation:none}
       </div>
       <button class="btn btn-ghost w" type="button" id="txn-delete" hidden>Elimina movimento</button>
     </form>
+  </div>
+</div>
+
+<!-- ============ F1P10 · QUICK ADD ============ -->
+<div class="subscreen" id="ov-quick" hidden>
+  <div class="sub-head">
+    <button class="sub-back" type="button" data-quick-back>‹ Indietro</button>
+    <span class="sub-title">Aggiungi</span>
+  </div>
+  <div class="sub-body">
+    <input id="qa-input" class="qa-input" type="text" autocomplete="off" autocapitalize="off"
+           autocorrect="off" spellcheck="false" placeholder="34,20 conad carta">
+    <p class="qa-hint" id="qa-hint" hidden></p>
+    <div class="qa-preview">
+      <label class="lbl" for="qa-amt">Importo</label>
+      <div class="importo-wrap">
+        <input id="qa-amt" class="importo" type="text" inputmode="decimal" placeholder="0,00" autocomplete="off">
+        <span class="sim">€</span>
+      </div>
+      <label class="lbl">Tipo</label>
+      <div class="seg" id="qa-type">
+        <button type="button" class="seg-btn is-on" data-type="expense">Spesa</button>
+        <button type="button" class="seg-btn" data-type="income">Entrata</button>
+      </div>
+      <div class="due">
+        <div>
+          <label class="lbl" for="qa-account">Conto</label>
+          <select id="qa-account"></select>
+        </div>
+        <div>
+          <label class="lbl" for="qa-category">Categoria</label>
+          <select id="qa-category"></select>
+        </div>
+      </div>
+      <label class="lbl" for="qa-date">Data</label>
+      <input id="qa-date" type="date">
+      <label class="lbl" for="qa-desc">Descrizione</label>
+      <input id="qa-desc" type="text" autocomplete="off" maxlength="80">
+    </div>
+    <p class="err" id="qa-err" hidden></p>
+    <div class="due">
+      <button class="btn btn-ghost" type="button" id="qa-more">Più dettagli</button>
+      <button class="btn btn-primary" type="button" id="qa-save">Salva</button>
+    </div>
   </div>
 </div>
 
@@ -4108,20 +4162,22 @@ if ("serviceWorker" in navigator){
     Array.prototype.forEach.call($("txn-type").children, function(b){ b.classList.toggle("is-on", b.dataset.type === txnState.type); });
   }
 
-  async function openTxn(id){
+  async function openTxn(id, prefill){
     var rec = id ? await PR.transactions.get(id) : null;
     if (id && !rec) return;   // eliminata nel frattempo
+    var pf = prefill || {};
     txnState.id = rec ? rec.id : null;
-    txnState.type = rec ? rec.type : "expense";
+    txnState.type = rec ? rec.type : (pf.type || "expense");
     $("txn-title").textContent = rec ? "Modifica movimento" : "Nuovo movimento";
-    $("txn-amt").value = rec ? (rec.amount/100).toFixed(2).replace(".", ",") : "";
-    $("txn-date").value = rec ? rec.date : todayStr();
-    $("txn-merchant").value = rec ? (rec.merchant || "") : "";
-    $("txn-note").value = rec ? (rec.note || "") : "";
+    $("txn-amt").value = rec ? (rec.amount/100).toFixed(2).replace(".", ",")
+                            : (pf.amount != null ? (pf.amount/100).toFixed(2).replace(".", ",") : "");
+    $("txn-date").value = rec ? rec.date : (pf.date || todayStr());
+    $("txn-merchant").value = rec ? (rec.merchant || "") : (pf.merchant || "");
+    $("txn-note").value = rec ? (rec.note || "") : (pf.note || "");
     $("txn-err").hidden = true;
     paintType();
-    await fillAccountSelect(rec ? rec.accountId : null);
-    await fillCategorySelect(txnState.type, rec ? rec.categoryId : null);
+    await fillAccountSelect(rec ? rec.accountId : (pf.accountId || null));
+    await fillCategorySelect(txnState.type, rec ? rec.categoryId : (pf.categoryId || null));
     $("txn-delete").hidden = !rec;
     lock(); ovTxn.hidden = false; ovTxn.querySelector(".sub-body").scrollTop = 0;
     setTimeout(function(){ $("txn-amt").focus(); }, 60);
@@ -4179,8 +4235,218 @@ if ("serviceWorker" in navigator){
   Array.prototype.forEach.call(doc.querySelectorAll("[data-p8-back]"), function(btn){
     btn.onclick = function(){ var ov = btn.closest(".subscreen"); if (ov === ovTxn) closeTxn(); else closeMese(); };
   });
+
+  // Hook per moduli successivi (Quick Add F1P10): apre il Mese/form e mostra toast.
+  window.calculonMese = { openMese: openMese, renderMese: renderMese, openTxnForm: openTxn, toast: showToast };
 })();
 /* F1P8-MESE-END */
+</script>
+
+<script>
+"use strict";
+/* F1P10-QUICKADD-START */
+/* F1 Passo 10 — Quick Add: parser deterministico (nessuna AI/learning/confidence) +
+   UI. Usa SOLO personalRuntime; nessun IndexedDB diretto, niente transfer/F2. Il
+   parser e' una funzione PURA esposta come window.parseQuickAdd(line, {accounts,
+   categories}) e testabile in isolamento. */
+(function(){
+  function pad2(n){ return (n < 10 ? "0" : "") + n; }
+  function todayStr(){ var d = new Date(); return d.getFullYear() + "-" + pad2(d.getMonth()+1) + "-" + pad2(d.getDate()); }
+  function dayShift(dateStr, delta){
+    var p = dateStr.split("-"), d = new Date(Date.UTC(+p[0], +p[1]-1, +p[2] + delta));
+    return d.getUTCFullYear() + "-" + pad2(d.getUTCMonth()+1) + "-" + pad2(d.getUTCDate());
+  }
+  function norm(s){
+    return (s == null ? "" : String(s)).toLowerCase().normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "").replace(/[^\p{L}\p{N}]+/gu, "");
+  }
+  function stripCur(t){ return t.replace(/€/g, ""); }
+  function isMoney(t){ t = stripCur(t); return /^[+-]?\d+([.,]\d{1,2})?$/.test(t) || /^[+-]?\d{1,3}(\.\d{3})+(,\d{1,2})?$/.test(t); }
+  function parseCents(str){
+    var v = stripCur((str == null ? "" : String(str)).trim()); if (!v) return NaN;
+    v = v.replace(/^[+-]/, "");   // il segno determina solo il tipo; l'importo e' la magnitudine
+    if (v.indexOf(",") >= 0) v = v.replace(/\./g, "").replace(",", ".");
+    if (!/^\d*\.?\d*$/.test(v)) return NaN;
+    var f = parseFloat(v); if (!isFinite(f)) return NaN;
+    return Math.round(f * 100);
+  }
+  function validCents(c){ return typeof c === "number" && isFinite(c) && Math.floor(c) === c && c > 0; }
+
+  var ACC_ALIAS = { cash:["contanti","cash"], bank:["banca","bank"], card:["carta","card"] };
+
+  // ---- PARSER PURO ----
+  function parseQuickAdd(line, ctx){
+    ctx = ctx || {};
+    var accounts = ctx.accounts || [], categories = ctx.categories || [];
+    var out = { type:"expense", amount:null, date:todayStr(), accountId:null, categoryId:null,
+                merchant:null, ambiguous:false, needsAmount:false };
+    var raw = (line == null ? "" : String(line)).trim();
+    var toks = raw.length ? raw.split(/\s+/) : [];
+    if (!toks.length){ out.needsAmount = true; return out; }
+
+    // 1) importo: uno solo, in qualsiasi posizione; >1 -> ambiguo
+    var moneyIdx = [];
+    for (var i = 0; i < toks.length; i++){ if (isMoney(toks[i])) moneyIdx.push(i); }
+    if (moneyIdx.length === 0) out.needsAmount = true;
+    else if (moneyIdx.length > 1) out.ambiguous = true;   // niente salvataggio automatico
+    var amtIdx = (moneyIdx.length === 1) ? moneyIdx[0] : -1;
+    var signType = null;
+    if (amtIdx >= 0){
+      var tk = toks[amtIdx];
+      if (tk.charAt(0) === "+") signType = "income";
+      else if (tk.charAt(0) === "-") signType = "expense";
+      out.amount = parseCents(tk);
+    }
+
+    var rest = [];
+    for (var j = 0; j < toks.length; j++){ if (j !== amtIdx) rest.push({ i:j, t:toks[j] }); }
+    var used = {};
+
+    // 2) data: oggi / ieri
+    for (var d = 0; d < rest.length; d++){
+      var n = norm(rest[d].t);
+      if (n === "oggi"){ out.date = todayStr(); used[rest[d].i] = 1; break; }
+      if (n === "ieri"){ out.date = dayShift(todayStr(), -1); used[rest[d].i] = 1; break; }
+    }
+
+    out.type = signType || "expense";
+
+    // 3) categoria (nome attivo esatto/normalizzato, unico). Categoria income esplicita
+    //    -> income se non c'e' segno contrario. Kind incoerente col tipo -> ignorata.
+    var catByName = {};
+    categories.forEach(function(c){ var k = norm(c.name); catByName[k] = (k in catByName) ? null : c; });
+    for (var k = 0; k < rest.length; k++){
+      if (used[rest[k].i]) continue;
+      var cat = catByName[norm(rest[k].t)];
+      if (!cat) continue;                                   // assente o nome ambiguo
+      if (signType === null && cat.kind === "income"){ out.type = "income"; out.categoryId = cat.id; used[rest[k].i] = 1; break; }
+      if (cat.kind === out.type){ out.categoryId = cat.id; used[rest[k].i] = 1; break; }
+      // incoerente -> resta merchant, continua a cercare
+    }
+
+    // 4) conto: nome o alias di tipo, match unico fra gli attivi
+    function accMatch(tn){
+      var ms = accounts.filter(function(a){
+        if (norm(a.name) === tn) return true;
+        var al = ACC_ALIAS[a.type] || []; return al.indexOf(tn) >= 0;
+      });
+      return ms.length === 1 ? ms[0] : null;
+    }
+    for (var m = 0; m < rest.length; m++){
+      if (used[rest[m].i]) continue;
+      var acc = accMatch(norm(rest[m].t));
+      if (acc){ out.accountId = acc.id; used[rest[m].i] = 1; break; }
+    }
+
+    // 5) merchant = token residui, ordine originale
+    var left = [];
+    for (var p = 0; p < rest.length; p++){ if (!used[rest[p].i]) left.push(rest[p].t); }
+    var merch = left.join(" ").trim();
+    out.merchant = merch ? merch : null;
+    return out;
+  }
+  window.parseQuickAdd = parseQuickAdd;   // funzione pura, testabile
+
+  // ---- UI ----
+  var PR = window.personalRuntime, M = window.calculonMese;
+  var doc = document;
+  function $(id){ return doc.getElementById(id); }
+  if (!PR || !PR.transactions || !M || !$("ov-quick") || !$("mese-add")) return;
+
+  var ovQuick = $("ov-quick");
+  var qaAccounts = [], qaCategories = [];
+  var locks = 0;
+  function lock(){ locks++; doc.body.style.overflow = "hidden"; }
+  function unlock(){ locks = Math.max(0, locks - 1); if (!locks) doc.body.style.overflow = ""; }
+  function fmt(cents){ return (cents/100).toFixed(2).replace(".", ","); }
+  function opt(v, t){ var o = doc.createElement("option"); o.value = v; o.textContent = t; return o; }
+
+  function buildAccountOptions(selectedId){
+    var sel = $("qa-account"); sel.textContent = ""; sel.appendChild(opt("", "— Nessuno —"));
+    qaAccounts.forEach(function(a){ sel.appendChild(opt(a.id, a.name)); });
+    sel.value = selectedId || "";
+  }
+  function buildCategoryOptions(kind, selectedId){
+    var sel = $("qa-category"); sel.textContent = ""; sel.appendChild(opt("", "— Nessuna —"));
+    qaCategories.filter(function(c){ return c.kind === kind; }).forEach(function(c){ sel.appendChild(opt(c.id, c.name)); });
+    sel.value = selectedId || "";
+  }
+  function currentType(){ var b = $("qa-type").querySelector(".is-on"); return b ? b.dataset.type : "expense"; }
+  function paintType(type){
+    Array.prototype.forEach.call($("qa-type").children, function(b){ b.classList.toggle("is-on", b.dataset.type === type); });
+  }
+
+  function applyDraft(draft){
+    paintType(draft.type);
+    buildCategoryOptions(draft.type, draft.categoryId);
+    buildAccountOptions(draft.accountId);
+    $("qa-amt").value = (draft.amount != null && !draft.ambiguous) ? fmt(draft.amount) : "";
+    $("qa-date").value = draft.date;
+    $("qa-desc").value = draft.merchant || "";
+    var hint = $("qa-hint");
+    if (draft.ambiguous){ hint.textContent = "Ho trovato più importi: scrivine uno solo o correggi qui."; hint.hidden = false; }
+    else { hint.hidden = true; hint.textContent = ""; }
+    updateSave();
+  }
+  function reparse(){ applyDraft(parseQuickAdd($("qa-input").value, { accounts:qaAccounts, categories:qaCategories })); }
+  function updateSave(){ $("qa-save").disabled = !validCents(parseCents($("qa-amt").value)); }
+
+  function draftFromPreview(){
+    var c = parseCents($("qa-amt").value);
+    return { type: currentType(), amount: validCents(c) ? c : null, date: $("qa-date").value,
+      accountId: $("qa-account").value || null, categoryId: $("qa-category").value || null,
+      merchant: $("qa-desc").value.trim() || null };
+  }
+
+  async function openQuick(){
+    qaAccounts = await PR.accounts.listActive();
+    qaCategories = await PR.categories.listActive();
+    $("qa-input").value = ""; $("qa-err").hidden = true;
+    reparse();
+    lock(); ovQuick.hidden = false; ovQuick.querySelector(".sub-body").scrollTop = 0;
+    setTimeout(function(){ $("qa-input").focus(); }, 60);
+  }
+  function closeQuick(){ ovQuick.hidden = true; unlock(); }
+
+  $("qa-input").addEventListener("input", reparse);
+  $("qa-amt").addEventListener("input", updateSave);
+  $("qa-type").addEventListener("click", function(e){
+    var b = e.target.closest(".seg-btn"); if (!b) return;
+    paintType(b.dataset.type);
+    buildCategoryOptions(b.dataset.type, null);   // categoria non piu' coerente -> azzerata
+  });
+
+  $("qa-save").onclick = async function(){
+    var err = $("qa-err");
+    var draft = draftFromPreview();
+    if (!validCents(draft.amount)){ err.textContent = "Inserisci un importo valido."; err.hidden = false; return; }
+    var id;
+    try { id = await PR.transactions.create(draft); }
+    catch(ex){ err.textContent = String((ex && ex.message) || ex); err.hidden = false; return; }
+    closeQuick();
+    await M.renderMese();
+    // Undo di un CREATE = eliminare la transazione appena creata (tombstone).
+    M.toast("Movimento salvato", { label:"Annulla", onClick: async function(){
+      try { await PR.transactions.delete(id); } catch(e){}
+      await M.renderMese(); M.toast("Movimento annullato");
+    }});
+  };
+
+  $("qa-more").onclick = function(){
+    var draft = draftFromPreview();
+    closeQuick();
+    M.openTxnForm(null, draft);   // form completo F1P8 precompilato con la bozza
+  };
+
+  // La CTA + Aggiungi del Mese ora apre Quick Add (override del binding F1P8).
+  $("mese-add").onclick = function(){ openQuick(); };
+  if ($("mese-add-first")) $("mese-add-first").onclick = function(){ openQuick(); };
+
+  Array.prototype.forEach.call(doc.querySelectorAll("[data-quick-back]"), function(btn){
+    btn.onclick = function(){ closeQuick(); };
+  });
+})();
+/* F1P10-QUICKADD-END */
 </script>
 
 <!-- Segnaposto vuoti per le fasi successive (nessun codice, solo confine di sezione). -->
