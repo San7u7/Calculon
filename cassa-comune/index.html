@@ -3732,7 +3732,7 @@ if ("serviceWorker" in navigator){
   var DB = window.calculonDB;
   if (!DB) return;
   var PID = "personal:local";
-  var TYPES = ["expense", "income"];
+  var TYPES = ["expense", "income", "transfer"];   // F2.1: transfer
 
   function nowMs(){ return Date.now(); }
   function uid(){
@@ -3772,16 +3772,41 @@ if ("serviceWorker" in navigator){
     }
   }
 
+  // Esistenza conto: archiviato AMMESSO (solo !deleted), cosi' i transfer storici reggono.
+  async function accountExists(id){
+    if (id == null || id === "") return false;
+    var a = await DB.get("accounts", id);
+    return !!a && !a.deleted;
+  }
+
   async function buildValidated(input){
     var type = input.type;
-    if (!validType(type)) throw new Error("type deve essere expense|income");
+    if (!validType(type)) throw new Error("type deve essere expense|income|transfer");
     if (!validAmount(input.amount)) throw new Error("amount deve essere un intero > 0 (centesimi)");
     if (!validDate(input.date)) throw new Error("date deve essere YYYY-MM-DD valida");
+
+    if (type === "transfer"){
+      // F2.1: movimento tra due conti propri. NON e' entrata ne' uscita reale.
+      var from = (input.fromAccountId != null && input.fromAccountId !== "") ? input.fromAccountId : null;
+      var to   = (input.toAccountId   != null && input.toAccountId   !== "") ? input.toAccountId   : null;
+      if (from == null || to == null) throw new Error("transfer: fromAccountId e toAccountId obbligatori");
+      if (from === to) throw new Error("transfer: conto origine e destinazione devono essere diversi");
+      if (!(await accountExists(from))) throw new Error("conto origine inesistente: " + from);
+      if (!(await accountExists(to)))   throw new Error("conto destinazione inesistente: " + to);
+      return { type:"transfer", amount:input.amount, date:input.date,
+        accountId:null, categoryId:null, fromAccountId:from, toAccountId:to,
+        merchant:optText(input.merchant), note:optText(input.note),
+        capitalMovement:true };   // ogni transfer e' movimento di capitale
+    }
+
+    // expense | income
     var accountId  = (input.accountId  != null && input.accountId  !== "") ? input.accountId  : null;
     var categoryId = (input.categoryId != null && input.categoryId !== "") ? input.categoryId : null;
     await checkRefs(type, accountId, categoryId);
     return { type:type, amount:input.amount, date:input.date, accountId:accountId,
-      categoryId:categoryId, merchant:optText(input.merchant), note:optText(input.note) };
+      categoryId:categoryId, fromAccountId:null, toAccountId:null,
+      merchant:optText(input.merchant), note:optText(input.note),
+      capitalMovement: input.capitalMovement === true };   // default false (compat F1)
   }
 
   async function listAll(){ return (await DB.list("transactions", isPersonal)).sort(byDateDesc); }
@@ -3793,8 +3818,10 @@ if ("serviceWorker" in navigator){
   async function create(data){
     var v = await buildValidated(data || {});
     var rec = { id:uid(), spaceId:PID, type:v.type, amount:v.amount, date:v.date,
-      accountId:v.accountId, categoryId:v.categoryId, merchant:v.merchant, note:v.note,
-      tags:[], capitalMovement:false, deleted:false, createdAt:nowMs() };
+      accountId:v.accountId, categoryId:v.categoryId,
+      fromAccountId:v.fromAccountId, toAccountId:v.toAccountId,
+      merchant:v.merchant, note:v.note,
+      tags:[], capitalMovement:v.capitalMovement, deleted:false, createdAt:nowMs() };
     await DB.put("transactions", rec);   // put imposta updatedAt
     return rec.id;
   }
@@ -3805,19 +3832,23 @@ if ("serviceWorker" in navigator){
     var cur = await DB.get("transactions", id);
     if (!isPersonal(cur)) throw new Error("transazione inesistente: " + id);
     var merged = {
-      type:       ("type"       in patch) ? patch.type       : cur.type,
-      amount:     ("amount"     in patch) ? patch.amount     : cur.amount,
-      date:       ("date"       in patch) ? patch.date       : cur.date,
-      accountId:  ("accountId"  in patch) ? patch.accountId  : cur.accountId,
-      categoryId: ("categoryId" in patch) ? patch.categoryId : cur.categoryId,
-      merchant:   ("merchant"   in patch) ? patch.merchant   : cur.merchant,
-      note:       ("note"       in patch) ? patch.note       : cur.note
+      type:          ("type"          in patch) ? patch.type          : cur.type,
+      amount:        ("amount"        in patch) ? patch.amount        : cur.amount,
+      date:          ("date"          in patch) ? patch.date          : cur.date,
+      accountId:     ("accountId"     in patch) ? patch.accountId     : cur.accountId,
+      categoryId:    ("categoryId"    in patch) ? patch.categoryId    : cur.categoryId,
+      fromAccountId: ("fromAccountId" in patch) ? patch.fromAccountId : cur.fromAccountId,
+      toAccountId:   ("toAccountId"   in patch) ? patch.toAccountId   : cur.toAccountId,
+      merchant:      ("merchant"      in patch) ? patch.merchant      : cur.merchant,
+      note:          ("note"          in patch) ? patch.note          : cur.note,
+      capitalMovement: ("capitalMovement" in patch) ? patch.capitalMovement : cur.capitalMovement
     };
     var v = await buildValidated(merged);
     cur.type = v.type; cur.amount = v.amount; cur.date = v.date;
     cur.accountId = v.accountId; cur.categoryId = v.categoryId;
+    cur.fromAccountId = v.fromAccountId; cur.toAccountId = v.toAccountId;
     cur.merchant = v.merchant; cur.note = v.note;
-    cur.spaceId = PID; cur.capitalMovement = false;   // invarianti forzate
+    cur.spaceId = PID; cur.capitalMovement = v.capitalMovement;   // invarianti forzate (transfer -> true)
     await DB.put("transactions", cur);
     return cur.id;
   }
@@ -3840,13 +3871,17 @@ if ("serviceWorker" in navigator){
     return id;
   }
 
+  // F2.1: grandezze REALI del mese. Escludono i movimenti di capitale
+  // (capitalMovement:true) e qualsiasi type != expense|income (transfer incluso).
   async function monthTotals(m){
     var rows = await listMonth(m);   // gia' personal + !deleted
     var income = 0, expense = 0;
     for (var i = 0; i < rows.length; i++){
-      if (rows[i].type === "income") income += rows[i].amount;
-      else if (rows[i].type === "expense") expense += rows[i].amount;
-      // type futuri (transfer/...) esclusi dai totali
+      var t = rows[i];
+      if (t.capitalMovement) continue;                  // capitale: fuori dalle grandezze reali
+      if (t.type === "income") income += t.amount;
+      else if (t.type === "expense") expense += t.amount;
+      // transfer e altri type esclusi
     }
     return { month:m, income:income, expense:expense, difference: income - expense };
   }
