@@ -566,6 +566,67 @@ body.no-splash #app{animation:none}
   #splash{animation:spEsci .3s linear 1.2s forwards}
   #app{animation:none}
 }
+
+/* ---------- F1P5 · sotto-schermate Conti / Categorie ---------- */
+.subscreen{position:fixed;inset:0;z-index:70;background:var(--carta);
+  display:flex;flex-direction:column;padding-top:env(safe-area-inset-top);
+  animation:subEntra .28s var(--curva-morbida)}
+@keyframes subEntra{ from{opacity:0;transform:translateX(7%)} to{opacity:1;transform:none} }
+@media (prefers-reduced-motion:reduce){ .subscreen{animation:none} }
+.sub-head{display:flex;align-items:center;gap:12px;width:100%;max-width:440px;
+  margin:0 auto;padding:14px 18px 10px}
+.sub-back{flex:none;background:rgba(255,255,255,.72);border:0;border-radius:99px;
+  min-height:40px;padding:8px 16px;font-weight:700;font-size:14px;color:var(--inchiostro);
+  box-shadow:0 4px 14px rgba(26,18,48,.08);transition:transform .3s var(--curva)}
+.sub-back:active{transform:scale(.92)}
+.sub-title{font-size:26px;font-weight:700;letter-spacing:-.03em}
+.subscreen[data-view="list"] [data-title-form],
+.subscreen[data-view="form"] [data-title-list]{display:none}
+.subscreen[data-view="list"] .sub-form,
+.subscreen[data-view="form"] .sub-list{display:none}
+.sub-body{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;width:100%;
+  max-width:440px;margin:0 auto;padding:8px 18px calc(34px + env(safe-area-inset-bottom))}
+.sub-group{margin-top:24px}
+.sub-group > .sez-k{margin-bottom:12px}
+.sub-empty{padding:22px 2px}
+.sub-row{display:flex;align-items:center;gap:11px;background:rgba(255,255,255,.72);
+  border-radius:var(--r-sm);padding:10px 12px;margin-bottom:10px;
+  box-shadow:0 4px 14px rgba(26,18,48,.06)}
+.sub-dot{flex:none;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;
+  font-size:17px;line-height:1;background:var(--sole);color:#fff;
+  box-shadow:0 3px 10px rgba(123,92,255,.22)}
+.sub-name{flex:1;min-width:0;font-weight:600;font-size:15px;overflow-wrap:anywhere}
+.sub-badge{flex:none;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--grigio);
+  font-weight:600;background:rgba(123,92,255,.10);padding:4px 9px;border-radius:99px}
+.sub-actions{flex:none;display:flex;gap:2px}
+.sub-mini{background:transparent;border:0;color:var(--viola);font-weight:700;font-size:12px;
+  padding:7px 9px;border-radius:12px;transition:transform .3s var(--curva)}
+.sub-mini:active{transform:scale(.9)}
+.sub-mini.muted{color:var(--grigio)}
+.sub-arch{margin-top:30px;border-top:1px solid var(--linea);padding-top:14px}
+.sub-arch-tog{display:flex;align-items:center;justify-content:space-between;width:100%;
+  background:transparent;border:0;padding:8px 2px;font-weight:600;color:var(--grigio);
+  font-size:11px;letter-spacing:.14em;text-transform:uppercase}
+.sub-arch-n{background:rgba(26,18,48,.08);color:var(--grigio);border-radius:99px;min-width:22px;
+  padding:2px 8px;font-size:11px;letter-spacing:0}
+.sub-arch[data-open="true"] .sub-arch-tog{color:var(--inchiostro)}
+.sub-row.arch{opacity:.6}
+.sub-form{padding-top:6px}
+.lbl-opt{text-transform:none;letter-spacing:0;color:var(--grigio);font-weight:400;opacity:.85}
+.sub-swatches{display:flex;flex-wrap:wrap;gap:10px;margin:2px 0 6px}
+.sw{width:34px;height:34px;border-radius:50%;border:0;padding:0;
+  box-shadow:0 2px 8px rgba(26,18,48,.14);transition:transform .3s var(--curva)}
+.sw:active{transform:scale(.88)}
+.sw[aria-pressed="true"]{outline:3px solid var(--inchiostro);outline-offset:2px}
+.sw-none{background:rgba(255,255,255,.92);display:grid;place-items:center;color:var(--grigio);font-size:15px}
+.sub-icon-in{max-width:120px;text-align:center;font-size:22px}
+.sub-form .err{color:var(--rosso);font-size:13px;font-weight:600;margin:2px 0 14px}
+.sub-toast{position:fixed;left:50%;bottom:calc(28px + env(safe-area-inset-bottom));z-index:90;
+  transform:translateX(-50%) translateY(20px);background:var(--inchiostro);color:#fff;
+  padding:11px 20px;border-radius:99px;font-size:14px;font-weight:600;
+  box-shadow:0 10px 30px rgba(26,18,48,.3);opacity:0;pointer-events:none;
+  transition:opacity .25s ease,transform .25s var(--curva-morbida)}
+.sub-toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 </style>
 <!-- ==== /MODULE: styles ==== -->
 </head>
@@ -878,6 +939,13 @@ body.no-splash #app{animation:none}
       </div>
 
       <div class="sez">
+        <span class="sez-k">Le tue impostazioni</span>
+        <p class="nota">I conti e le categorie del tuo spazio personale.</p>
+        <button class="btn btn-ghost w" id="btn-open-conti" type="button">Conti</button>
+        <button class="btn btn-ghost w" id="btn-open-categorie" type="button">Categorie</button>
+      </div>
+
+      <div class="sez">
         <span class="sez-k">I tuoi gruppi</span>
         <div id="pf-gruppi" class="filo-lista"></div>
         <button class="btn btn-primary w" id="btn-nuovo-gruppo" type="button">+ Entra o crea un gruppo</button>
@@ -911,6 +979,103 @@ body.no-splash #app{animation:none}
     </div>
   </div>
 </div>
+
+<!-- ============ F1P5 · CONTI (sotto-schermata Profilo) ============ -->
+<div class="subscreen" id="ov-conti" data-view="list" hidden>
+  <div class="sub-head">
+    <button class="sub-back" type="button" data-sub-back>‹ Indietro</button>
+    <span class="sub-title" data-title-list>Conti</span>
+    <span class="sub-title" data-title-form>Conto</span>
+  </div>
+  <div class="sub-body">
+    <div class="sub-list">
+      <button class="btn btn-primary w" type="button" id="conti-add">+ Nuovo conto</button>
+      <div class="sub-empty" id="conti-empty" hidden>
+        <p class="nota">Nessun conto attivo. Aggiungine uno per iniziare.</p>
+      </div>
+      <div id="conti-active"></div>
+      <div class="sub-arch" id="conti-arch" data-open="false" hidden>
+        <button class="sub-arch-tog" type="button" id="conti-arch-tog" aria-expanded="false">
+          <span>Archiviati</span><span class="sub-arch-n" id="conti-arch-n">0</span>
+        </button>
+        <div id="conti-arch-list" hidden></div>
+      </div>
+    </div>
+    <form class="sub-form" id="conti-form" novalidate>
+      <label class="lbl" for="conti-f-name">Nome</label>
+      <input id="conti-f-name" type="text" autocomplete="off" placeholder="Es. Contanti" maxlength="40">
+      <label class="lbl" for="conti-f-type">Tipo</label>
+      <select id="conti-f-type">
+        <option value="cash">Contanti</option>
+        <option value="bank">Banca</option>
+        <option value="card">Carta</option>
+        <option value="other">Altro</option>
+      </select>
+      <label class="lbl">Colore <span class="lbl-opt">(opzionale)</span></label>
+      <div class="sub-swatches" id="conti-f-color"></div>
+      <label class="lbl" for="conti-f-icon">Icona <span class="lbl-opt">(opzionale)</span></label>
+      <input id="conti-f-icon" type="text" autocomplete="off" placeholder="Es. 💵" maxlength="4" class="sub-icon-in">
+      <p class="err" id="conti-f-err" hidden></p>
+      <div class="due">
+        <button class="btn btn-ghost" type="button" data-form-cancel>Annulla</button>
+        <button class="btn btn-primary" type="submit">Salva</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ============ F1P5 · CATEGORIE (sotto-schermata Profilo) ============ -->
+<div class="subscreen" id="ov-categorie" data-view="list" hidden>
+  <div class="sub-head">
+    <button class="sub-back" type="button" data-sub-back>‹ Indietro</button>
+    <span class="sub-title" data-title-list>Categorie</span>
+    <span class="sub-title" data-title-form>Categoria</span>
+  </div>
+  <div class="sub-body">
+    <div class="sub-list">
+      <button class="btn btn-primary w" type="button" id="cat-add">+ Nuova categoria</button>
+      <div class="sub-empty" id="cat-empty" hidden>
+        <p class="nota">Nessuna categoria attiva. Aggiungine una per iniziare.</p>
+      </div>
+      <div class="sub-group" id="cat-grp-exp">
+        <span class="sez-k">Spese</span>
+        <div id="cat-active-exp"></div>
+        <p class="nota" id="cat-exp-empty" hidden>Nessuna categoria di spesa.</p>
+      </div>
+      <div class="sub-group" id="cat-grp-inc">
+        <span class="sez-k">Entrate</span>
+        <div id="cat-active-inc"></div>
+        <p class="nota" id="cat-inc-empty" hidden>Nessuna categoria di entrata.</p>
+      </div>
+      <div class="sub-arch" id="cat-arch" data-open="false" hidden>
+        <button class="sub-arch-tog" type="button" id="cat-arch-tog" aria-expanded="false">
+          <span>Archiviate</span><span class="sub-arch-n" id="cat-arch-n">0</span>
+        </button>
+        <div id="cat-arch-list" hidden></div>
+      </div>
+    </div>
+    <form class="sub-form" id="cat-form" novalidate>
+      <label class="lbl" for="cat-f-name">Nome</label>
+      <input id="cat-f-name" type="text" autocomplete="off" placeholder="Es. Alimentari" maxlength="40">
+      <label class="lbl" for="cat-f-kind">Tipo</label>
+      <select id="cat-f-kind">
+        <option value="expense">Spesa</option>
+        <option value="income">Entrata</option>
+      </select>
+      <label class="lbl">Colore <span class="lbl-opt">(opzionale)</span></label>
+      <div class="sub-swatches" id="cat-f-color"></div>
+      <label class="lbl" for="cat-f-icon">Icona <span class="lbl-opt">(opzionale)</span></label>
+      <input id="cat-f-icon" type="text" autocomplete="off" placeholder="Es. 🍎" maxlength="4" class="sub-icon-in">
+      <p class="err" id="cat-f-err" hidden></p>
+      <div class="due">
+        <button class="btn btn-ghost" type="button" data-form-cancel>Annulla</button>
+        <button class="btn btn-primary" type="submit">Salva</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="sub-toast" id="sub-toast" role="status" aria-live="polite" hidden></div>
 
 <script>
 "use strict";
@@ -3301,6 +3466,248 @@ if ("serviceWorker" in navigator){
     }
   } catch(e){ /* mai bloccare il boot */ }
 })();
+</script>
+
+<script>
+"use strict";
+/* F1P5-UI-START */
+/* F1 Passo 5 — UI Conti + Categorie (sotto-schermate del Profilo). Usa ESCLUSIVAMENTE
+   personalRuntime.accounts / personalRuntime.categories: nessun accesso diretto a
+   IndexedDB, nessun saldo, nessun budget, nessun Quick Add, nessun tocco al legacy.
+   Le sotto-schermate sono overlay fissi indipendenti dal router `vista` dell'app. */
+(function(){
+  var PR = window.personalRuntime;
+  if (!PR || !PR.accounts || !PR.categories) return;
+  var doc = document;
+  function $(id){ return doc.getElementById(id); }
+  if (!$("ov-conti") || !$("ov-categorie") || !$("btn-open-conti")) return;
+
+  var PALETTE = ["#7F77DD","#9C8FE8","#AFA9EC","#ED93B1","#E0568C","#F0997B","#EF9F27","#FF4E8E"];
+  var TYPE_LABEL = { cash:"Contanti", bank:"Banca", card:"Carta", other:"Altro" };
+  var KIND_LABEL = { expense:"Spesa", income:"Entrata" };
+
+  /* ---- toast: feedback immediato dopo un'azione ---- */
+  var toastEl = $("sub-toast"), toastT = null;
+  function toast(msg){
+    if (!toastEl) return;
+    toastEl.textContent = msg; toastEl.hidden = false;
+    void toastEl.offsetWidth;                 // reflow -> transizione
+    toastEl.classList.add("show");
+    if (toastT) clearTimeout(toastT);
+    toastT = setTimeout(function(){
+      toastEl.classList.remove("show");
+      setTimeout(function(){ toastEl.hidden = true; }, 260);
+    }, 1500);
+  }
+
+  /* ---- blocco scroll di sfondo mentre un overlay e' aperto ---- */
+  var locks = 0;
+  function lockBody(){ locks++; doc.body.style.overflow = "hidden"; }
+  function unlockBody(){ locks = Math.max(0, locks - 1); if (!locks) doc.body.style.overflow = ""; }
+
+  function setView(ov, view){ ov.setAttribute("data-view", view); var b = ov.querySelector(".sub-body"); if (b) b.scrollTop = 0; }
+
+  /* ---- selettore colore opzionale ---- */
+  function buildSwatches(container, state){
+    container.textContent = "";
+    var none = doc.createElement("button");
+    none.type = "button"; none.className = "sw sw-none"; none.textContent = "∅";
+    none.dataset.color = ""; none.setAttribute("aria-label", "Nessun colore");
+    container.appendChild(none);
+    PALETTE.forEach(function(hex){
+      var b = doc.createElement("button");
+      b.type = "button"; b.className = "sw"; b.style.background = hex;
+      b.dataset.color = hex; b.setAttribute("aria-label", "Colore " + hex);
+      container.appendChild(b);
+    });
+    function paint(){
+      Array.prototype.forEach.call(container.children, function(c){
+        var v = c.dataset.color || null;
+        c.setAttribute("aria-pressed", v === (state.color || null) ? "true" : "false");
+      });
+    }
+    container.onclick = function(e){
+      var b = e.target.closest(".sw"); if (!b) return;
+      state.color = b.dataset.color || null; paint();
+    };
+    state._paint = paint; paint();
+  }
+
+  /* ---- riga generica: colore/icona · nome · badge · azioni ---- */
+  function rowEl(rec, badgeText, actions){
+    var row = doc.createElement("div");
+    row.className = "sub-row" + (rec.archived ? " arch" : "");
+    var dot = doc.createElement("span");
+    dot.className = "sub-dot";
+    if (rec.color) dot.style.background = rec.color;
+    if (rec.icon) dot.textContent = rec.icon;
+    row.appendChild(dot);
+    var name = doc.createElement("span");
+    name.className = "sub-name"; name.textContent = rec.name;
+    row.appendChild(name);
+    if (badgeText){
+      var badge = doc.createElement("span");
+      badge.className = "sub-badge"; badge.textContent = badgeText;
+      row.appendChild(badge);
+    }
+    var act = doc.createElement("span");
+    act.className = "sub-actions";
+    actions.forEach(function(a){
+      var b = doc.createElement("button");
+      b.type = "button"; b.className = "sub-mini" + (a.muted ? " muted" : "");
+      b.textContent = a.label; b.onclick = a.onClick;
+      act.appendChild(b);
+    });
+    row.appendChild(act);
+    return row;
+  }
+
+  function bindArchToggle(wrapId, togId, listId){
+    $(togId).onclick = function(){
+      var w = $(wrapId), open = w.getAttribute("data-open") === "true";
+      w.setAttribute("data-open", open ? "false" : "true");
+      $(togId).setAttribute("aria-expanded", open ? "false" : "true");
+      $(listId).hidden = open;
+    };
+  }
+
+  /* ========================= CONTI ========================= */
+  var contiOv = $("ov-conti");
+  var contiForm = { id:null, color:null };
+  buildSwatches($("conti-f-color"), contiForm);
+  bindArchToggle("conti-arch", "conti-arch-tog", "conti-arch-list");
+
+  async function renderConti(){
+    var all = await PR.accounts.listAll();
+    var active = all.filter(function(a){ return !a.archived; });
+    var arch   = all.filter(function(a){ return a.archived; });
+    var box = $("conti-active"); box.textContent = "";
+    $("conti-empty").hidden = active.length > 0;
+    active.forEach(function(a){
+      box.appendChild(rowEl(a, TYPE_LABEL[a.type] || TYPE_LABEL.other, [
+        { label:"Modifica", onClick: function(){ openContiForm(a); } },
+        { label:"Archivia", muted:true, onClick: async function(){ await PR.accounts.archive(a.id); await renderConti(); toast("Conto archiviato"); } }
+      ]));
+    });
+    $("conti-arch").hidden = arch.length === 0;
+    $("conti-arch-n").textContent = String(arch.length);
+    var al = $("conti-arch-list"); al.textContent = "";
+    arch.forEach(function(a){
+      al.appendChild(rowEl(a, TYPE_LABEL[a.type] || TYPE_LABEL.other, [
+        { label:"Ripristina", onClick: async function(){ await PR.accounts.restore(a.id); await renderConti(); toast("Conto ripristinato"); } }
+      ]));
+    });
+  }
+
+  function openContiForm(rec){
+    contiForm.id = rec ? rec.id : null;
+    contiForm.color = rec ? (rec.color || null) : null;
+    $("conti-f-name").value = rec ? rec.name : "";
+    $("conti-f-type").value = rec ? (rec.type || "cash") : "cash";
+    $("conti-f-icon").value = rec ? (rec.icon || "") : "";
+    $("conti-f-err").hidden = true;
+    if (contiForm._paint) contiForm._paint();
+    setView(contiOv, "form");
+    setTimeout(function(){ $("conti-f-name").focus(); }, 60);
+  }
+
+  $("conti-add").onclick = function(){ openContiForm(null); };
+  $("conti-form").addEventListener("submit", async function(e){
+    e.preventDefault();
+    var name = $("conti-f-name").value.trim(), err = $("conti-f-err");
+    if (!name){ err.textContent = "Il nome è obbligatorio."; err.hidden = false; return; }
+    var patch = { name:name, type:$("conti-f-type").value, color:contiForm.color, icon:($("conti-f-icon").value.trim() || null) };
+    try {
+      if (contiForm.id) await PR.accounts.update(contiForm.id, patch);
+      else await PR.accounts.create(patch);
+    } catch(ex){ err.textContent = String((ex && ex.message) || ex); err.hidden = false; return; }
+    setView(contiOv, "list"); await renderConti(); toast("Conto salvato");
+  });
+
+  /* ======================= CATEGORIE ======================= */
+  var catOv = $("ov-categorie");
+  var catForm = { id:null, color:null };
+  buildSwatches($("cat-f-color"), catForm);
+  bindArchToggle("cat-arch", "cat-arch-tog", "cat-arch-list");
+
+  function catActions(c){
+    return [
+      { label:"Modifica", onClick: function(){ openCatForm(c); } },
+      { label:"Archivia", muted:true, onClick: async function(){ await PR.categories.archive(c.id); await renderCat(); toast("Categoria archiviata"); } }
+    ];
+  }
+
+  async function renderCat(){
+    var all = await PR.categories.listAll();
+    var active = all.filter(function(c){ return !c.archived; });
+    var arch   = all.filter(function(c){ return c.archived; });
+    var exp = active.filter(function(c){ return c.kind === "expense"; });
+    var inc = active.filter(function(c){ return c.kind === "income"; });
+    $("cat-empty").hidden = active.length > 0;
+    $("cat-grp-exp").hidden = active.length === 0;
+    $("cat-grp-inc").hidden = active.length === 0;
+    var be = $("cat-active-exp"); be.textContent = "";
+    exp.forEach(function(c){ be.appendChild(rowEl(c, null, catActions(c))); });
+    $("cat-exp-empty").hidden = exp.length > 0;
+    var bi = $("cat-active-inc"); bi.textContent = "";
+    inc.forEach(function(c){ bi.appendChild(rowEl(c, null, catActions(c))); });
+    $("cat-inc-empty").hidden = inc.length > 0;
+    $("cat-arch").hidden = arch.length === 0;
+    $("cat-arch-n").textContent = String(arch.length);
+    var al = $("cat-arch-list"); al.textContent = "";
+    arch.forEach(function(c){
+      al.appendChild(rowEl(c, KIND_LABEL[c.kind], [
+        { label:"Ripristina", onClick: async function(){ await PR.categories.restore(c.id); await renderCat(); toast("Categoria ripristinata"); } }
+      ]));
+    });
+  }
+
+  function openCatForm(rec){
+    catForm.id = rec ? rec.id : null;
+    catForm.color = rec ? (rec.color || null) : null;
+    $("cat-f-name").value = rec ? rec.name : "";
+    $("cat-f-kind").value = rec ? (rec.kind || "expense") : "expense";
+    $("cat-f-icon").value = rec ? (rec.icon || "") : "";
+    $("cat-f-err").hidden = true;
+    if (catForm._paint) catForm._paint();
+    setView(catOv, "form");
+    setTimeout(function(){ $("cat-f-name").focus(); }, 60);
+  }
+
+  $("cat-add").onclick = function(){ openCatForm(null); };
+  $("cat-form").addEventListener("submit", async function(e){
+    e.preventDefault();
+    var name = $("cat-f-name").value.trim(), err = $("cat-f-err");
+    if (!name){ err.textContent = "Il nome è obbligatorio."; err.hidden = false; return; }
+    var patch = { name:name, kind:$("cat-f-kind").value, color:catForm.color, icon:($("cat-f-icon").value.trim() || null) };
+    try {
+      if (catForm.id) await PR.categories.update(catForm.id, patch);
+      else await PR.categories.create(patch);
+    } catch(ex){ err.textContent = String((ex && ex.message) || ex); err.hidden = false; return; }
+    setView(catOv, "list"); await renderCat(); toast("Categoria salvata");
+  });
+
+  /* ===================== apertura / chiusura ===================== */
+  async function openConti(){ lockBody(); contiOv.hidden = false; setView(contiOv, "list"); try { await PR.seedDefaults(); } catch(e){} await renderConti(); }
+  async function openCategorie(){ lockBody(); catOv.hidden = false; setView(catOv, "list"); try { await PR.seedDefaults(); } catch(e){} await renderCat(); }
+  function closeSub(ov){ ov.hidden = true; unlockBody(); }
+
+  $("btn-open-conti").onclick = function(){ openConti(); };
+  $("btn-open-categorie").onclick = function(){ openCategorie(); };
+
+  // Indietro: da form torna alla lista; dalla lista chiude l'overlay.
+  Array.prototype.forEach.call(doc.querySelectorAll("[data-sub-back]"), function(btn){
+    btn.onclick = function(){
+      var ov = btn.closest(".subscreen");
+      if (ov.getAttribute("data-view") === "form") setView(ov, "list");
+      else closeSub(ov);
+    };
+  });
+  Array.prototype.forEach.call(doc.querySelectorAll("[data-form-cancel]"), function(btn){
+    btn.onclick = function(){ setView(btn.closest(".subscreen"), "list"); };
+  });
+})();
+/* F1P5-UI-END */
 </script>
 
 <!-- Segnaposto vuoti per le fasi successive (nessun codice, solo confine di sezione). -->
