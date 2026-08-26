@@ -4242,6 +4242,93 @@ if ("serviceWorker" in navigator){
 
 <script>
 "use strict";
+/* F2P5-FORECAST-START */
+/* F2 Passo 5 — motore forecast: stima il risultato del mese distinguendo REALE / CERTO
+   / PROBABILE. Modulo PURO: nessuna UI, nessuna stringa TOV, nessuna confidence/range,
+   nessun matching ricorrenza<->transazione, nessun budget coinvolto. Storico = solo
+   mesi completi precedenti (max 3, min 2 per abilitare la componente probabile);
+   spesa storica = expense && !capitalMovement && !deleted (transfer esclusi). */
+(function(){
+  function lastDayOfMonth(month){ var p = month.split("-"); return new Date(Date.UTC(+p[0], +p[1], 0)).getUTCDate(); }
+  function shiftMonth(month, delta){
+    var p = month.split("-"), y = +p[0], m = (+p[1] - 1) + delta;
+    y += Math.floor(m / 12); m = ((m % 12) + 12) % 12;
+    return y + "-" + (m + 1 < 10 ? "0" : "") + (m + 1);
+  }
+
+  // Baseline storica: fino a 3 mesi COMPLETI (< mese corrente) immediatamente precedenti
+  // `month`. Contano solo i mesi con almeno una spesa reale qualificante.
+  async function historicalBaseline(month, refMonth){
+    var TX = window.personalRuntime.transactions;
+    var used = 0, totalExpense = 0, totalDays = 0;
+    for (var k = 1; k <= 3; k++){
+      var pm = shiftMonth(month, -k);
+      if (pm >= refMonth) continue;   // non completo (mese corrente o futuro): salta
+      var rows = await TX.listMonth(pm);   // gia' personal + !deleted
+      var sum = 0, has = false;
+      for (var i = 0; i < rows.length; i++){
+        var t = rows[i];
+        if (t.type === "expense" && !t.capitalMovement){ sum += t.amount; has = true; }   // transfer/capitale esclusi
+      }
+      if (has){ used++; totalExpense += sum; totalDays += lastDayOfMonth(pm); }
+    }
+    return { usedMonths: used, totalExpense: totalExpense, totalDays: totalDays,
+             daily: totalDays > 0 ? totalExpense / totalDays : 0 };
+  }
+
+  async function month(m, referenceDate){
+    var TX = window.personalRuntime.transactions, RC = window.personalRuntime.recurring;
+    if (!TX || !RC) return null;
+    var refMonth = String(referenceDate).slice(0, 7);
+
+    var mt = await TX.monthTotals(m);                 // reale, !capitalMovement, transfer escluso
+    var actualIncome = mt.income, actualExpense = mt.expense;
+    var cr = await RC.certainRemaining(m, referenceDate);
+    var certainIncome = cr.income, certainExpense = cr.expense;
+
+    var probableExpense = 0, usedMonths = 0, daily = 0, state;
+
+    if (m < refMonth){
+      state = "ACTUAL";                               // mese passato: consuntivo, nessun residuo
+      certainIncome = 0; certainExpense = 0;
+    } else if (m > refMonth){
+      state = "FUTURE_CERTAIN_ONLY";                  // mese futuro: solo ricorrenze certe, niente probabile
+    } else {
+      var hb = await historicalBaseline(m, refMonth);
+      usedMonths = hb.usedMonths; daily = hb.daily;
+      if (usedMonths >= 2){
+        var day = parseInt(String(referenceDate).slice(8, 10), 10);
+        var remainingDays = lastDayOfMonth(m) - day;
+        var baselineRemaining = daily * remainingDays;
+        probableExpense = Math.max(0, Math.round(baselineRemaining - certainExpense));   // no doppio conteggio, mai < 0
+        state = "FORECAST";
+      } else {
+        probableExpense = 0;
+        state = "INSUFFICIENT_HISTORY";               // <2 mesi: nessuna stima inventata
+      }
+    }
+
+    var forecastExpense = actualExpense + certainExpense + probableExpense;
+    var forecastIncome  = actualIncome + certainIncome;
+    return {
+      month: m, state: state,
+      actualIncome: actualIncome, actualExpense: actualExpense,
+      certainIncome: certainIncome, certainExpense: certainExpense,
+      probableExpense: probableExpense,
+      forecastIncome: forecastIncome, forecastExpense: forecastExpense,
+      forecastMargin: forecastIncome - forecastExpense,
+      historicalMonthsUsed: usedMonths, historicalDailyExpense: daily
+    };
+  }
+
+  window.personalRuntime = window.personalRuntime || {};
+  window.personalRuntime.forecast = { month: month };
+})();
+/* F2P5-FORECAST-END */
+</script>
+
+<script>
+"use strict";
 /* F1P5-UI-START */
 /* F1 Passo 5 — UI Conti + Categorie (sotto-schermate del Profilo). Usa ESCLUSIVAMENTE
    personalRuntime.accounts / personalRuntime.categories: nessun accesso diretto a
