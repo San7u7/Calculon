@@ -4181,6 +4181,67 @@ if ("serviceWorker" in navigator){
 
 <script>
 "use strict";
+/* F2P4-RHYTHM-START */
+/* F2 Passo 4 — motore Ritmo: confronta avanzamento temporale del mese e consumo del
+   budget. Modulo PURO (nessuna UI, nessuna stringa TOV, nessun forecast/insight).
+   Valori numerici grezzi. spent riusa personalRuntime.budgets.spent() (semantica
+   canonica: expense && !capitalMovement && !deleted; transfer/capitale esclusi). */
+(function(){
+  var TOL = 0.05;   // tolleranza deterministica ON_PACE: ±5 punti percentuali
+
+  function lastDayOfMonth(month){ var p = month.split("-"); return new Date(Date.UTC(+p[0], +p[1], 0)).getUTCDate(); }
+
+  function monthProgress(month, referenceDate){
+    var refMonth = String(referenceDate).slice(0, 7);
+    if (month < refMonth) return 1;   // passato
+    if (month > refMonth) return 0;   // futuro
+    var day = parseInt(String(referenceDate).slice(8, 10), 10);   // corrente
+    return day / lastDayOfMonth(month);
+  }
+
+  // Helper puro condiviso: dati budget/spent/monthProgress -> ritmo + stato.
+  function classify(budget, spent, mp){
+    // Senza budget o budget=0 -> NO_BUDGET, senza inventare percentuali.
+    if (budget == null || budget === 0){
+      return { budget: (budget == null ? null : 0), spent: spent, monthProgress: mp,
+               budgetProgress: null, delta: null, state: "NO_BUDGET" };
+    }
+    var bp = spent / budget;
+    var delta = bp - mp;
+    var state;
+    if (spent > budget) state = "EXCEEDED";
+    else if (delta > TOL) state = "AHEAD";     // consumo piu' veloce del tempo
+    else if (delta < -TOL) state = "BEHIND";   // consumo piu' lento del tempo
+    else state = "ON_PACE";
+    return { budget: budget, spent: spent, monthProgress: mp, budgetProgress: bp, delta: delta, state: state };
+  }
+
+  async function total(month, referenceDate){
+    var B = window.personalRuntime && window.personalRuntime.budgets;
+    if (!B) return null;
+    var rec = await B.getTotal(month);
+    var budget = rec ? rec.amount : null;
+    var spent = await B.spent(month);
+    return Object.assign({ month: month }, classify(budget, spent, monthProgress(month, referenceDate)));
+  }
+
+  async function category(month, categoryId, referenceDate){
+    var B = window.personalRuntime && window.personalRuntime.budgets;
+    if (!B) return null;
+    var rec = await B.getCategory(month, categoryId);
+    var budget = rec ? rec.amount : null;
+    var spent = await B.spent(month, categoryId);
+    return Object.assign({ month: month, categoryId: categoryId }, classify(budget, spent, monthProgress(month, referenceDate)));
+  }
+
+  window.personalRuntime = window.personalRuntime || {};
+  window.personalRuntime.rhythm = { total: total, category: category, TOLERANCE: TOL };
+})();
+/* F2P4-RHYTHM-END */
+</script>
+
+<script>
+"use strict";
 /* F1P5-UI-START */
 /* F1 Passo 5 — UI Conti + Categorie (sotto-schermate del Profilo). Usa ESCLUSIVAMENTE
    personalRuntime.accounts / personalRuntime.categories: nessun accesso diretto a
