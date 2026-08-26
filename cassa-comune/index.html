@@ -3873,7 +3873,7 @@ if ("serviceWorker" in navigator){
   if (!PR || !PR.accounts || !PR.categories) return;
   var doc = document;
   function $(id){ return doc.getElementById(id); }
-  if (!$("ov-conti") || !$("ov-categorie") || !$("btn-open-conti")) return;
+  if (!$("ov-conti") || !$("ov-categorie")) return;   // F2P0: non dipende piu' dai launcher legacy
 
   var PALETTE = ["#7F77DD","#9C8FE8","#AFA9EC","#ED93B1","#E0568C","#F0997B","#EF9F27","#FF4E8E"];
   var TYPE_LABEL = { cash:"Contanti", bank:"Banca", card:"Carta", other:"Altro" };
@@ -4085,8 +4085,12 @@ if ("serviceWorker" in navigator){
   async function openCategorie(){ lockBody(); catOv.hidden = false; setView(catOv, "list"); try { await PR.seedDefaults(); } catch(e){} await renderCat(); }
   function closeSub(ov){ ov.hidden = true; unlockBody(); }
 
-  $("btn-open-conti").onclick = function(){ openConti(); };
-  $("btn-open-categorie").onclick = function(){ openCategorie(); };
+  // F2P0: API esplicite dei moduli.
+  window.calculonConti = { open: openConti };
+  window.calculonCategorie = { open: openCategorie };
+  // Compatibilita': i launcher legacy (nascosti) restano funzionanti finche' esistono.
+  if ($("btn-open-conti")) $("btn-open-conti").onclick = function(){ openConti(); };
+  if ($("btn-open-categorie")) $("btn-open-categorie").onclick = function(){ openCategorie(); };
 
   // Indietro: da form torna alla lista; dalla lista chiude l'overlay.
   Array.prototype.forEach.call(doc.querySelectorAll("[data-sub-back]"), function(btn){
@@ -4117,7 +4121,7 @@ if ("serviceWorker" in navigator){
   var doc = document;
   function $(id){ return doc.getElementById(id); }
   var ovMese = $("ov-mese"), ovTxn = $("ov-txn");
-  if (!ovMese || !ovTxn || !$("btn-open-mese")) return;
+  if (!ovMese || !ovTxn) return;   // F2P0: non dipende piu' dal launcher legacy
 
   var curMonth = null;
   var txnState = { id:null, type:"expense" };
@@ -4316,14 +4320,14 @@ if ("serviceWorker" in navigator){
     await renderMese();
   }
   function closeMese(){ ovMese.hidden = true; unlock(); }
-  $("btn-open-mese").onclick = function(){ openMese(); };
+  if ($("btn-open-mese")) $("btn-open-mese").onclick = function(){ openMese(); };   // hook legacy opzionale
 
   Array.prototype.forEach.call(doc.querySelectorAll("[data-p8-back]"), function(btn){
     btn.onclick = function(){ var ov = btn.closest(".subscreen"); if (ov === ovTxn) closeTxn(); else closeMese(); };
   });
 
   // Hook per moduli successivi (Quick Add F1P10): apre il Mese/form e mostra toast.
-  window.calculonMese = { openMese: openMese, renderMese: renderMese, openTxnForm: openTxn, toast: showToast };
+  window.calculonMese = { open: openMese, openMese: openMese, renderMese: renderMese, openTxnForm: openTxn, toast: showToast };
 })();
 /* F1P8-MESE-END */
 </script>
@@ -4412,11 +4416,11 @@ if ("serviceWorker" in navigator){
 
     // 4) conto: nome o alias di tipo, match unico fra gli attivi
     function accMatch(tn){
-      var ms = accounts.filter(function(a){
-        if (norm(a.name) === tn) return true;
-        var al = ACC_ALIAS[a.type] || []; return al.indexOf(tn) >= 0;
-      });
-      return ms.length === 1 ? ms[0] : null;
+      // F2P0: il nome esatto del conto prevale sull'alias di tipo.
+      var exact = accounts.filter(function(a){ return norm(a.name) === tn; });
+      if (exact.length) return exact.length === 1 ? exact[0] : null;   // esatto unico vince; esatto ambiguo -> null
+      var alias = accounts.filter(function(a){ return (ACC_ALIAS[a.type] || []).indexOf(tn) >= 0; });
+      return alias.length === 1 ? alias[0] : null;
     }
     for (var m = 0; m < rest.length; m++){
       if (used[rest[m].i]) continue;
@@ -4616,25 +4620,37 @@ if ("serviceWorker" in navigator){
     return btn;
   }
 
+  // F2P0: renderHome NON rigetta mai. Se personalRuntime/IndexedDB fallisce -> stato
+  // DATA_UNAVAILABLE con messaggio semplice, senza unhandled rejection. Il legacy
+  // (Spazi) resta comunque raggiungibile perche' disaccoppiato.
   async function renderHome(){
     var mk = curMonthKey();
     $("home-month").textContent = monthYear(mk);
-    var r = await resolveState(mk);
-    $("home-msg").textContent = messageFor(r.state, mk);
-    var hero = $("home-hero");
-    hero.textContent = euro(r.totals.difference);
-    hero.classList.toggle("pos", r.totals.difference >= 0);
-    hero.classList.toggle("neg", r.totals.difference < 0);
-    $("home-in").textContent = euro(r.totals.income);
-    $("home-out").textContent = euro(r.totals.expense);
-    // ultimi 3 movimenti
-    var accs = await PR.accounts.listAll(), cats = await PR.categories.listAll();
-    var accMap = {}, catMap = {};
-    accs.forEach(function(a){ accMap[a.id] = a; }); cats.forEach(function(c){ catMap[c.id] = c; });
-    var list = $("home-list"); list.textContent = "";
-    var recent = r.rows.slice(0, 3);   // listMonth e' gia' ordinata per data desc
-    recent.forEach(function(tx){ list.appendChild(movRow(tx, accMap, catMap)); });
-    $("home-empty").hidden = recent.length > 0;
+    try {
+      var r = await resolveState(mk);
+      var accs = await PR.accounts.listAll(), cats = await PR.categories.listAll();
+      // da qui solo scritture DOM: nessuna await che possa fallire a meta'
+      ovHome.dataset.state = r.state;
+      $("home-msg").textContent = messageFor(r.state, mk);
+      var hero = $("home-hero");
+      hero.textContent = euro(r.totals.difference);
+      hero.classList.toggle("pos", r.totals.difference >= 0);
+      hero.classList.toggle("neg", r.totals.difference < 0);
+      $("home-in").textContent = euro(r.totals.income);
+      $("home-out").textContent = euro(r.totals.expense);
+      var accMap = {}, catMap = {};
+      accs.forEach(function(a){ accMap[a.id] = a; }); cats.forEach(function(c){ catMap[c.id] = c; });
+      var list = $("home-list"); list.textContent = "";
+      var recent = r.rows.slice(0, 3);   // listMonth e' gia' ordinata per data desc
+      recent.forEach(function(tx){ list.appendChild(movRow(tx, accMap, catMap)); });
+      $("home-empty").hidden = recent.length > 0;
+    } catch(e){
+      ovHome.dataset.state = "DATA_UNAVAILABLE";
+      $("home-msg").textContent = "Non riesco a leggere i tuoi dati in questo momento.";
+      var h = $("home-hero"); h.textContent = "—"; h.classList.remove("pos", "neg");
+      $("home-in").textContent = "—"; $("home-out").textContent = "—";
+      $("home-list").textContent = ""; $("home-empty").hidden = true;
+    }
   }
 
   // ---- navigazione shell / coesistenza legacy ----
@@ -4663,9 +4679,10 @@ if ("serviceWorker" in navigator){
   });
   shellBack.onclick = goHome;
 
-  $("home-see-month").onclick = function(){ M.openMese(); };
-  $("home-conti").onclick = function(){ var b = $("btn-open-conti"); if (b) b.click(); };
-  $("home-categorie").onclick = function(){ var b = $("btn-open-categorie"); if (b) b.click(); };
+  // F2P0: accessi via API esplicite dei moduli, niente piu' .click() su hook nascosti.
+  $("home-see-month").onclick = function(){ (M.open || M.openMese)(); };
+  $("home-conti").onclick = function(){ if (window.calculonConti) window.calculonConti.open(); };
+  $("home-categorie").onclick = function(){ if (window.calculonCategorie) window.calculonCategorie.open(); };
 
   window.calculonHome = { render: renderHome, show: goHome, hide: goSpazi };
 
