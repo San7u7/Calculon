@@ -716,9 +716,10 @@ body.no-splash #app{animation:none}
 .shell-btn:active{transform:scale(.94)}
 .shell-plus{width:52px;height:52px;min-height:52px;border-radius:50%;background:var(--sole);color:#fff;
   font-size:26px;font-weight:400;padding:0;box-shadow:0 8px 22px rgba(123,92,255,.35)}
-.shell-back{position:fixed;top:calc(12px + env(safe-area-inset-top));left:14px;z-index:56;
-  background:rgba(255,255,255,.82);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);border:0;border-radius:99px;
-  min-height:40px;padding:8px 16px;font-weight:700;font-size:14px;color:var(--inchiostro);box-shadow:0 4px 14px rgba(26,18,48,.12)}
+/* F1P13: pill in basso a sinistra, sopra la zona tabs legacy, MAI sull'header legacy (top). */
+.shell-back{position:fixed;left:14px;bottom:calc(84px + env(safe-area-inset-bottom));z-index:56;
+  background:var(--inchiostro);color:#fff;border:0;border-radius:99px;
+  min-height:42px;padding:9px 18px;font-weight:700;font-size:14px;box-shadow:0 8px 22px rgba(26,18,48,.28)}
 .shell-back:active{transform:scale(.93)}
 </style>
 <!-- ==== /MODULE: styles ==== -->
@@ -996,7 +997,9 @@ body.no-splash #app{animation:none}
       <h1 id="pf-saluto">Ciao!</h1>
       <div class="divisore"></div>
 
-      <div class="sez">
+      <!-- F1P13: launcher personale NON visibile in Spazi/legacy. Resta nel DOM
+           (nascosto) come hook di F1P8. Il Personale si apre solo dalla Home. -->
+      <div class="sez" hidden aria-hidden="true">
         <span class="sez-k">Spazio personale</span>
         <button class="btn btn-primary w" id="btn-open-mese" type="button">Il mio mese</button>
       </div>
@@ -1036,7 +1039,9 @@ body.no-splash #app{animation:none}
         <div id="pf-personali-lista" class="filo-lista"></div>
       </div>
 
-      <div class="sez">
+      <!-- F1P13: Conti/Categorie NON visibili in Spazi/legacy. Restano nel DOM
+           (nascosti) come hook aperti dalle Impostazioni della Home via .click(). -->
+      <div class="sez" hidden aria-hidden="true">
         <span class="sez-k">Le tue impostazioni</span>
         <p class="nota">I conti e le categorie del tuo spazio personale.</p>
         <button class="btn btn-ghost w" id="btn-open-conti" type="button">Conti</button>
