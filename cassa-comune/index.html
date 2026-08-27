@@ -4593,53 +4593,71 @@ if ("serviceWorker" in navigator){
     return { candidate: top, confidence: conf, topN: topN, total: total, share: share };
   }
 
-  // I K movimenti piu' recenti di questo merchant (transfer esclusi; deleted gia' fuori).
-  async function windowFor(merchantKey){
+  // I movimenti (non-transfer, !deleted) di questo merchant, dal piu' recente.
+  async function merchantMovements(merchantKey){
     var TX = window.personalRuntime && window.personalRuntime.transactions;
     if (!TX || !merchantKey) return [];
     var all = await TX.listAll();   // personale, !deleted, ordinato per data desc
     var out = [];
-    for (var i = 0; i < all.length && out.length < K; i++){
+    for (var i = 0; i < all.length; i++){
       var t = all[i];
-      if (t.type === "transfer") continue;
+      if (t.type === "transfer") continue;   // transfer non conta
       if (normMerchant(t.merchant) !== merchantKey) continue;
       out.push(t);
     }
     return out;
   }
 
+  // Finestra PER-CAMPO: le ultime K osservazioni VALIDE del campo. Le osservazioni
+  // "learned" (auto-applicate), nulle o (per la categoria) incoerenti col type NON
+  // contano E non occupano slot -> i record learned sono completamente INERTI: non
+  // rafforzano ne' indeboliscono il modello. Una modifica storica sostituisce
+  // semanticamente l'osservazione (stesso record, nuovo valore), non ne aggiunge una.
+  function fieldWindow(movs, field, type, kindOf){
+    var counts = {}, used = 0, excludedLearned = 0, excludedIncoherent = 0, id;
+    for (var i = 0; i < movs.length && used < K; i++){
+      var t = movs[i];
+      id = (field === "categoryId") ? t.categoryId : t.accountId;
+      if (!id) continue;                                   // campo assente: non e' osservazione
+      if (isLearned(t, field)){ excludedLearned++; continue; }        // learned: inerte
+      if (field === "categoryId" && kindOf[id] !== type){ excludedIncoherent++; continue; }   // categoria incoerente col type
+      counts[id] = (counts[id] || 0) + 1; used++;
+    }
+    return { counts: counts, window: used, excludedLearned: excludedLearned, excludedIncoherent: excludedIncoherent };
+  }
+
   async function merchantStats(merchant, type){
     var key = normMerchant(merchant);
     var empty = {
-      merchant: key, type: type, window: 0,
-      category: { counts: {}, candidate: null, confidence: "LOW", topN: 0, total: 0, share: 0 },
-      account:  { counts: {}, candidate: null, confidence: "LOW", topN: 0, total: 0, share: 0 }
+      merchant: key, type: type,
+      category: { counts: {}, window: 0, candidate: null, confidence: "LOW", topN: 0, total: 0, share: 0, excludedLearned: 0, excludedIncoherent: 0 },
+      account:  { counts: {}, window: 0, candidate: null, confidence: "LOW", topN: 0, total: 0, share: 0, excludedLearned: 0 }
     };
     if (!key) return empty;
-    var win = await windowFor(key);
-    if (!win.length) return empty;
+    var movs = await merchantMovements(key);
+    if (!movs.length) return empty;
 
-    // kind per categoria: la categoria conta solo se coerente col type richiesto.
     var CATS = window.personalRuntime && window.personalRuntime.categories;
     var kindOf = {};
     if (CATS){ (await CATS.listAll()).forEach(function(c){ kindOf[c.id] = c.kind; }); }
 
-    var catCounts = {}, accCounts = {};
-    for (var i = 0; i < win.length; i++){
-      var t = win[i];
-      if (t.categoryId && !isLearned(t, "categoryId") && kindOf[t.categoryId] === type){
-        catCounts[t.categoryId] = (catCounts[t.categoryId] || 0) + 1;
-      }
-      if (t.accountId && !isLearned(t, "accountId")){   // conto indipendente dal type
-        accCounts[t.accountId] = (accCounts[t.accountId] || 0) + 1;
-      }
-    }
-    var cat = classify(catCounts), acc = classify(accCounts);
+    var cw = fieldWindow(movs, "categoryId", type, kindOf);
+    var aw = fieldWindow(movs, "accountId", type, kindOf);
+    var cat = classify(cw.counts), acc = classify(aw.counts);
     return {
-      merchant: key, type: type, window: win.length,
-      category: { counts: catCounts, candidate: cat.candidate, confidence: cat.confidence, topN: cat.topN, total: cat.total, share: cat.share },
-      account:  { counts: accCounts, candidate: acc.candidate, confidence: acc.confidence, topN: acc.topN, total: acc.total, share: acc.share }
+      merchant: key, type: type,
+      category: { counts: cw.counts, window: cw.window, candidate: cat.candidate, confidence: cat.confidence, topN: cat.topN, total: cat.total, share: cat.share, excludedLearned: cw.excludedLearned, excludedIncoherent: cw.excludedIncoherent },
+      account:  { counts: aw.counts, window: aw.window, candidate: acc.candidate, confidence: acc.confidence, topN: acc.topN, total: acc.total, share: acc.share, excludedLearned: aw.excludedLearned }
     };
+  }
+
+  // Helper READ-ONLY di diagnostica: finestra, evidenze usate/escluse, conteggi.
+  async function explain(merchant, type){
+    var key = normMerchant(merchant);
+    var movs = await merchantMovements(key);
+    var s = await merchantStats(merchant, type);
+    return { merchant: key, type: type, K: K, merchantMovements: movs.length,
+             category: s.category, account: s.account };
   }
 
   async function suggest(merchant, type){
@@ -4655,7 +4673,7 @@ if ("serviceWorker" in navigator){
 
   window.personalRuntime = window.personalRuntime || {};
   window.personalRuntime.learning = {
-    suggest: suggest, merchantStats: merchantStats,
+    suggest: suggest, merchantStats: merchantStats, explain: explain,
     normMerchant: normMerchant, K: K
   };
 })();
