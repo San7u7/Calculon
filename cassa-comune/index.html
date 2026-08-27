@@ -4530,6 +4530,121 @@ if ("serviceWorker" in navigator){
 
 <script>
 "use strict";
+/* F3P1-LEARNING-START */
+/* F3 Passo 1 — motore di apprendimento DETERMINISTICO, derivato dalle transazioni
+   personali. Nessuna UI, nessuna scrittura, nessun side effect: legge solo
+   personalRuntime.transactions e .categories. Memoria = frequenza sui K movimenti piu'
+   recenti dello stesso merchant. Provenance record-level interpretata: "learned" NON
+   alimenta il modello; explicit/manual/assente (pre-F3) = osservazioni valide.
+   Transfer esclusi, deleted esclusi (gia' fuori da listAll). Categoria conta solo se il
+   suo kind e' coerente col type; conto e categoria sono indipendenti; nessun fuzzy. */
+(function(){
+  var K = 10;                        // finestra: ultimi K movimenti dello stesso merchant
+  var HI_N = 3, HI_S = 0.80;         // HIGH:   topN>=3 && share>=0.80
+  var MED_N = 2, MED_S = 0.60;       // MEDIUM: topN>=2 && share>=0.60
+
+  // Normalizzazione merchant deterministica (stessa logica del Quick Add): minuscolo,
+  // senza accenti, solo alfanumerici. "Conad", "conad ", "CONAD" -> "conad".
+  function normMerchant(s){
+    return (s == null ? "" : String(s)).toLowerCase().normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "").replace(/[^\p{L}\p{N}]+/gu, "");
+  }
+
+  // Provenance per-campo. undefined = record pre-F3 / assente (osservazione valida).
+  function provOf(t, field){
+    var p = t && t.learningProvenance;
+    return (p && typeof p === "object") ? p[field] : undefined;
+  }
+  function isLearned(t, field){ return provOf(t, field) === "learned"; }   // "learned" non alimenta il modello
+
+  function classify(counts){
+    var total = 0, top = null, topN = 0, second = 0, id;
+    for (id in counts){ if (counts.hasOwnProperty(id)) total += counts[id]; }
+    for (id in counts){
+      if (!counts.hasOwnProperty(id)) continue;
+      var n = counts[id];
+      if (n > topN){ second = topN; topN = n; top = id; }
+      else if (n > second){ second = n; }
+    }
+    if (total === 0) return { candidate: null, confidence: "LOW", topN: 0, total: 0, share: 0 };
+    if (topN === second) return { candidate: null, confidence: "LOW", topN: topN, total: total, share: topN/total };   // pareggio -> LOW
+    var share = topN / total;
+    var conf = (topN >= HI_N && share >= HI_S) ? "HIGH"
+             : (topN >= MED_N && share >= MED_S) ? "MEDIUM" : "LOW";
+    return { candidate: top, confidence: conf, topN: topN, total: total, share: share };
+  }
+
+  // I K movimenti piu' recenti di questo merchant (transfer esclusi; deleted gia' fuori).
+  async function windowFor(merchantKey){
+    var TX = window.personalRuntime && window.personalRuntime.transactions;
+    if (!TX || !merchantKey) return [];
+    var all = await TX.listAll();   // personale, !deleted, ordinato per data desc
+    var out = [];
+    for (var i = 0; i < all.length && out.length < K; i++){
+      var t = all[i];
+      if (t.type === "transfer") continue;
+      if (normMerchant(t.merchant) !== merchantKey) continue;
+      out.push(t);
+    }
+    return out;
+  }
+
+  async function merchantStats(merchant, type){
+    var key = normMerchant(merchant);
+    var empty = {
+      merchant: key, type: type, window: 0,
+      category: { counts: {}, candidate: null, confidence: "LOW", topN: 0, total: 0, share: 0 },
+      account:  { counts: {}, candidate: null, confidence: "LOW", topN: 0, total: 0, share: 0 }
+    };
+    if (!key) return empty;
+    var win = await windowFor(key);
+    if (!win.length) return empty;
+
+    // kind per categoria: la categoria conta solo se coerente col type richiesto.
+    var CATS = window.personalRuntime && window.personalRuntime.categories;
+    var kindOf = {};
+    if (CATS){ (await CATS.listAll()).forEach(function(c){ kindOf[c.id] = c.kind; }); }
+
+    var catCounts = {}, accCounts = {};
+    for (var i = 0; i < win.length; i++){
+      var t = win[i];
+      if (t.categoryId && !isLearned(t, "categoryId") && kindOf[t.categoryId] === type){
+        catCounts[t.categoryId] = (catCounts[t.categoryId] || 0) + 1;
+      }
+      if (t.accountId && !isLearned(t, "accountId")){   // conto indipendente dal type
+        accCounts[t.accountId] = (accCounts[t.accountId] || 0) + 1;
+      }
+    }
+    var cat = classify(catCounts), acc = classify(accCounts);
+    return {
+      merchant: key, type: type, window: win.length,
+      category: { counts: catCounts, candidate: cat.candidate, confidence: cat.confidence, topN: cat.topN, total: cat.total, share: cat.share },
+      account:  { counts: accCounts, candidate: acc.candidate, confidence: acc.confidence, topN: acc.topN, total: acc.total, share: acc.share }
+    };
+  }
+
+  async function suggest(merchant, type){
+    var s = await merchantStats(merchant, type);
+    return {
+      merchant: s.merchant, type: type,
+      category: { id: s.category.candidate, confidence: s.category.confidence,
+                  evidence: { count: s.category.total, topN: s.category.topN, share: s.category.share } },
+      account:  { id: s.account.candidate, confidence: s.account.confidence,
+                  evidence: { count: s.account.total, topN: s.account.topN, share: s.account.share } }
+    };
+  }
+
+  window.personalRuntime = window.personalRuntime || {};
+  window.personalRuntime.learning = {
+    suggest: suggest, merchantStats: merchantStats,
+    normMerchant: normMerchant, K: K
+  };
+})();
+/* F3P1-LEARNING-END */
+</script>
+
+<script>
+"use strict";
 /* F1P5-UI-START */
 /* F1 Passo 5 — UI Conti + Categorie (sotto-schermate del Profilo). Usa ESCLUSIVAMENTE
    personalRuntime.accounts / personalRuntime.categories: nessun accesso diretto a
