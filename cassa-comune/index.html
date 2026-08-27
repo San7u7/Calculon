@@ -662,6 +662,10 @@ body.no-splash #app{animation:none}
 .mov-amt{flex:none;font-weight:700;font-size:15px;font-variant-numeric:tabular-nums;white-space:nowrap}
 .mov-amt.pos{color:var(--viola)}
 .mov-amt.neg{color:var(--inchiostro)}
+.mov-amt.trasf{color:var(--grigio)}
+.sub-dot.trasf{background:var(--carta2);color:var(--grigio);box-shadow:none}
+.seg.seg-3{grid-template-columns:1fr 1fr 1fr}
+.seg.seg-3 .seg-btn{font-size:14px;padding:0 4px}
 .seg{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:2px 0 6px}
 .seg-btn{min-height:var(--tap);border:0;border-radius:var(--r-sm);font-weight:700;font-size:15px;
   background:rgba(255,255,255,.7);color:var(--grigio);box-shadow:0 4px 14px rgba(26,18,48,.06);
@@ -1218,16 +1222,25 @@ body.no-splash #app{animation:none}
         <span class="sim">€</span>
       </div>
       <label class="lbl">Tipo</label>
-      <div class="seg" id="txn-type">
+      <div class="seg seg-3" id="txn-type">
         <button type="button" class="seg-btn is-on" data-type="expense">Spesa</button>
         <button type="button" class="seg-btn" data-type="income">Entrata</button>
+        <button type="button" class="seg-btn" data-type="transfer">Giroconto</button>
       </div>
       <label class="lbl" for="txn-date">Data</label>
       <input id="txn-date" type="date">
-      <label class="lbl" for="txn-account">Conto <span class="lbl-opt">(opzionale)</span></label>
-      <select id="txn-account"></select>
-      <label class="lbl" for="txn-category">Categoria <span class="lbl-opt">(opzionale)</span></label>
-      <select id="txn-category"></select>
+      <div id="txn-std-fields">
+        <label class="lbl" for="txn-account">Conto <span class="lbl-opt">(opzionale)</span></label>
+        <select id="txn-account"></select>
+        <label class="lbl" for="txn-category">Categoria <span class="lbl-opt">(opzionale)</span></label>
+        <select id="txn-category"></select>
+      </div>
+      <div id="txn-transfer-fields" hidden>
+        <label class="lbl" for="txn-from">Da conto</label>
+        <select id="txn-from"></select>
+        <label class="lbl" for="txn-to">A conto</label>
+        <select id="txn-to"></select>
+      </div>
       <label class="lbl" for="txn-merchant">Descrizione</label>
       <input id="txn-merchant" type="text" autocomplete="off" placeholder="Es. Spesa al Conad" maxlength="80">
       <label class="lbl" for="txn-note">Nota <span class="lbl-opt">(opzionale)</span></label>
@@ -4665,34 +4678,52 @@ if ("serviceWorker" in navigator){
   }
 
   function movRow(tx, accMap, catMap){
+    var isTransfer = tx.type === "transfer";
     var cat = tx.categoryId ? catMap[tx.categoryId] : null;
     var acc = tx.accountId ? accMap[tx.accountId] : null;
     var btn = doc.createElement("button"); btn.type = "button"; btn.className = "mov-row";
     var dot = doc.createElement("span"); dot.className = "sub-dot";
-    if (cat && cat.color) dot.style.background = cat.color;
-    if (cat && cat.icon) dot.textContent = cat.icon;
+    if (isTransfer){
+      dot.className = "sub-dot trasf"; dot.textContent = "⇄";
+    } else {
+      if (cat && cat.color) dot.style.background = cat.color;
+      if (cat && cat.icon) dot.textContent = cat.icon;
+    }
     btn.appendChild(dot);
     var main = doc.createElement("span"); main.className = "mov-main";
     var desc = doc.createElement("span"); desc.className = "mov-desc";
-    desc.textContent = tx.merchant || (cat ? cat.name : "Movimento");
+    if (isTransfer){
+      var from = tx.fromAccountId ? accMap[tx.fromAccountId] : null;
+      var to   = tx.toAccountId   ? accMap[tx.toAccountId]   : null;
+      desc.textContent = (from ? from.name : "Conto") + " ⇄ " + (to ? to.name : "Conto");
+    } else {
+      desc.textContent = tx.merchant || (cat ? cat.name : "Movimento");
+    }
     main.appendChild(desc);
     var meta = doc.createElement("span"); meta.className = "mov-meta";
-    var parts = []; if (cat) parts.push(cat.name); if (acc) parts.push(acc.name); parts.push(dayLabel(tx.date));
+    var parts = [];
+    if (isTransfer){ if (tx.merchant) parts.push(tx.merchant); }
+    else { if (cat) parts.push(cat.name); if (acc) parts.push(acc.name); }
+    parts.push(dayLabel(tx.date));
     meta.textContent = parts.join(" · ");
     main.appendChild(meta);
     btn.appendChild(main);
     var amt = doc.createElement("span");
-    amt.className = "mov-amt " + (tx.type === "income" ? "pos" : "neg");
-    amt.textContent = (tx.type === "income" ? "+" : "−") + euro(tx.amount);
+    if (isTransfer){
+      amt.className = "mov-amt trasf"; amt.textContent = euro(tx.amount);
+    } else {
+      amt.className = "mov-amt " + (tx.type === "income" ? "pos" : "neg");
+      amt.textContent = (tx.type === "income" ? "+" : "−") + euro(tx.amount);
+    }
     btn.appendChild(amt);
     btn.onclick = function(){ openTxn(tx.id); };
     return btn;
   }
 
   /* ---- FORM TRANSAZIONE ---- */
-  async function fillAccountSelect(selectedId){
-    var sel = $("txn-account"); sel.textContent = "";
-    var none = doc.createElement("option"); none.value = ""; none.textContent = "— Nessuno —"; sel.appendChild(none);
+  async function fillAccountOptions(sel, selectedId, placeholder){
+    sel.textContent = "";
+    var none = doc.createElement("option"); none.value = ""; none.textContent = placeholder; sel.appendChild(none);
     var active = await PR.accounts.listActive(), present = {};
     active.forEach(function(a){ present[a.id] = true; var o = doc.createElement("option"); o.value = a.id; o.textContent = a.name; sel.appendChild(o); });
     if (selectedId && !present[selectedId]){
@@ -4700,6 +4731,18 @@ if ("serviceWorker" in navigator){
       if (arch){ var o = doc.createElement("option"); o.value = arch.id; o.textContent = arch.name + " (archiviato)"; sel.appendChild(o); }
     }
     sel.value = selectedId || "";
+  }
+  function fillAccountSelect(selectedId){ return fillAccountOptions($("txn-account"), selectedId, "— Nessuno —"); }
+  // Giroconto (F2.1): due conti propri, distinti. Nessuna categoria.
+  async function fillTransferSelects(fromId, toId){
+    await fillAccountOptions($("txn-from"), fromId || null, "— Scegli —");
+    await fillAccountOptions($("txn-to"),   toId   || null, "— Scegli —");
+  }
+  // Mostra i campi coerenti col tipo: conto+categoria per spesa/entrata, da/a per giroconto.
+  function applyTypeFields(){
+    var isT = txnState.type === "transfer";
+    $("txn-std-fields").hidden = isT;
+    $("txn-transfer-fields").hidden = !isT;
   }
   async function fillCategorySelect(kind, selectedId){
     var sel = $("txn-category"); sel.textContent = "";
@@ -4730,8 +4773,14 @@ if ("serviceWorker" in navigator){
     $("txn-note").value = rec ? (rec.note || "") : (pf.note || "");
     $("txn-err").hidden = true;
     paintType();
-    await fillAccountSelect(rec ? rec.accountId : (pf.accountId || null));
-    await fillCategorySelect(txnState.type, rec ? rec.categoryId : (pf.categoryId || null));
+    applyTypeFields();
+    if (txnState.type === "transfer"){
+      await fillTransferSelects(rec ? rec.fromAccountId : (pf.fromAccountId || null),
+                                rec ? rec.toAccountId   : (pf.toAccountId   || null));
+    } else {
+      await fillAccountSelect(rec ? rec.accountId : (pf.accountId || null));
+      await fillCategorySelect(txnState.type, rec ? rec.categoryId : (pf.categoryId || null));
+    }
     $("txn-delete").hidden = !rec;
     lock(); ovTxn.hidden = false; ovTxn.querySelector(".sub-body").scrollTop = 0;
     setTimeout(function(){ $("txn-amt").focus(); }, 60);
@@ -4740,8 +4789,13 @@ if ("serviceWorker" in navigator){
 
   $("txn-type").addEventListener("click", function(e){
     var b = e.target.closest(".seg-btn"); if (!b || b.dataset.type === txnState.type) return;
-    txnState.type = b.dataset.type; paintType();
-    fillCategorySelect(txnState.type, null);   // categoria non piu' coerente -> azzerata
+    txnState.type = b.dataset.type; paintType(); applyTypeFields();
+    if (txnState.type === "transfer"){
+      fillTransferSelects($("txn-from").value || null, $("txn-to").value || null);
+    } else {
+      fillAccountSelect($("txn-account").value || null);   // assicura le opzioni se si arriva da giroconto
+      fillCategorySelect(txnState.type, null);              // categoria non piu' coerente -> azzerata
+    }
   });
 
   $("txn-form").addEventListener("submit", async function(e){
@@ -4751,9 +4805,19 @@ if ("serviceWorker" in navigator){
     if (!(typeof cents === "number" && isFinite(cents) && Math.floor(cents) === cents && cents > 0)){
       err.textContent = "Inserisci un importo valido."; err.hidden = false; return;
     }
-    var data = { type: txnState.type, amount: cents, date: $("txn-date").value,
-      accountId: $("txn-account").value || null, categoryId: $("txn-category").value || null,
-      merchant: $("txn-merchant").value.trim() || null, note: $("txn-note").value.trim() || null };
+    var data;
+    if (txnState.type === "transfer"){
+      var fromId = $("txn-from").value || null, toId = $("txn-to").value || null;
+      if (!fromId || !toId){ err.textContent = "Scegli il conto di partenza e quello di arrivo."; err.hidden = false; return; }
+      if (fromId === toId){ err.textContent = "Il conto di partenza e quello di arrivo devono essere diversi."; err.hidden = false; return; }
+      data = { type: "transfer", amount: cents, date: $("txn-date").value,
+        fromAccountId: fromId, toAccountId: toId,
+        merchant: $("txn-merchant").value.trim() || null, note: $("txn-note").value.trim() || null };
+    } else {
+      data = { type: txnState.type, amount: cents, date: $("txn-date").value,
+        accountId: $("txn-account").value || null, categoryId: $("txn-category").value || null,
+        merchant: $("txn-merchant").value.trim() || null, note: $("txn-note").value.trim() || null };
+    }
     try {
       if (txnState.id) await PR.transactions.update(txnState.id, data);
       else await PR.transactions.create(data);
@@ -5065,22 +5129,41 @@ if ("serviceWorker" in navigator){
   }
 
   function movRow(tx, accMap, catMap){
+    var isTransfer = tx.type === "transfer";
     var cat = tx.categoryId ? catMap[tx.categoryId] : null, acc = tx.accountId ? accMap[tx.accountId] : null;
     var btn = doc.createElement("button"); btn.type = "button"; btn.className = "mov-row";
     var dot = doc.createElement("span"); dot.className = "sub-dot";
-    if (cat && cat.color) dot.style.background = cat.color;
-    if (cat && cat.icon) dot.textContent = cat.icon;
+    if (isTransfer){
+      dot.className = "sub-dot trasf"; dot.textContent = "⇄";
+    } else {
+      if (cat && cat.color) dot.style.background = cat.color;
+      if (cat && cat.icon) dot.textContent = cat.icon;
+    }
     btn.appendChild(dot);
     var main = doc.createElement("span"); main.className = "mov-main";
     var desc = doc.createElement("span"); desc.className = "mov-desc";
-    desc.textContent = tx.merchant || (cat ? cat.name : "Movimento");
+    if (isTransfer){
+      var from = tx.fromAccountId ? accMap[tx.fromAccountId] : null;
+      var to   = tx.toAccountId   ? accMap[tx.toAccountId]   : null;
+      desc.textContent = (from ? from.name : "Conto") + " ⇄ " + (to ? to.name : "Conto");
+    } else {
+      desc.textContent = tx.merchant || (cat ? cat.name : "Movimento");
+    }
     main.appendChild(desc);
     var meta = doc.createElement("span"); meta.className = "mov-meta";
-    var parts = []; if (cat) parts.push(cat.name); if (acc) parts.push(acc.name); parts.push(dayLabel(tx.date));
+    var parts = [];
+    if (isTransfer){ if (tx.merchant) parts.push(tx.merchant); }
+    else { if (cat) parts.push(cat.name); if (acc) parts.push(acc.name); }
+    parts.push(dayLabel(tx.date));
     meta.textContent = parts.join(" · "); main.appendChild(meta);
     btn.appendChild(main);
-    var amt = doc.createElement("span"); amt.className = "mov-amt " + (tx.type === "income" ? "pos" : "neg");
-    amt.textContent = (tx.type === "income" ? "+" : "−") + euro(tx.amount);
+    var amt = doc.createElement("span");
+    if (isTransfer){
+      amt.className = "mov-amt trasf"; amt.textContent = euro(tx.amount);
+    } else {
+      amt.className = "mov-amt " + (tx.type === "income" ? "pos" : "neg");
+      amt.textContent = (tx.type === "income" ? "+" : "−") + euro(tx.amount);
+    }
     btn.appendChild(amt);
     btn.onclick = function(){ M.openTxnForm(tx.id); };
     return btn;
