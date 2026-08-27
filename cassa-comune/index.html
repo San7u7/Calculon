@@ -666,6 +666,27 @@ body.no-splash #app{animation:none}
 .sub-dot.trasf{background:var(--carta2);color:var(--grigio);box-shadow:none}
 .seg.seg-3{grid-template-columns:1fr 1fr 1fr}
 .seg.seg-3 .seg-btn{font-size:14px;padding:0 4px}
+/* F2P7B — Budget UI */
+.budget-card{background:rgba(255,255,255,.72);border-radius:var(--r-sm);padding:14px 14px 16px;margin:16px 0;box-shadow:0 4px 14px rgba(26,18,48,.06)}
+.budget-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:12px}
+.budget-msg{color:var(--grigio);font-size:14px;margin:0 0 12px}
+.budget-figs{display:flex;gap:18px;margin-bottom:10px;flex-wrap:wrap}
+.budget-fig{display:flex;flex-direction:column;gap:2px}
+.budget-fig .k{font-size:11px;color:var(--grigio);text-transform:uppercase;letter-spacing:.04em}
+.budget-fig .v{font-weight:700;font-size:16px;font-variant-numeric:tabular-nums}
+.budget-bar{height:8px;border-radius:6px;background:var(--carta2);overflow:hidden}
+.budget-bar > i{display:block;height:100%;width:0;background:var(--viola);border-radius:6px;transition:width .35s var(--curva)}
+.budget-bar.over > i{background:var(--arancio)}
+.budget-tov{font-size:13px;color:var(--grigio);margin:10px 0 0}
+.budget-ov-month{font-size:13px;color:var(--grigio);margin:0 0 18px;text-transform:capitalize}
+.budget-unalloc{font-size:13px;color:var(--grigio);margin:12px 0 0}
+.budget-sec-k{font-size:var(--et-sezione);letter-spacing:.08em;text-transform:uppercase;color:var(--grigio);font-weight:700;margin:26px 0 12px}
+.budget-cat{background:rgba(255,255,255,.6);border-radius:var(--r-sm);padding:12px;margin-bottom:10px}
+.budget-cat-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.budget-cat-name{font-weight:600;font-size:15px}
+.budget-cat-del{background:transparent;border:0;font-size:22px;line-height:1;color:var(--grigio);padding:0 6px;min-height:var(--tap)}
+.budget-cat-figs{font-size:12px;color:var(--grigio);margin:8px 0}
+.importo-sm .importo{font-size:18px}
 .seg{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:2px 0 6px}
 .seg-btn{min-height:var(--tap);border:0;border-radius:var(--r-sm);font-weight:700;font-size:15px;
   background:rgba(255,255,255,.7);color:var(--grigio);box-shadow:0 4px 14px rgba(26,18,48,.06);
@@ -1199,6 +1220,7 @@ body.no-splash #app{animation:none}
       <div class="mese-tot-cell"><span class="sez-k">Uscite</span><span class="mese-tot-v" id="mese-out">—</span></div>
       <div class="mese-tot-cell mese-tot-diff"><span class="sez-k">Differenza</span><span class="mese-tot-v big" id="mese-diff">—</span></div>
     </div>
+    <div class="budget-card" id="mese-budget" hidden></div>
     <button class="btn btn-primary w" type="button" id="mese-add">+ Aggiungi</button>
     <div class="mese-empty" id="mese-empty" hidden>
       <p class="nota" id="mese-empty-txt">Nessun movimento in questo mese.</p>
@@ -1252,6 +1274,32 @@ body.no-splash #app{animation:none}
       </div>
       <button class="btn btn-ghost w" type="button" id="txn-delete" hidden>Elimina movimento</button>
     </form>
+  </div>
+</div>
+
+<!-- ============ F2P7B · GESTIONE BUDGET ============ -->
+<div class="subscreen" id="ov-budget" hidden>
+  <div class="sub-head">
+    <button class="sub-back" type="button" id="budget-back">‹ Indietro</button>
+    <span class="sub-title">Budget</span>
+  </div>
+  <div class="sub-body">
+    <p class="budget-ov-month" id="budget-month">—</p>
+    <label class="lbl" for="budget-total">Totale mese</label>
+    <div class="importo-wrap">
+      <input id="budget-total" class="importo" type="text" inputmode="decimal" placeholder="0,00" autocomplete="off">
+      <span class="sim">€</span>
+    </div>
+    <div class="due">
+      <button class="btn btn-ghost" type="button" id="budget-total-del" hidden>Rimuovi</button>
+      <button class="btn btn-primary" type="button" id="budget-total-save">Salva totale</button>
+    </div>
+    <p class="budget-unalloc" id="budget-unalloc" hidden></p>
+    <div class="budget-sec-k">Per categoria</div>
+    <div id="budget-cat-list"></div>
+    <div id="budget-add-area" hidden></div>
+    <button class="btn btn-ghost w" type="button" id="budget-cat-add">Aggiungi categoria</button>
+    <p class="err" id="budget-err" hidden></p>
   </div>
 </div>
 
@@ -4675,6 +4723,7 @@ if ("serviceWorker" in navigator){
     $("mese-empty").hidden = rows.length > 0;
     $("mese-empty-txt").textContent = "Nessun movimento in " + monthLabel(curMonth) + ".";
     rows.forEach(function(tx){ list.appendChild(movRow(tx, accMap, catMap)); });
+    if (window.calculonBudget && window.calculonBudget.renderCompact) await window.calculonBudget.renderCompact(curMonth);
   }
 
   function movRow(tx, accMap, catMap){
@@ -4860,6 +4909,176 @@ if ("serviceWorker" in navigator){
   window.calculonMese = { open: openMese, openMese: openMese, renderMese: renderMese, openTxnForm: openTxn, toast: showToast };
 })();
 /* F1P8-MESE-END */
+</script>
+
+<script>
+"use strict";
+/* F2P7B-BUDGET-UI-START */
+/* F2 Passo 7B — UI Budget dentro Mese. Solo presentazione: usa ESCLUSIVAMENTE
+   window.personalRuntime.budgets (+ .categories per risolvere i nomi). Nessun accesso
+   IndexedDB diretto, nessun cambio motore. Il budget e' pianificazione, non un limite:
+   TOV minimale, niente insight engine. Overlay sopra il Mese (gia' lockato), quindi
+   qui non si tocca il body-scroll. */
+(function(){
+  var doc = document;
+  function $(id){ return doc.getElementById(id); }
+  var PR = window.personalRuntime;
+  if (!PR || !PR.budgets) return;
+  var curM = null;
+
+  function euro(c){ return (c/100).toLocaleString("it-IT", { minimumFractionDigits:2, maximumFractionDigits:2 }) + " €"; }
+  function parseCents(str){
+    var v = (str == null ? "" : String(str)).trim().replace(/€/g, ""); if (!v) return NaN;
+    v = v.replace(/^[+-]/, "");
+    if (v.indexOf(",") >= 0) v = v.replace(/\./g, "").replace(",", ".");
+    if (!/^\d*\.?\d*$/.test(v)) return NaN;
+    var f = parseFloat(v); if (!isFinite(f)) return NaN;
+    return Math.round(f * 100);
+  }
+  function validCents(c){ return typeof c === "number" && isFinite(c) && Math.floor(c) === c && c > 0; }
+  function fmtInput(c){ return (c/100).toFixed(2).replace(".", ","); }
+  function monthHuman(m){ var p = m.split("-"); var d = new Date(+p[0], +p[1]-1, 1); return d.toLocaleDateString("it-IT", { month:"long", year:"numeric" }); }
+  function elh(tag, cls, txt){ var e = doc.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
+  function showErr(m){ var e = $("budget-err"); e.textContent = m; e.hidden = false; }
+  function clearErr(){ $("budget-err").hidden = true; }
+
+  function barEl(spent, planned){
+    var bar = elh("div", "budget-bar"), i = doc.createElement("i");
+    var pct = planned > 0 ? Math.min(1, spent/planned) : (spent > 0 ? 1 : 0);
+    i.style.width = (pct*100).toFixed(1) + "%";
+    if (spent > planned) bar.classList.add("over");
+    bar.appendChild(i); return bar;
+  }
+  function figsEl(pairs){
+    var f = elh("div", "budget-figs");
+    pairs.forEach(function(p){ var c = elh("div", "budget-fig"); c.appendChild(elh("span", "k", p[0])); c.appendChild(elh("span", "v", p[1])); f.appendChild(c); });
+    return f;
+  }
+
+  /* ---- SEZIONE COMPATTA (dentro il Mese) ---- */
+  async function renderCompact(month){
+    curM = month;
+    var card = $("mese-budget"); if (!card) return;
+    card.hidden = false; card.textContent = "";
+    var total = await PR.budgets.getTotal(month);
+    var cats = (await PR.budgets.listMonth(month)).filter(function(b){ return b.scope === "category"; });
+    if (!total && cats.length === 0){
+      var h0 = elh("div", "budget-head"); h0.appendChild(elh("span", "sez-k", "Budget")); card.appendChild(h0);
+      card.appendChild(elh("p", "budget-msg", "Non hai ancora pianificato questo mese."));
+      var b0 = elh("button", "btn btn-ghost w", "Imposta budget"); b0.type = "button"; b0.onclick = openManage; card.appendChild(b0);
+      return;
+    }
+    var head = elh("div", "budget-head"); head.appendChild(elh("span", "sez-k", "Budget"));
+    var link = elh("button", "home-link", "Gestisci budget"); link.type = "button"; link.onclick = openManage; head.appendChild(link);
+    card.appendChild(head);
+    if (total){
+      var spent = await PR.budgets.spent(month);
+      card.appendChild(figsEl([["Pianificato", euro(total.amount)], ["Speso", euro(spent)], ["Residuo", euro(total.amount - spent)]]));
+      card.appendChild(barEl(spent, total.amount));
+      card.appendChild(elh("p", "budget-tov", spent <= total.amount ? "Per ora sei dentro quello che avevi previsto." : "Hai superato il budget previsto."));
+    } else {
+      var spent2 = await PR.budgets.spent(month);
+      card.appendChild(figsEl([["Speso", euro(spent2)]]));
+      card.appendChild(elh("p", "budget-tov", "Hai pianificato alcune categorie, ma non un totale del mese."));
+    }
+  }
+
+  /* ---- OVERLAY GESTIONE ---- */
+  function catRow(b, name, spent){
+    var row = elh("div", "budget-cat");
+    var top = elh("div", "budget-cat-top");
+    top.appendChild(elh("span", "budget-cat-name", name));
+    var del = elh("button", "budget-cat-del", "×"); del.type = "button"; del.setAttribute("aria-label", "Rimuovi");
+    del.onclick = async function(){ try { await PR.budgets.delete(b.id); } catch(e){} await renderManage(); };
+    top.appendChild(del); row.appendChild(top);
+    var wrap = elh("div", "importo-wrap importo-sm");
+    var amt = doc.createElement("input"); amt.className = "importo"; amt.type = "text"; amt.inputMode = "decimal"; amt.value = fmtInput(b.amount);
+    var sim = elh("span", "sim", "€"); wrap.appendChild(amt); wrap.appendChild(sim); row.appendChild(wrap);
+    amt.addEventListener("change", async function(){
+      var cents = parseCents(amt.value);
+      if (!validCents(cents)){ showErr("Importo categoria non valido."); amt.value = fmtInput(b.amount); return; }
+      try { await PR.budgets.set({ month:curM, scope:"category", categoryId:b.categoryId, amount:cents }); clearErr(); }
+      catch(e){ showErr(String(e && e.message || e)); return; }
+      await renderManage();
+    });
+    row.appendChild(elh("div", "budget-cat-figs", "Speso " + euro(spent) + " · Residuo " + euro(b.amount - spent)));
+    row.appendChild(barEl(spent, b.amount));
+    return row;
+  }
+
+  async function renderManage(){
+    var month = curM;
+    $("budget-month").textContent = monthHuman(month);
+    var total = await PR.budgets.getTotal(month);
+    $("budget-total").value = total ? fmtInput(total.amount) : "";
+    $("budget-total-del").hidden = !total;
+    var cats = (await PR.budgets.listMonth(month)).filter(function(b){ return b.scope === "category"; });
+    var all = await PR.categories.listAll(); var byId = {}; all.forEach(function(c){ byId[c.id] = c; });
+    var host = $("budget-cat-list"); host.textContent = ""; var sumCat = 0;
+    for (var i = 0; i < cats.length; i++){
+      var b = cats[i], c = byId[b.categoryId];
+      var name = c ? (c.name + (c.archived ? " (archiviata)" : "")) : "Categoria";
+      var spent = await PR.budgets.spent(month, b.categoryId);
+      sumCat += b.amount;
+      host.appendChild(catRow(b, name, spent));
+    }
+    if (cats.length === 0) host.appendChild(elh("p", "budget-msg", "Nessuna categoria pianificata."));
+    if (total){
+      $("budget-unalloc").hidden = false;
+      $("budget-unalloc").textContent = "Non allocato: " + euro(total.amount - sumCat);
+    } else {
+      $("budget-unalloc").hidden = true;   // niente totale => nessun "non allocato" inventato
+    }
+    $("budget-add-area").hidden = true; $("budget-add-area").textContent = ""; clearErr();
+  }
+
+  async function openManage(){ await renderManage(); $("ov-budget").hidden = false; $("ov-budget").querySelector(".sub-body").scrollTop = 0; }
+  function closeManage(){ $("ov-budget").hidden = true; if (window.calculonMese && window.calculonMese.renderMese) window.calculonMese.renderMese(); }
+
+  $("budget-back").onclick = closeManage;
+
+  $("budget-total-save").onclick = async function(){
+    var cents = parseCents($("budget-total").value);
+    if (!validCents(cents)){ showErr("Inserisci un importo valido."); return; }
+    try { await PR.budgets.set({ month:curM, scope:"total", amount:cents }); clearErr(); }
+    catch(e){ showErr(String(e && e.message || e)); return; }
+    await renderManage();
+  };
+  $("budget-total-del").onclick = async function(){
+    var t = await PR.budgets.getTotal(curM); if (!t) return;
+    try { await PR.budgets.delete(t.id); } catch(e){}
+    await renderManage();
+  };
+
+  $("budget-cat-add").onclick = async function(){
+    var area = $("budget-add-area");
+    if (!area.hidden){ area.hidden = true; area.textContent = ""; return; }
+    area.textContent = ""; area.hidden = false;
+    var active = await PR.categories.listActive("expense");
+    var budgeted = {}; (await PR.budgets.listMonth(curM)).filter(function(b){ return b.scope === "category"; }).forEach(function(b){ budgeted[b.categoryId] = true; });
+    var avail = active.filter(function(c){ return !budgeted[c.id]; });
+    if (!avail.length){ area.appendChild(elh("p", "budget-msg", "Hai già pianificato tutte le categorie disponibili.")); return; }
+    area.appendChild(elh("label", "lbl", "Categoria"));
+    var sel = doc.createElement("select"); avail.forEach(function(c){ var o = doc.createElement("option"); o.value = c.id; o.textContent = c.name; sel.appendChild(o); });
+    area.appendChild(sel);
+    area.appendChild(elh("label", "lbl", "Pianificato"));
+    var wrap = elh("div", "importo-wrap");
+    var amt = doc.createElement("input"); amt.className = "importo"; amt.type = "text"; amt.inputMode = "decimal"; amt.placeholder = "0,00";
+    wrap.appendChild(amt); wrap.appendChild(elh("span", "sim", "€")); area.appendChild(wrap);
+    var confirm = elh("button", "btn btn-primary w", "Aggiungi"); confirm.type = "button";
+    confirm.onclick = async function(){
+      var cents = parseCents(amt.value);
+      if (!validCents(cents)){ showErr("Inserisci un importo valido."); return; }
+      try { await PR.budgets.set({ month:curM, scope:"category", categoryId:sel.value, amount:cents }); }
+      catch(e){ showErr(String(e && e.message || e)); return; }
+      await renderManage();
+    };
+    area.appendChild(confirm);
+  };
+
+  window.calculonBudget = { renderCompact: renderCompact, open: openManage };
+})();
+/* F2P7B-BUDGET-UI-END */
 </script>
 
 <script>
