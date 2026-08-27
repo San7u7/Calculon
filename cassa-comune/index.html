@@ -764,6 +764,8 @@ body.no-splash #app{animation:none}
 .qa-preview{background:rgba(255,255,255,.45);border-radius:var(--r-sm);padding:16px 16px 8px;margin-bottom:16px}
 .qa-preview .importo-wrap{margin-bottom:6px}
 .qa-preview .due{gap:12px;margin-bottom:0}
+/* F3P2 — suggerimento discreto (MEDIUM) */
+.qa-suggest{margin-top:8px;background:rgba(123,92,255,.10);color:var(--viola);border:0;border-radius:999px;padding:6px 12px;font-size:13px;font-weight:700;cursor:pointer;text-align:left}
 
 /* ---------- F1P12 · Home + nav shell ---------- */
 .home-screen{position:fixed;inset:0;z-index:55;background:var(--carta);display:flex;flex-direction:column;
@@ -1468,10 +1470,12 @@ body.no-splash #app{animation:none}
         <div>
           <label class="lbl" for="qa-account">Conto</label>
           <select id="qa-account"></select>
+          <button class="qa-suggest" type="button" id="qa-acc-suggest" hidden></button>
         </div>
         <div>
           <label class="lbl" for="qa-category">Categoria</label>
           <select id="qa-category"></select>
+          <button class="qa-suggest" type="button" id="qa-cat-suggest" hidden></button>
         </div>
       </div>
       <label class="lbl" for="qa-date">Data</label>
@@ -4018,13 +4022,24 @@ if ("serviceWorker" in navigator){
   }
   async function getTxn(id){ var t = await DB.get("transactions", id); return isPersonal(t) ? t : null; }
 
+  // F3P2: provenance per-campo del learning. Additivo, sanitizzato, senza migrazione:
+  // valori ammessi "explicit"|"manual"|"learned", altrimenti null. Il transfer non ha
+  // categoria/conto -> sempre {null,null}.
+  var PROV_VALS = { explicit:1, manual:1, learned:1 };
+  function provField(x){ return PROV_VALS[x] ? x : null; }
+  function provClean(p){
+    if (!p || typeof p !== "object") return { accountId:null, categoryId:null };
+    return { accountId: provField(p.accountId), categoryId: provField(p.categoryId) };
+  }
+
   async function create(data){
     var v = await buildValidated(data || {});
     var rec = { id:uid(), spaceId:PID, type:v.type, amount:v.amount, date:v.date,
       accountId:v.accountId, categoryId:v.categoryId,
       fromAccountId:v.fromAccountId, toAccountId:v.toAccountId,
       merchant:v.merchant, note:v.note,
-      tags:[], capitalMovement:v.capitalMovement, deleted:false, createdAt:nowMs() };
+      tags:[], capitalMovement:v.capitalMovement, deleted:false, createdAt:nowMs(),
+      learningProvenance: (v.type === "transfer") ? { accountId:null, categoryId:null } : provClean((data || {}).learningProvenance) };
     await DB.put("transactions", rec);   // put imposta updatedAt
     return rec.id;
   }
@@ -4052,6 +4067,10 @@ if ("serviceWorker" in navigator){
     cur.fromAccountId = v.fromAccountId; cur.toAccountId = v.toAccountId;
     cur.merchant = v.merchant; cur.note = v.note;
     cur.spaceId = PID; cur.capitalMovement = v.capitalMovement;   // invarianti forzate (transfer -> true)
+    // F3P2: provenance. Se il patch la porta, la si applica; altrimenti si preserva.
+    // Il transfer non ha categoria/conto -> provenance azzerata.
+    if ("learningProvenance" in patch) cur.learningProvenance = provClean(patch.learningProvenance);
+    if (v.type === "transfer") cur.learningProvenance = { accountId:null, categoryId:null };
     await DB.put("transactions", cur);
     return cur.id;
   }
@@ -4906,7 +4925,7 @@ if ("serviceWorker" in navigator){
   if (!ovMese || !ovTxn) return;   // F2P0: non dipende piu' dal launcher legacy
 
   var curMonth = null;
-  var txnState = { id:null, type:"expense" };
+  var txnState = { id:null, type:"expense", prov:{ accountId:null, categoryId:null } };
 
   /* ---- formattazione ---- */
   function pad2(n){ return (n < 10 ? "0" : "") + n; }
@@ -4960,6 +4979,7 @@ if ("serviceWorker" in navigator){
 
   /* ---- MESE ---- */
   async function renderMese(){
+    if (!curMonth) curMonth = curMonthKey();   // F3P2: robustezza — renderMese puo' essere chiamato dal Quick Add prima di aprire il Mese
     $("mese-label").textContent = monthLabel(curMonth);
     $("mese-next").disabled = curMonth >= curMonthKey();   // avanti solo fino al mese corrente
     var t = await PR.transactions.monthTotals(curMonth);
@@ -5069,6 +5089,7 @@ if ("serviceWorker" in navigator){
     var pf = prefill || {};
     txnState.id = rec ? rec.id : null;
     txnState.type = rec ? rec.type : (pf.type || "expense");
+    txnState.prov = normProv(rec ? rec.learningProvenance : pf.learningProvenance);   // F3P2: preserva provenance (edit/bozza)
     $("txn-title").textContent = rec ? "Modifica movimento" : "Nuovo movimento";
     $("txn-amt").value = rec ? (rec.amount/100).toFixed(2).replace(".", ",")
                             : (pf.amount != null ? (pf.amount/100).toFixed(2).replace(".", ",") : "");
@@ -5099,8 +5120,20 @@ if ("serviceWorker" in navigator){
     } else {
       fillAccountSelect($("txn-account").value || null);   // assicura le opzioni se si arriva da giroconto
       fillCategorySelect(txnState.type, null);              // categoria non piu' coerente -> azzerata
+      txnState.prov.categoryId = null;                     // F3P2: categoria incompatibile eliminata -> provenance azzerata
     }
   });
+
+  // F3P2: normalizza/preserva la provenance della bozza o del record in edit.
+  function normProv(p){
+    var ok = { explicit:1, manual:1, learned:1 };
+    var a = (p && ok[p.accountId])  ? p.accountId  : null;
+    var c = (p && ok[p.categoryId]) ? p.categoryId : null;
+    return { accountId:a, categoryId:c };
+  }
+  // Modifica manuale di conto/categoria nel form completo -> provenance = "manual".
+  $("txn-account").addEventListener("change", function(){ txnState.prov.accountId = $("txn-account").value ? "manual" : null; });
+  $("txn-category").addEventListener("change", function(){ txnState.prov.categoryId = $("txn-category").value ? "manual" : null; });
 
   $("txn-form").addEventListener("submit", async function(e){
     e.preventDefault();
@@ -5118,9 +5151,12 @@ if ("serviceWorker" in navigator){
         fromAccountId: fromId, toAccountId: toId,
         merchant: $("txn-merchant").value.trim() || null, note: $("txn-note").value.trim() || null };
     } else {
+      var accId = $("txn-account").value || null, catId = $("txn-category").value || null;
       data = { type: txnState.type, amount: cents, date: $("txn-date").value,
-        accountId: $("txn-account").value || null, categoryId: $("txn-category").value || null,
-        merchant: $("txn-merchant").value.trim() || null, note: $("txn-note").value.trim() || null };
+        accountId: accId, categoryId: catId,
+        merchant: $("txn-merchant").value.trim() || null, note: $("txn-note").value.trim() || null,
+        learningProvenance: { accountId: accId ? txnState.prov.accountId : null,
+                              categoryId: catId ? txnState.prov.categoryId : null } };   // F3P2
     }
     try {
       if (txnState.id) await PR.transactions.update(txnState.id, data);
@@ -5968,8 +6004,50 @@ if ("serviceWorker" in navigator){
     else { hint.hidden = true; hint.textContent = ""; }
     updateSave();
   }
-  function reparse(){ applyDraft(parseQuickAdd($("qa-input").value, { accounts:qaAccounts, categories:qaCategories })); }
+  // ---- F3P2: arricchimento learning (dopo il parser, solo sui campi rimasti null) ----
+  var qaProv = { accountId:null, categoryId:null };
+  var L = PR.learning;
+  function nameFromList(list, id){ for (var i = 0; i < list.length; i++){ if (list[i].id === id) return list[i].name; } return null; }
+  function suggestEl(field){ return $(field === "categoryId" ? "qa-cat-suggest" : "qa-acc-suggest"); }
+  function selEl(field){ return $(field === "categoryId" ? "qa-category" : "qa-account"); }
+  function hideSuggest(field){ var el = suggestEl(field); el.hidden = true; el.textContent = ""; el.dataset.id = ""; }
+  function showSuggest(field, id, name){ var el = suggestEl(field); el.dataset.id = id; el.textContent = "Forse " + name; el.hidden = false; }
+  function applySuggest(field){
+    var el = suggestEl(field); var id = el.dataset.id; if (!id) return;
+    selEl(field).value = id; qaProv[field] = "manual";   // accettazione MEDIUM -> manual
+    hideSuggest(field);
+  }
+  async function enrichField(field, merchant, type){
+    if (qaProv[field] === "explicit" || qaProv[field] === "manual"){ hideSuggest(field); return; }   // parser/utente vincono
+    hideSuggest(field);
+    if (qaProv[field] === "learned"){ selEl(field).value = ""; qaProv[field] = null; }   // reset del learned prima di ricalcolare
+    if (!merchant || !L) return;
+    var s = await L.suggest(merchant, type);
+    var f = (field === "categoryId") ? s.category : s.account;
+    if (!f || !f.id) return;
+    var list = (field === "categoryId") ? qaCategories.filter(function(c){ return c.kind === type; }) : qaAccounts;
+    var name = nameFromList(list, f.id);
+    if (!name) return;   // candidato non fra gli attivi (es. archiviato) -> niente
+    if (f.confidence === "HIGH"){ selEl(field).value = f.id; qaProv[field] = "learned"; }        // auto-compila
+    else if (f.confidence === "MEDIUM"){ showSuggest(field, f.id, name); }                        // suggerimento discreto
+    // LOW -> niente
+  }
+  function enrich(){
+    var merchant = $("qa-desc").value.trim(), type = currentType();
+    enrichField("categoryId", merchant, type);
+    enrichField("accountId", merchant, type);
+  }
+  function reparse(){
+    var draft = parseQuickAdd($("qa-input").value, { accounts:qaAccounts, categories:qaCategories });
+    applyDraft(draft);
+    qaProv.accountId  = draft.accountId  ? "explicit" : null;   // riconosciuto dal testo -> explicit
+    qaProv.categoryId = draft.categoryId ? "explicit" : null;
+    enrich();
+  }
   function updateSave(){ $("qa-save").disabled = !validCents(parseCents($("qa-amt").value)); }
+  function qaProvOut(draft){
+    return { accountId: draft.accountId ? qaProv.accountId : null, categoryId: draft.categoryId ? qaProv.categoryId : null };
+  }
 
   function draftFromPreview(){
     var c = parseCents($("qa-amt").value);
@@ -5994,12 +6072,21 @@ if ("serviceWorker" in navigator){
     var b = e.target.closest(".seg-btn"); if (!b) return;
     paintType(b.dataset.type);
     buildCategoryOptions(b.dataset.type, null);   // categoria non piu' coerente -> azzerata
+    qaProv.categoryId = null; hideSuggest("categoryId");   // F3P2: droppa categoria incompatibile
+    enrich();                                              // ricalcola solo cio' che e' compatibile col nuovo type
   });
+  // F3P2: modifica manuale / accettazione suggerimento / cambio merchant
+  $("qa-category").addEventListener("change", function(){ qaProv.categoryId = $("qa-category").value ? "manual" : null; hideSuggest("categoryId"); });
+  $("qa-account").addEventListener("change", function(){ qaProv.accountId = $("qa-account").value ? "manual" : null; hideSuggest("accountId"); });
+  $("qa-cat-suggest").addEventListener("click", function(){ applySuggest("categoryId"); });
+  $("qa-acc-suggest").addEventListener("click", function(){ applySuggest("accountId"); });
+  $("qa-desc").addEventListener("input", function(){ enrich(); });   // cambio merchant -> ricalcola i suggerimenti
 
   $("qa-save").onclick = async function(){
     var err = $("qa-err");
     var draft = draftFromPreview();
     if (!validCents(draft.amount)){ err.textContent = "Inserisci un importo valido."; err.hidden = false; return; }
+    draft.learningProvenance = qaProvOut(draft);   // F3P2: scrive la provenance
     var id;
     try { id = await PR.transactions.create(draft); }
     catch(ex){ err.textContent = String((ex && ex.message) || ex); err.hidden = false; return; }
@@ -6015,6 +6102,7 @@ if ("serviceWorker" in navigator){
 
   $("qa-more").onclick = function(){
     var draft = draftFromPreview();
+    draft.learningProvenance = qaProvOut(draft);   // F3P2: la bozza porta valori + provenance
     closeQuick();
     M.openTxnForm(null, draft);   // form completo F1P8 precompilato con la bozza
   };
