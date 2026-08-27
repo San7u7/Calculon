@@ -4593,16 +4593,34 @@ if ("serviceWorker" in navigator){
     return { candidate: top, confidence: conf, topN: topN, total: total, share: share };
   }
 
-  // I movimenti (non-transfer, !deleted) di questo merchant, dal piu' recente.
-  async function merchantMovements(merchantKey){
+  // ---- F3P4A: controlli deterministici in meta (toggle / override / alias) ----
+  var DB = window.calculonDB;
+  var MK_ENABLED = "learning:enabled", MK_OVERRIDES = "learning:overrides", MK_ALIASES = "learning:aliases";
+  async function metaGet(k, dflt){ var v = DB ? await DB.meta.get(k) : undefined; return (v === undefined || v === null) ? dflt : v; }
+  async function isEnabled(){ return (await metaGet(MK_ENABLED, true)) !== false; }
+  async function setEnabled(b){ if (DB) await DB.meta.set(MK_ENABLED, !!b); return !!b; }
+  async function getOverrides(){ return await metaGet(MK_OVERRIDES, {}); }
+  async function getAliases(){ return await metaGet(MK_ALIASES, {}); }
+  function ovKey(merchantKey, type, field){ return merchantKey + "|" + type + "|" + field; }
+
+  // Alias: risoluzione deterministica con guardia anti-ciclo (niente fuzzy).
+  function resolveKey(key, aliases){
+    var seen = {}, k = key;
+    while (aliases && aliases[k] !== undefined && !seen[k]){ seen[k] = 1; k = aliases[k]; }
+    return k;
+  }
+
+  // I movimenti (non-transfer, !deleted) che risolvono al canonical (alias applicati
+  // PRIMA delle statistiche: le evidenze degli alias si uniscono), dal piu' recente.
+  async function merchantMovements(canonicalKey, aliases){
     var TX = window.personalRuntime && window.personalRuntime.transactions;
-    if (!TX || !merchantKey) return [];
+    if (!TX || !canonicalKey) return [];
     var all = await TX.listAll();   // personale, !deleted, ordinato per data desc
     var out = [];
     for (var i = 0; i < all.length; i++){
       var t = all[i];
       if (t.type === "transfer") continue;   // transfer non conta
-      if (normMerchant(t.merchant) !== merchantKey) continue;
+      if (resolveKey(normMerchant(t.merchant), aliases) !== canonicalKey) continue;
       out.push(t);
     }
     return out;
@@ -4627,14 +4645,15 @@ if ("serviceWorker" in navigator){
   }
 
   async function merchantStats(merchant, type){
-    var key = normMerchant(merchant);
+    var aliases = await getAliases();
+    var key = resolveKey(normMerchant(merchant), aliases);   // alias applicati prima delle statistiche
     var empty = {
       merchant: key, type: type,
       category: { counts: {}, window: 0, candidate: null, confidence: "LOW", topN: 0, total: 0, share: 0, excludedLearned: 0, excludedIncoherent: 0 },
       account:  { counts: {}, window: 0, candidate: null, confidence: "LOW", topN: 0, total: 0, share: 0, excludedLearned: 0 }
     };
     if (!key) return empty;
-    var movs = await merchantMovements(key);
+    var movs = await merchantMovements(key, aliases);
     if (!movs.length) return empty;
 
     var CATS = window.personalRuntime && window.personalRuntime.categories;
@@ -4651,29 +4670,110 @@ if ("serviceWorker" in navigator){
     };
   }
 
-  // Helper READ-ONLY di diagnostica: finestra, evidenze usate/escluse, conteggi.
-  async function explain(merchant, type){
-    var key = normMerchant(merchant);
-    var movs = await merchantMovements(key);
-    var s = await merchantStats(merchant, type);
-    return { merchant: key, type: type, K: K, merchantMovements: movs.length,
-             category: s.category, account: s.account };
+  // Suggerimento per campo, applicando l'override (PIN/SUPPRESS) sopra le statistiche.
+  // Precedenza (parte engine): PIN > statistical > null; SUPPRESS -> nessun suggerimento.
+  // (explicit parser e scelta manuale corrente vincono a monte, nel Quick Add.)
+  function fieldSuggestion(ov, key, type, field, stat){
+    var o = ov[ovKey(key, type, field)];
+    if (o && o.mode === "suppress"){
+      return { id: null, confidence: "SUPPRESSED", evidence: { count: stat.total, topN: stat.topN, share: stat.share }, source: "suppress" };
+    }
+    if (o && o.mode === "pin"){
+      // PIN -> auto-applica (HIGH). Nel Quick Add un HIGH diventa provenance "learned",
+      // quindi il valore PIN non alimenta statisticamente il modello.
+      return { id: o.value, confidence: "HIGH", evidence: { count: 0, topN: 0, share: 0 }, source: "pin" };
+    }
+    return { id: stat.candidate, confidence: stat.confidence, evidence: { count: stat.total, topN: stat.topN, share: stat.share }, source: "statistical" };
   }
 
   async function suggest(merchant, type){
+    var aliases = await getAliases();
+    var key = resolveKey(normMerchant(merchant), aliases);
+    var off = { merchant: key, type: type,
+      category: { id: null, confidence: "LOW", evidence: { count: 0, topN: 0, share: 0 }, source: null },
+      account:  { id: null, confidence: "LOW", evidence: { count: 0, topN: 0, share: 0 }, source: null } };
+    if (!(await isEnabled())) return off;   // toggle OFF -> nessuna inferenza (storico intatto)
     var s = await merchantStats(merchant, type);
+    var ov = await getOverrides();
     return {
-      merchant: s.merchant, type: type,
-      category: { id: s.category.candidate, confidence: s.category.confidence,
-                  evidence: { count: s.category.total, topN: s.category.topN, share: s.category.share } },
-      account:  { id: s.account.candidate, confidence: s.account.confidence,
-                  evidence: { count: s.account.total, topN: s.account.topN, share: s.account.share } }
+      merchant: key, type: type,
+      category: fieldSuggestion(ov, key, type, "categoryId", s.category),
+      account:  fieldSuggestion(ov, key, type, "accountId", s.account)
     };
+  }
+
+  // Helper READ-ONLY di diagnostica: finestra, evidenze usate/escluse, conteggi,
+  // alias applicati, override in vigore, stato del toggle.
+  async function explain(merchant, type){
+    var aliases = await getAliases();
+    var rawKey = normMerchant(merchant);
+    var key = resolveKey(rawKey, aliases);
+    var movs = await merchantMovements(key, aliases);
+    var s = await merchantStats(merchant, type);
+    var ov = await getOverrides();
+    return { merchant: key, rawMerchant: rawKey, aliasApplied: rawKey !== key,
+             enabled: await isEnabled(), K: K, merchantMovements: movs.length,
+             override: { category: ov[ovKey(key, type, "categoryId")] || null, account: ov[ovKey(key, type, "accountId")] || null },
+             category: s.category, account: s.account };
+  }
+
+  // ---- Control API (data-layer, deterministica, reversibile) ----
+  async function setOverride(merchant, type, field, mode, value){
+    if (type !== "expense" && type !== "income") throw new Error("type deve essere expense|income (niente override su transfer)");
+    if (field !== "categoryId" && field !== "accountId") throw new Error("field deve essere categoryId|accountId");
+    if (mode !== "pin" && mode !== "suppress") throw new Error("mode deve essere pin|suppress");
+    var key = resolveKey(normMerchant(merchant), await getAliases());
+    if (!key) throw new Error("merchant non valido");
+    if (mode === "pin"){
+      if (value == null || value === "") throw new Error("pin: value obbligatorio");
+      if (field === "categoryId"){
+        var c = DB ? await DB.get("categories", value) : null;
+        if (!c || c.deleted) throw new Error("categoria inesistente: " + value);
+        if (c.kind !== type) throw new Error("pin categoria incoerente col type");
+      } else {
+        var a = DB ? await DB.get("accounts", value) : null;
+        if (!a || a.deleted) throw new Error("conto inesistente: " + value);
+      }
+    }
+    var ov = await getOverrides();
+    ov[ovKey(key, type, field)] = (mode === "pin") ? { mode: "pin", value: value } : { mode: "suppress" };
+    if (DB) await DB.meta.set(MK_OVERRIDES, ov);
+    return ovKey(key, type, field);
+  }
+  async function removeOverride(merchant, type, field){
+    var key = resolveKey(normMerchant(merchant), await getAliases());
+    var ov = await getOverrides();
+    delete ov[ovKey(key, type, field)];
+    if (DB) await DB.meta.set(MK_OVERRIDES, ov);
+    return true;
+  }
+  async function setAlias(alias, canonical){
+    var a = normMerchant(alias), c = normMerchant(canonical);
+    if (!a || !c) throw new Error("alias/canonical non validi");
+    if (a === c) throw new Error("alias uguale al canonical");
+    var cur = await getAliases();
+    var hyp = Object.assign({}, cur); hyp[a] = c;
+    var seen = {}, k = a;                       // rileva cicli raggiungibili da a
+    while (hyp[k] !== undefined){
+      if (seen[k]) throw new Error("ciclo alias rilevato");
+      seen[k] = 1; k = hyp[k];
+    }
+    cur[a] = c; if (DB) await DB.meta.set(MK_ALIASES, cur);
+    return a + " -> " + c;
+  }
+  async function removeAlias(alias){
+    var a = normMerchant(alias);
+    var cur = await getAliases();
+    delete cur[a]; if (DB) await DB.meta.set(MK_ALIASES, cur);
+    return true;
   }
 
   window.personalRuntime = window.personalRuntime || {};
   window.personalRuntime.learning = {
     suggest: suggest, merchantStats: merchantStats, explain: explain,
+    isEnabled: isEnabled, setEnabled: setEnabled,
+    getOverrides: getOverrides, setOverride: setOverride, removeOverride: removeOverride,
+    getAliases: getAliases, setAlias: setAlias, removeAlias: removeAlias,
     normMerchant: normMerchant, K: K
   };
 })();
