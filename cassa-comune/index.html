@@ -736,6 +736,16 @@ body.no-splash #app{animation:none}
 .fc-v{font-weight:700;font-size:16px;font-variant-numeric:tabular-nums}
 .fc-v.pos{color:var(--viola)} .fc-v.neg{color:var(--inchiostro)}
 .fc-hist{font-size:12px;color:var(--grigio);margin-top:14px}
+/* F2P8 — Panoramica compatta (righe tappabili al posto delle 4 card) */
+#mese-overview{background:rgba(255,255,255,.72);border-radius:var(--r-sm);padding:2px 14px;margin:16px 0;box-shadow:0 4px 14px rgba(26,18,48,.06)}
+.ov-row{display:flex;align-items:center;gap:10px;padding:13px 0;border-bottom:1px solid var(--linea)}
+.ov-row:last-child{border-bottom:0}
+.ov-tap{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;text-align:left;background:transparent;border:0;padding:0;font:inherit;color:inherit;cursor:pointer}
+.ov-static{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.ov-k{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--grigio);font-weight:700}
+.ov-d{font-size:15px;font-weight:600;overflow-wrap:anywhere}
+.ov-arrow{flex:none;color:var(--grigio);font-size:18px}
+.ov-chip{cursor:pointer;border:0}
 .seg{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:2px 0 6px}
 .seg-btn{min-height:var(--tap);border:0;border-radius:var(--r-sm);font-weight:700;font-size:15px;
   background:rgba(255,255,255,.7);color:var(--grigio);box-shadow:0 4px 14px rgba(26,18,48,.06);
@@ -1269,11 +1279,8 @@ body.no-splash #app{animation:none}
       <div class="mese-tot-cell"><span class="sez-k">Uscite</span><span class="mese-tot-v" id="mese-out">—</span></div>
       <div class="mese-tot-cell mese-tot-diff"><span class="sez-k">Differenza</span><span class="mese-tot-v big" id="mese-diff">—</span></div>
     </div>
-    <div class="budget-card" id="mese-budget" hidden></div>
-    <div class="budget-card" id="mese-rhythm" hidden></div>
-    <div class="budget-card" id="mese-recurring" hidden></div>
-    <div class="budget-card" id="mese-forecast" hidden></div>
     <button class="btn btn-primary w" type="button" id="mese-add">+ Aggiungi</button>
+    <div id="mese-overview" hidden></div>
     <div class="mese-empty" id="mese-empty" hidden>
       <p class="nota" id="mese-empty-txt">Nessun movimento in questo mese.</p>
       <button class="btn btn-ghost w" type="button" id="mese-add-first">Aggiungi il primo</button>
@@ -4856,10 +4863,7 @@ if ("serviceWorker" in navigator){
     $("mese-empty").hidden = rows.length > 0;
     $("mese-empty-txt").textContent = "Nessun movimento in " + monthLabel(curMonth) + ".";
     rows.forEach(function(tx){ list.appendChild(movRow(tx, accMap, catMap)); });
-    if (window.calculonBudget && window.calculonBudget.renderCompact) await window.calculonBudget.renderCompact(curMonth);
-    if (window.calculonRhythm && window.calculonRhythm.renderCompact) await window.calculonRhythm.renderCompact(curMonth);
-    if (window.calculonRecurring && window.calculonRecurring.renderCompact) await window.calculonRecurring.renderCompact(curMonth);
-    if (window.calculonForecast && window.calculonForecast.renderCompact) await window.calculonForecast.renderCompact(curMonth);
+    if (window.calculonOverview && window.calculonOverview.render) await window.calculonOverview.render(curMonth);
   }
 
   function movRow(tx, accMap, catMap){
@@ -5137,7 +5141,7 @@ if ("serviceWorker" in navigator){
       catch(e){ showErr(String(e && e.message || e)); return; }
       await renderManage();
     });
-    row.appendChild(elh("div", "budget-cat-figs", "Speso " + euro(spent) + " · Residuo " + euro(b.amount - spent)));
+    row.appendChild(elh("div", "budget-cat-figs", "Speso " + euro(spent) + " · Residuo " + euro(b.amount - spent).replace("-", "−")));
     row.appendChild(barEl(spent, b.amount));
     return row;
   }
@@ -5161,7 +5165,7 @@ if ("serviceWorker" in navigator){
     if (cats.length === 0) host.appendChild(elh("p", "budget-msg", "Nessuna categoria pianificata."));
     if (total){
       $("budget-unalloc").hidden = false;
-      $("budget-unalloc").textContent = "Non allocato: " + euro(total.amount - sumCat);
+      $("budget-unalloc").textContent = "Non allocato: " + euro(total.amount - sumCat).replace("-", "−");
     } else {
       $("budget-unalloc").hidden = true;   // niente totale => nessun "non allocato" inventato
     }
@@ -5212,7 +5216,7 @@ if ("serviceWorker" in navigator){
     area.appendChild(confirm);
   };
 
-  window.calculonBudget = { renderCompact: renderCompact, open: openManage };
+  window.calculonBudget = { renderCompact: renderCompact, open: function(m){ if (m != null) curM = m; return openManage(); } };
 })();
 /* F2P7B-BUDGET-UI-END */
 </script>
@@ -5314,7 +5318,7 @@ if ("serviceWorker" in navigator){
     host.appendChild(progBlock("Avanzamento mese", r.monthProgress, false));
     host.appendChild(progBlock("Avanzamento budget", r.budgetProgress, r.spent > r.budget));
     var pp = Math.round((r.delta || 0) * 100);
-    host.appendChild(elh("p", "rhythm-delta", "Differenza: " + (pp > 0 ? "+" : "") + pp + " pp"));
+    host.appendChild(elh("p", "rhythm-delta", "Differenza: " + (pp > 0 ? "+" : pp < 0 ? "−" : "") + Math.abs(pp) + " pp"));
     host.appendChild(elh("div", "budget-sec-k", "Categorie con budget"));
     var cats = (await PR.budgets.listMonth(month)).filter(function(b){ return b.scope === "category"; });
     if (!cats.length){ host.appendChild(elh("p", "budget-msg", "Nessuna categoria con budget.")); return; }
@@ -5331,7 +5335,7 @@ if ("serviceWorker" in navigator){
   function closeDetail(){ $("ov-rhythm").hidden = true; }
   $("rhythm-back").onclick = closeDetail;
 
-  window.calculonRhythm = { renderCompact: renderCompact };
+  window.calculonRhythm = { renderCompact: renderCompact, open: function(m){ if (m != null) curM = m; return openDetail(); } };
 })();
 /* F2P7C-RHYTHM-UI-END */
 </script>
@@ -5507,7 +5511,7 @@ if ("serviceWorker" in navigator){
     closeForm(); await renderManage();
   });
 
-  window.calculonRecurring = { renderCompact: renderCompact };
+  window.calculonRecurring = { renderCompact: renderCompact, open: function(m){ if (m != null) curM = m; return openManage(); } };
 })();
 /* F2P7D-RECURRING-UI-END */
 </script>
@@ -5600,9 +5604,107 @@ if ("serviceWorker" in navigator){
   function closeDetail(){ $("ov-forecast").hidden = true; }
   $("forecast-back").onclick = closeDetail;
 
-  window.calculonForecast = { renderCompact: renderCompact };
+  window.calculonForecast = { renderCompact: renderCompact, open: function(m){ if (m != null) curM = m; return openDetail(); } };
 })();
 /* F2P7E-FORECAST-UI-END */
+</script>
+
+<script>
+"use strict";
+/* F2P8-OVERVIEW-START */
+/* F2 Passo 8 — Panoramica compatta del Mese. Sostituisce le 4 card verticali con
+   un'unica sezione di righe tappabili, per far tornare la lista movimenti molto piu'
+   in alto. Nessuna nuova logica dati: legge i motori esistenti (budgets/rhythm/
+   forecast/recurring) e apre gli overlay gia' implementati via le loro open(month). */
+(function(){
+  var doc = document;
+  function $(id){ return doc.getElementById(id); }
+  var PR = window.personalRuntime;
+  if (!PR) return;
+
+  function pad2(n){ return (n < 10 ? "0" : "") + n; }
+  function todayStr(){ var d = new Date(); return d.getFullYear() + "-" + pad2(d.getMonth()+1) + "-" + pad2(d.getDate()); }
+  function todayMonth(){ return todayStr().slice(0, 7); }
+  function euro(c){ return (Math.abs(c)/100).toLocaleString("it-IT", { minimumFractionDigits:2, maximumFractionDigits:2 }) + " €"; }
+  function euroSigned(c){ return (c < 0 ? "−" : (c > 0 ? "+" : "")) + euro(c); }
+  function elh(tag, cls, txt){ var e = doc.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
+
+  var CHIP = { ON_PACE:"onpace", BEHIND:"behind", AHEAD:"ahead", EXCEEDED:"exceeded" };
+  var WORD = { ON_PACE:"In linea", BEHIND:"Più lento", AHEAD:"In corsa", EXCEEDED:"Superato" };
+
+  function tapRow(label, detail, onTap){
+    var row = elh("div", "ov-row");
+    var b = elh("button", "ov-tap"); b.type = "button";
+    b.appendChild(elh("span", "ov-k", label));
+    b.appendChild(elh("span", "ov-d", detail));
+    b.onclick = onTap; row.appendChild(b);
+    return row;   // il chiamante puo' aggiungere chip + freccia
+  }
+  function staticRow(label, detail){
+    var row = elh("div", "ov-row");
+    var s = elh("div", "ov-static");
+    s.appendChild(elh("span", "ov-k", label));
+    s.appendChild(elh("span", "ov-d", detail));
+    row.appendChild(s);
+    return row;
+  }
+  function arrow(){ return elh("span", "ov-arrow", "›"); }
+
+  async function render(month){
+    var host = $("mese-overview"); if (!host) return;
+    host.hidden = false; host.textContent = "";
+
+    // --- BUDGET (con Ritmo inline). Senza budget: una sola riga, nessuna riga Ritmo. ---
+    var total = await PR.budgets.getTotal(month);
+    if (!total){
+      var r0 = tapRow("Budget", "Nessun budget impostato", function(){ window.calculonBudget.open(month); });
+      r0.appendChild(arrow()); host.appendChild(r0);
+    } else {
+      var spent = await PR.budgets.spent(month);
+      var r1 = tapRow("Budget", euro(spent) + " spesi su " + euro(total.amount), function(){ window.calculonBudget.open(month); });
+      if (month <= todayMonth()){   // Ritmo non si applica a un mese futuro
+        var rh = await PR.rhythm.total(month, todayStr());
+        if (rh && rh.state !== "NO_BUDGET" && CHIP[rh.state]){
+          var chip = elh("button", "ov-chip rhythm-chip " + CHIP[rh.state], WORD[rh.state]); chip.type = "button";
+          chip.onclick = function(){ window.calculonRhythm.open(month); };
+          r1.appendChild(chip);
+        }
+      }
+      r1.appendChild(arrow()); host.appendChild(r1);
+    }
+
+    // --- PREVISIONE ---
+    var fc = await PR.forecast.month(month, todayStr());
+    if (fc){
+      if (fc.state === "FORECAST"){
+        var rf = tapRow("Previsione", "Margine previsto · circa " + (fc.forecastMargin < 0 ? euroSigned(fc.forecastMargin) : euro(fc.forecastMargin)),
+                        function(){ window.calculonForecast.open(month); });
+        rf.appendChild(arrow()); host.appendChild(rf);
+      } else if (fc.state === "INSUFFICIENT_HISTORY"){
+        host.appendChild(staticRow("Previsione", "Ancora pochi dati"));
+      } else if (fc.state === "ACTUAL"){
+        host.appendChild(staticRow("Consuntivo", euroSigned(fc.actualIncome - fc.actualExpense) + " reale"));
+      } else if (fc.state === "FUTURE_CERTAIN_ONLY"){
+        host.appendChild(staticRow("Previsione", "Solo importi certi"));
+      }
+    }
+
+    // --- RICORRENZE: solo se esistono importi certi residui ---
+    var cr = await PR.recurring.certainRemaining(month, todayStr());
+    if (cr.income > 0 || cr.expense > 0){
+      var parts = [];
+      if (cr.income > 0)  parts.push("+" + euro(cr.income) + " in arrivo");
+      if (cr.expense > 0) parts.push("−" + euro(cr.expense) + " da pagare");
+      var rr = tapRow("Previsto", parts.join(" · "), function(){ window.calculonRecurring.open(month); });
+      rr.appendChild(arrow()); host.appendChild(rr);
+    }
+
+    if (!host.children.length) host.hidden = true;   // niente da mostrare -> niente pannello
+  }
+
+  window.calculonOverview = { render: render };
+})();
+/* F2P8-OVERVIEW-END */
 </script>
 
 <script>
@@ -5953,7 +6055,7 @@ if ("serviceWorker" in navigator){
       var hero = $("home-hero");
       var isForecast = !!(fc && fc.state === "FORECAST");
       var heroVal = isForecast ? fc.forecastMargin : r.totals.difference;
-      hero.textContent = euro(heroVal);
+      hero.textContent = euro(heroVal).replace("-", "−");
       hero.classList.toggle("pos", heroVal >= 0);
       hero.classList.toggle("neg", heroVal < 0);
       $("home-hero-lbl").textContent = isForecast ? "Margine previsto" : "Questo mese, finora";
