@@ -706,6 +706,23 @@ body.no-splash #app{animation:none}
 .rhythm-delta{font-weight:700;margin:0 0 8px}
 .rhythm-cat{background:rgba(255,255,255,.6);border-radius:var(--r-sm);padding:12px;margin-bottom:10px}
 .rhythm-cat-top{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px}
+/* F2P7D — Ricorrenze UI */
+.recur-chip{display:inline-block;font-size:11px;font-weight:700;padding:3px 8px;border-radius:999px;text-transform:uppercase;letter-spacing:.04em;background:var(--carta2);color:var(--grigio);margin-bottom:10px}
+.recur-sum{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:6px}
+.recur-sum-k{color:var(--grigio);font-size:14px}
+.recur-sum-v{font-weight:700;font-size:16px;font-variant-numeric:tabular-nums}
+.recur-sum-v.in{color:var(--viola)}
+.recur-sum-v.out{color:var(--inchiostro)}
+.recur-note{color:var(--grigio);font-size:12px;margin:8px 0 0}
+.recur-row{background:rgba(255,255,255,.6);border-radius:var(--r-sm);padding:12px;margin-bottom:10px}
+.recur-row-top{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:6px}
+.recur-typ{flex:none;font-size:11px;font-weight:700;padding:3px 8px;border-radius:999px;text-transform:uppercase;letter-spacing:.04em}
+.recur-typ.in{background:rgba(123,92,255,.12);color:var(--viola)}
+.recur-typ.out{background:var(--carta2);color:var(--grigio)}
+.recur-actions{display:flex;gap:8px;margin-top:10px}
+.recur-actions .btn{flex:1;min-height:40px}
+#recur-day{width:100%;min-height:var(--tap);border:0;border-radius:var(--r-sm);background:var(--foglio);padding:0 14px;font-size:15px;box-shadow:inset 0 0 0 1px var(--linea)}
+#recur-day:focus{outline:2px solid var(--viola);outline-offset:1px}
 .seg{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:2px 0 6px}
 .seg-btn{min-height:var(--tap);border:0;border-radius:var(--r-sm);font-weight:700;font-size:15px;
   background:rgba(255,255,255,.7);color:var(--grigio);box-shadow:0 4px 14px rgba(26,18,48,.06);
@@ -1241,6 +1258,7 @@ body.no-splash #app{animation:none}
     </div>
     <div class="budget-card" id="mese-budget" hidden></div>
     <div class="budget-card" id="mese-rhythm" hidden></div>
+    <div class="budget-card" id="mese-recurring" hidden></div>
     <button class="btn btn-primary w" type="button" id="mese-add">+ Aggiungi</button>
     <div class="mese-empty" id="mese-empty" hidden>
       <p class="nota" id="mese-empty-txt">Nessun movimento in questo mese.</p>
@@ -1332,6 +1350,63 @@ body.no-splash #app{animation:none}
   <div class="sub-body">
     <p class="budget-ov-month" id="rhythm-month">—</p>
     <div id="rhythm-detail"></div>
+  </div>
+</div>
+
+<!-- ============ F2P7D · GESTIONE RICORRENZE ============ -->
+<div class="subscreen" id="ov-recurring" hidden>
+  <div class="sub-head">
+    <button class="sub-back" type="button" id="recur-back">‹ Indietro</button>
+    <span class="sub-title">Ricorrenze</span>
+  </div>
+  <div class="sub-body">
+    <p class="budget-ov-month" id="recur-month">—</p>
+    <p class="recur-note">Una ricorrenza è una previsione. Non crea automaticamente un movimento.</p>
+    <button class="btn btn-primary w" type="button" id="recur-add">Aggiungi ricorrenza</button>
+    <div class="budget-sec-k">Attive</div>
+    <div id="recur-active"></div>
+    <div class="budget-sec-k">Archiviate</div>
+    <div id="recur-archived"></div>
+  </div>
+</div>
+
+<!-- ============ F2P7D · FORM RICORRENZA ============ -->
+<div class="subscreen" id="ov-recur-form" hidden>
+  <div class="sub-head">
+    <button class="sub-back" type="button" id="recur-form-back">‹ Indietro</button>
+    <span class="sub-title" id="recur-form-title">Nuova ricorrenza</span>
+  </div>
+  <div class="sub-body">
+    <form class="sub-form" id="recur-form" novalidate>
+      <label class="lbl">Tipo</label>
+      <div class="seg" id="recur-type">
+        <button type="button" class="seg-btn is-on" data-type="expense">Spesa</button>
+        <button type="button" class="seg-btn" data-type="income">Entrata</button>
+      </div>
+      <label class="lbl" for="recur-amt">Importo</label>
+      <div class="importo-wrap">
+        <input id="recur-amt" class="importo" type="text" inputmode="decimal" placeholder="0,00" autocomplete="off">
+        <span class="sim">€</span>
+      </div>
+      <label class="lbl" for="recur-day">Giorno del mese</label>
+      <input id="recur-day" type="number" min="1" max="31" step="1" inputmode="numeric" placeholder="1">
+      <label class="lbl" for="recur-account">Conto <span class="lbl-opt">(opzionale)</span></label>
+      <select id="recur-account"></select>
+      <label class="lbl" for="recur-category">Categoria <span class="lbl-opt">(opzionale)</span></label>
+      <select id="recur-category"></select>
+      <label class="lbl" for="recur-merchant">Descrizione</label>
+      <input id="recur-merchant" type="text" autocomplete="off" placeholder="Es. Affitto" maxlength="80">
+      <label class="lbl" for="recur-start">Mese iniziale</label>
+      <input id="recur-start" type="month">
+      <label class="lbl" for="recur-end">Mese finale <span class="lbl-opt">(opzionale)</span></label>
+      <input id="recur-end" type="month">
+      <p class="recur-note">Una ricorrenza è una previsione. Non crea automaticamente un movimento.</p>
+      <p class="err" id="recur-err" hidden></p>
+      <div class="due">
+        <button class="btn btn-ghost" type="button" id="recur-form-cancel">Annulla</button>
+        <button class="btn btn-primary" type="submit">Salva</button>
+      </div>
+    </form>
   </div>
 </div>
 
@@ -4757,6 +4832,7 @@ if ("serviceWorker" in navigator){
     rows.forEach(function(tx){ list.appendChild(movRow(tx, accMap, catMap)); });
     if (window.calculonBudget && window.calculonBudget.renderCompact) await window.calculonBudget.renderCompact(curMonth);
     if (window.calculonRhythm && window.calculonRhythm.renderCompact) await window.calculonRhythm.renderCompact(curMonth);
+    if (window.calculonRecurring && window.calculonRecurring.renderCompact) await window.calculonRecurring.renderCompact(curMonth);
   }
 
   function movRow(tx, accMap, catMap){
@@ -5231,6 +5307,182 @@ if ("serviceWorker" in navigator){
   window.calculonRhythm = { renderCompact: renderCompact };
 })();
 /* F2P7C-RHYTHM-UI-END */
+</script>
+
+<script>
+"use strict";
+/* F2P7D-RECURRING-UI-START */
+/* F2 Passo 7D — UI Ricorrenze dentro Mese. Solo presentazione su
+   personalRuntime.recurring (+ .accounts/.categories per nomi e select). Le ricorrenze
+   sono PIANO: nessuna materializzazione, nessun matching con transazioni, niente
+   auto-creazione movimenti. La vista compatta mostra SOLO il residuo certo del mese
+   (certainRemaining), etichettato "Previsto". Overlay sopra il Mese (gia' lockato). */
+(function(){
+  var doc = document;
+  function $(id){ return doc.getElementById(id); }
+  var PR = window.personalRuntime;
+  if (!PR || !PR.recurring) return;
+  var curM = null;
+  var formState = { id:null, type:"expense" };
+
+  function euro(c){ return (c/100).toLocaleString("it-IT", { minimumFractionDigits:2, maximumFractionDigits:2 }) + " €"; }
+  function parseCents(str){
+    var v = (str == null ? "" : String(str)).trim().replace(/€/g, ""); if (!v) return NaN;
+    v = v.replace(/^[+-]/, "");
+    if (v.indexOf(",") >= 0) v = v.replace(/\./g, "").replace(",", ".");
+    if (!/^\d*\.?\d*$/.test(v)) return NaN;
+    var f = parseFloat(v); if (!isFinite(f)) return NaN;
+    return Math.round(f * 100);
+  }
+  function validCents(c){ return typeof c === "number" && isFinite(c) && Math.floor(c) === c && c > 0; }
+  function fmtInput(c){ return (c/100).toFixed(2).replace(".", ","); }
+  function pad2(n){ return (n < 10 ? "0" : "") + n; }
+  function todayStr(){ var d = new Date(); return d.getFullYear() + "-" + pad2(d.getMonth()+1) + "-" + pad2(d.getDate()); }
+  function todayMonth(){ return todayStr().slice(0, 7); }
+  function monthHuman(m){ var p = m.split("-"); var d = new Date(+p[0], +p[1]-1, 1); return d.toLocaleDateString("it-IT", { month:"long", year:"numeric" }); }
+  function elh(tag, cls, txt){ var e = doc.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
+  function opt(v, t){ var o = doc.createElement("option"); o.value = v; o.textContent = t; return o; }
+
+  /* ---- VISTA COMPATTA: solo residuo certo, etichettato "Previsto" ---- */
+  async function renderCompact(month){
+    curM = month;
+    var card = $("mese-recurring"); if (!card) return;
+    card.hidden = false; card.textContent = "";
+    var head = elh("div", "budget-head"); head.appendChild(elh("span", "sez-k", "Ricorrenze"));
+    var link = elh("button", "home-link", "Gestisci ricorrenze"); link.type = "button"; link.onclick = openManage; head.appendChild(link);
+    card.appendChild(head);
+    var items = await PR.recurring.forMonth(month);
+    if (items.length === 0){ card.appendChild(elh("p", "budget-msg", "Nessuna ricorrenza prevista per questo mese.")); return; }
+    if (month < todayMonth()){ card.appendChild(elh("p", "budget-msg", "Mese passato: niente più da prevedere.")); return; }
+    var cr = await PR.recurring.certainRemaining(month, todayStr());
+    card.appendChild(elh("span", "recur-chip", "Previsto"));
+    var any = false;
+    if (cr.income > 0){ card.appendChild(sumLine("Ancora in arrivo", "+" + euro(cr.income), "in")); any = true; }
+    if (cr.expense > 0){ card.appendChild(sumLine("Ancora da pagare", "−" + euro(cr.expense), "out")); any = true; }
+    if (!any){ card.appendChild(elh("p", "budget-msg", "Niente più in arrivo o da pagare questo mese.")); }
+    else { card.appendChild(elh("p", "recur-note", "Sono previsioni, non movimenti registrati.")); }
+  }
+  function sumLine(label, val, dir){
+    var r = elh("div", "recur-sum");
+    r.appendChild(elh("span", "recur-sum-k", label));
+    r.appendChild(elh("span", "recur-sum-v " + dir, val));
+    return r;
+  }
+
+  /* ---- OVERLAY GESTIONE ---- */
+  function recurRow(rec, accMap, catMap, archived){
+    var row = elh("div", "recur-row");
+    var top = elh("div", "recur-row-top");
+    var cat = rec.categoryId ? catMap[rec.categoryId] : null;
+    var desc = rec.merchant || (cat ? cat.name : "Ricorrenza");
+    top.appendChild(elh("span", "budget-cat-name", desc));
+    var isIn = rec.type === "income";
+    top.appendChild(elh("span", "recur-typ " + (isIn ? "in" : "out"), isIn ? "Entrata" : "Uscita"));
+    row.appendChild(top);
+    var acc = rec.accountId ? accMap[rec.accountId] : null;
+    var parts = [euro(rec.amount), "giorno " + rec.dayOfMonth];
+    if (acc) parts.push(acc.name);
+    if (cat) parts.push(cat.name);
+    row.appendChild(elh("div", "budget-cat-figs", parts.join(" · ")));
+    var actions = elh("div", "recur-actions");
+    var edit = elh("button", "btn btn-ghost", "Modifica"); edit.type = "button"; edit.onclick = function(){ openForm(rec.id); };
+    actions.appendChild(edit);
+    var toggle = elh("button", "btn btn-ghost", archived ? "Ripristina" : "Archivia"); toggle.type = "button";
+    toggle.onclick = async function(){ try { archived ? await PR.recurring.restore(rec.id) : await PR.recurring.archive(rec.id); } catch(e){} await renderManage(); };
+    actions.appendChild(toggle);
+    row.appendChild(actions);
+    return row;
+  }
+
+  async function renderManage(){
+    $("recur-month").textContent = monthHuman(curM);
+    var all = await PR.recurring.listAll();
+    var accs = await PR.accounts.listAll(), cats = await PR.categories.listAll();
+    var accMap = {}, catMap = {};
+    accs.forEach(function(a){ accMap[a.id] = a; }); cats.forEach(function(c){ catMap[c.id] = c; });
+    var active = all.filter(function(r){ return !r.archived; });
+    var archived = all.filter(function(r){ return r.archived; });
+    var ah = $("recur-active"); ah.textContent = "";
+    if (!active.length) ah.appendChild(elh("p", "budget-msg", "Nessuna ricorrenza attiva."));
+    else active.forEach(function(r){ ah.appendChild(recurRow(r, accMap, catMap, false)); });
+    var rh = $("recur-archived"); rh.textContent = "";
+    if (!archived.length) rh.appendChild(elh("p", "budget-msg", "Nessuna ricorrenza archiviata."));
+    else archived.forEach(function(r){ rh.appendChild(recurRow(r, accMap, catMap, true)); });
+  }
+
+  async function openManage(){ await renderManage(); $("ov-recurring").hidden = false; $("ov-recurring").querySelector(".sub-body").scrollTop = 0; }
+  function closeManage(){ $("ov-recurring").hidden = true; if (window.calculonMese && window.calculonMese.renderMese) window.calculonMese.renderMese(); }
+  $("recur-back").onclick = closeManage;
+  $("recur-add").onclick = function(){ openForm(null); };
+
+  /* ---- FORM ---- */
+  function paintType(){ Array.prototype.forEach.call($("recur-type").children, function(b){ b.classList.toggle("is-on", b.dataset.type === formState.type); }); }
+  async function fillAcc(selectedId){
+    var sel = $("recur-account"); sel.textContent = ""; sel.appendChild(opt("", "— Nessuno —"));
+    var active = await PR.accounts.listActive(), present = {};
+    active.forEach(function(a){ present[a.id] = true; sel.appendChild(opt(a.id, a.name)); });
+    if (selectedId && !present[selectedId]){ var all = await PR.accounts.listAll(), a = all.filter(function(x){ return x.id === selectedId; })[0]; if (a) sel.appendChild(opt(a.id, a.name + " (archiviato)")); }
+    sel.value = selectedId || "";
+  }
+  async function fillCat(kind, selectedId){
+    var sel = $("recur-category"); sel.textContent = ""; sel.appendChild(opt("", "— Nessuna —"));
+    var active = await PR.categories.listActive(kind), present = {};
+    active.forEach(function(c){ present[c.id] = true; sel.appendChild(opt(c.id, c.name)); });
+    if (selectedId && !present[selectedId]){ var all = await PR.categories.listAll(), c = all.filter(function(x){ return x.id === selectedId; })[0]; if (c && c.kind === kind) sel.appendChild(opt(c.id, c.name + " (archiviata)")); }
+    sel.value = selectedId || "";
+  }
+
+  async function openForm(id){
+    var rec = id ? await PR.recurring.get(id) : null;
+    if (id && !rec) return;
+    formState.id = rec ? rec.id : null;
+    formState.type = rec ? rec.type : "expense";
+    $("recur-form-title").textContent = rec ? "Modifica ricorrenza" : "Nuova ricorrenza";
+    $("recur-amt").value = rec ? fmtInput(rec.amount) : "";
+    $("recur-day").value = rec ? rec.dayOfMonth : 1;
+    $("recur-merchant").value = rec ? (rec.merchant || "") : "";
+    $("recur-start").value = rec ? rec.startMonth : (curM || todayMonth());
+    $("recur-end").value = rec ? (rec.endMonth || "") : "";
+    $("recur-err").hidden = true;
+    paintType();
+    await fillAcc(rec ? rec.accountId : null);
+    await fillCat(formState.type, rec ? rec.categoryId : null);
+    $("ov-recur-form").hidden = false; $("ov-recur-form").querySelector(".sub-body").scrollTop = 0;
+  }
+  function closeForm(){ $("ov-recur-form").hidden = true; }
+
+  $("recur-type").addEventListener("click", function(e){
+    var b = e.target.closest(".seg-btn"); if (!b || b.dataset.type === formState.type) return;
+    formState.type = b.dataset.type; paintType();
+    fillCat(formState.type, null);   // categoria non piu' coerente -> azzerata
+  });
+  $("recur-form-cancel").onclick = closeForm;
+  $("recur-form-back").onclick = closeForm;
+
+  $("recur-form").addEventListener("submit", async function(e){
+    e.preventDefault();
+    var err = $("recur-err");
+    var cents = parseCents($("recur-amt").value);
+    if (!validCents(cents)){ err.textContent = "Inserisci un importo valido."; err.hidden = false; return; }
+    var day = parseInt($("recur-day").value, 10);
+    if (!(day >= 1 && day <= 31)){ err.textContent = "Il giorno del mese va da 1 a 31."; err.hidden = false; return; }
+    var start = $("recur-start").value;
+    if (!/^\d{4}-\d{2}$/.test(start)){ err.textContent = "Indica il mese iniziale."; err.hidden = false; return; }
+    var end = $("recur-end").value || null;
+    var data = { type: formState.type, amount: cents, cadence: "monthly", dayOfMonth: day,
+      startMonth: start, endMonth: end,
+      accountId: $("recur-account").value || null, categoryId: $("recur-category").value || null,
+      merchant: $("recur-merchant").value.trim() || null };
+    try {
+      if (formState.id) await PR.recurring.update(formState.id, data);
+      else await PR.recurring.create(data);
+    } catch(ex){ err.textContent = String((ex && ex.message) || ex); err.hidden = false; return; }
+    closeForm(); await renderManage();
+  });
+
+  window.calculonRecurring = { renderCompact: renderCompact };
+})();
+/* F2P7D-RECURRING-UI-END */
 </script>
 
 <script>
