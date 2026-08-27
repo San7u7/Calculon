@@ -687,6 +687,25 @@ body.no-splash #app{animation:none}
 .budget-cat-del{background:transparent;border:0;font-size:22px;line-height:1;color:var(--grigio);padding:0 6px;min-height:var(--tap)}
 .budget-cat-figs{font-size:12px;color:var(--grigio);margin:8px 0}
 .importo-sm .importo{font-size:18px}
+/* F2P7C — Ritmo UI */
+.rhythm-tap{display:block;width:100%;text-align:left;background:transparent;border:0;padding:0;font:inherit;color:inherit;cursor:pointer}
+.rhythm-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px}
+.rhythm-nums{font-weight:700;font-size:16px;font-variant-numeric:tabular-nums;margin:0 0 6px}
+.rhythm-tov{font-size:13px;color:var(--grigio);margin:0}
+.rhythm-msg{color:var(--grigio);font-size:14px;margin:0}
+.rhythm-more{display:inline-block;margin-top:10px;color:var(--viola);font-weight:700;font-size:13px}
+.rhythm-chip{flex:none;font-size:11px;font-weight:700;padding:3px 8px;border-radius:999px;text-transform:uppercase;letter-spacing:.04em}
+.rhythm-chip.onpace{background:rgba(123,92,255,.12);color:var(--viola)}
+.rhythm-chip.behind{background:var(--carta2);color:var(--grigio)}
+.rhythm-chip.ahead{background:rgba(255,155,60,.16);color:#B96A12}
+.rhythm-chip.exceeded{background:rgba(255,155,60,.22);color:#A85A0C}
+.rhythm-prog{margin:0 0 16px}
+.rhythm-prog-top{display:flex;justify-content:space-between;margin-bottom:6px;font-size:13px}
+.rhythm-prog-k{color:var(--grigio)}
+.rhythm-prog-v{font-weight:700;font-variant-numeric:tabular-nums}
+.rhythm-delta{font-weight:700;margin:0 0 8px}
+.rhythm-cat{background:rgba(255,255,255,.6);border-radius:var(--r-sm);padding:12px;margin-bottom:10px}
+.rhythm-cat-top{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px}
 .seg{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:2px 0 6px}
 .seg-btn{min-height:var(--tap);border:0;border-radius:var(--r-sm);font-weight:700;font-size:15px;
   background:rgba(255,255,255,.7);color:var(--grigio);box-shadow:0 4px 14px rgba(26,18,48,.06);
@@ -1221,6 +1240,7 @@ body.no-splash #app{animation:none}
       <div class="mese-tot-cell mese-tot-diff"><span class="sez-k">Differenza</span><span class="mese-tot-v big" id="mese-diff">—</span></div>
     </div>
     <div class="budget-card" id="mese-budget" hidden></div>
+    <div class="budget-card" id="mese-rhythm" hidden></div>
     <button class="btn btn-primary w" type="button" id="mese-add">+ Aggiungi</button>
     <div class="mese-empty" id="mese-empty" hidden>
       <p class="nota" id="mese-empty-txt">Nessun movimento in questo mese.</p>
@@ -1300,6 +1320,18 @@ body.no-splash #app{animation:none}
     <div id="budget-add-area" hidden></div>
     <button class="btn btn-ghost w" type="button" id="budget-cat-add">Aggiungi categoria</button>
     <p class="err" id="budget-err" hidden></p>
+  </div>
+</div>
+
+<!-- ============ F2P7C · DETTAGLIO RITMO ============ -->
+<div class="subscreen" id="ov-rhythm" hidden>
+  <div class="sub-head">
+    <button class="sub-back" type="button" id="rhythm-back">‹ Indietro</button>
+    <span class="sub-title">Ritmo</span>
+  </div>
+  <div class="sub-body">
+    <p class="budget-ov-month" id="rhythm-month">—</p>
+    <div id="rhythm-detail"></div>
   </div>
 </div>
 
@@ -4724,6 +4756,7 @@ if ("serviceWorker" in navigator){
     $("mese-empty-txt").textContent = "Nessun movimento in " + monthLabel(curMonth) + ".";
     rows.forEach(function(tx){ list.appendChild(movRow(tx, accMap, catMap)); });
     if (window.calculonBudget && window.calculonBudget.renderCompact) await window.calculonBudget.renderCompact(curMonth);
+    if (window.calculonRhythm && window.calculonRhythm.renderCompact) await window.calculonRhythm.renderCompact(curMonth);
   }
 
   function movRow(tx, accMap, catMap){
@@ -5079,6 +5112,125 @@ if ("serviceWorker" in navigator){
   window.calculonBudget = { renderCompact: renderCompact, open: openManage };
 })();
 /* F2P7B-BUDGET-UI-END */
+</script>
+
+<script>
+"use strict";
+/* F2P7C-RHYTHM-UI-START */
+/* F2 Passo 7C — UI Ritmo dentro Mese. Solo presentazione su personalRuntime.rhythm
+   (+ .budgets/.categories per la lista categorie). Nessuna nuova logica dati: gli stati
+   e i numeri vengono dal motore. TOV minimale, niente giudizi, niente Forecast/Ricorrenze.
+   Regola UI: un mese FUTURO non ha ritmo (l'engine darebbe ON_PACE fuorviante a mp=0),
+   quindi lo rendiamo "non applicabile" qui, senza mostrare ON_PACE. Overlay sopra il Mese
+   (gia' lockato): qui non si tocca il body-scroll. */
+(function(){
+  var doc = document;
+  function $(id){ return doc.getElementById(id); }
+  var PR = window.personalRuntime;
+  if (!PR || !PR.rhythm) return;
+  var curM = null;
+
+  function pad2(n){ return (n < 10 ? "0" : "") + n; }
+  function todayStr(){ var d = new Date(); return d.getFullYear() + "-" + pad2(d.getMonth()+1) + "-" + pad2(d.getDate()); }
+  function todayMonth(){ return todayStr().slice(0, 7); }
+  function pct(f){ return (f == null) ? "—" : (Math.round(f*100) + "%"); }
+  function monthHuman(m){ var p = m.split("-"); var d = new Date(+p[0], +p[1]-1, 1); return d.toLocaleDateString("it-IT", { month:"long", year:"numeric" }); }
+  function elh(tag, cls, txt){ var e = doc.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
+
+  var CHIP = { ON_PACE:"onpace", BEHIND:"behind", AHEAD:"ahead", EXCEEDED:"exceeded" };
+  var WORD = { ON_PACE:"In linea", BEHIND:"Più lento", AHEAD:"In corsa", EXCEEDED:"Superato" };
+  var SENT = {
+    BEHIND:   "Stai spendendo più lentamente del mese.",
+    ON_PACE:  "Sei praticamente in linea.",
+    AHEAD:    "Ehm. Le spese stanno correndo un po'.",
+    EXCEEDED: "Il budget previsto è già stato superato.",
+    NO_BUDGET:"Senza budget non posso misurare il ritmo."
+  };
+
+  function headEl(){ var h = elh("div", "rhythm-head"); h.appendChild(elh("span", "sez-k", "Ritmo")); return h; }
+
+  /* ---- SEZIONE COMPATTA ---- */
+  async function renderCompact(month){
+    curM = month;
+    var card = $("mese-rhythm"); if (!card) return;
+    card.hidden = false; card.textContent = "";
+    // Mese futuro: ritmo non applicabile (mai ON_PACE).
+    if (month > todayMonth()){
+      card.appendChild(headEl());
+      card.appendChild(elh("p", "rhythm-msg", "Questo mese non è ancora cominciato: niente ritmo da misurare."));
+      return;
+    }
+    var r = await PR.rhythm.total(month, todayStr());
+    if (!r || r.state === "NO_BUDGET"){
+      card.appendChild(headEl());
+      card.appendChild(elh("p", "rhythm-msg", SENT.NO_BUDGET));
+      return;
+    }
+    var btn = elh("button", "rhythm-tap"); btn.type = "button";
+    var head = elh("div", "rhythm-head");
+    head.appendChild(elh("span", "sez-k", "Ritmo"));
+    head.appendChild(elh("span", "rhythm-chip " + CHIP[r.state], WORD[r.state]));
+    btn.appendChild(head);
+    btn.appendChild(elh("p", "rhythm-nums", pct(r.budgetProgress) + " speso · " + pct(r.monthProgress) + " del mese"));
+    btn.appendChild(elh("p", "rhythm-tov", SENT[r.state]));
+    btn.appendChild(elh("span", "rhythm-more", "Dettaglio ›"));
+    btn.onclick = openDetail;
+    card.appendChild(btn);
+  }
+
+  /* ---- DETTAGLIO (progressive disclosure) ---- */
+  function progBlock(label, frac, over){
+    var wrap = elh("div", "rhythm-prog");
+    var top = elh("div", "rhythm-prog-top");
+    top.appendChild(elh("span", "rhythm-prog-k", label));
+    top.appendChild(elh("span", "rhythm-prog-v", pct(frac)));
+    wrap.appendChild(top);
+    var bar = elh("div", "budget-bar"); if (over) bar.classList.add("over");
+    var i = doc.createElement("i"); i.style.width = Math.min(100, Math.max(0, (frac||0)*100)).toFixed(1) + "%";
+    bar.appendChild(i); wrap.appendChild(bar);
+    return wrap;
+  }
+  function catRhythmRow(name, cr){
+    var row = elh("div", "rhythm-cat");
+    var top = elh("div", "rhythm-cat-top");
+    top.appendChild(elh("span", "budget-cat-name", name));
+    top.appendChild(elh("span", "rhythm-chip " + CHIP[cr.state], WORD[cr.state]));
+    row.appendChild(top);
+    var bar = elh("div", "budget-bar"); if (cr.state === "EXCEEDED") bar.classList.add("over");
+    var i = doc.createElement("i"); var bp = (cr.budgetProgress == null) ? 0 : Math.min(1, cr.budgetProgress);
+    i.style.width = (bp*100).toFixed(1) + "%"; bar.appendChild(i); row.appendChild(bar);
+    row.appendChild(elh("div", "budget-cat-figs", pct(cr.budgetProgress) + " del budget · " + pct(cr.monthProgress) + " del mese"));
+    return row;
+  }
+
+  async function renderDetail(month){
+    $("rhythm-month").textContent = monthHuman(month);
+    var host = $("rhythm-detail"); host.textContent = "";
+    var r = await PR.rhythm.total(month, todayStr());
+    if (!r || r.state === "NO_BUDGET"){ host.appendChild(elh("p", "rhythm-msg", SENT.NO_BUDGET)); return; }
+    host.appendChild(progBlock("Avanzamento mese", r.monthProgress, false));
+    host.appendChild(progBlock("Avanzamento budget", r.budgetProgress, r.spent > r.budget));
+    var pp = Math.round((r.delta || 0) * 100);
+    host.appendChild(elh("p", "rhythm-delta", "Differenza: " + (pp > 0 ? "+" : "") + pp + " pp"));
+    host.appendChild(elh("div", "budget-sec-k", "Categorie con budget"));
+    var cats = (await PR.budgets.listMonth(month)).filter(function(b){ return b.scope === "category"; });
+    if (!cats.length){ host.appendChild(elh("p", "budget-msg", "Nessuna categoria con budget.")); return; }
+    var all = await PR.categories.listAll(); var byId = {}; all.forEach(function(c){ byId[c.id] = c; });
+    for (var i = 0; i < cats.length; i++){
+      var b = cats[i], c = byId[b.categoryId];
+      var name = c ? (c.name + (c.archived ? " (archiviata)" : "")) : "Categoria";
+      var cr = await PR.rhythm.category(month, b.categoryId, todayStr());
+      host.appendChild(catRhythmRow(name, cr));
+    }
+  }
+
+  async function openDetail(){ await renderDetail(curM); $("ov-rhythm").hidden = false; $("ov-rhythm").querySelector(".sub-body").scrollTop = 0; }
+  function closeDetail(){ $("ov-rhythm").hidden = true; }
+  $("rhythm-back").onclick = closeDetail;
+
+  window.calculonRhythm = { renderCompact: renderCompact };
+})();
+/* F2P7C-RHYTHM-UI-END */
 </script>
 
 <script>
