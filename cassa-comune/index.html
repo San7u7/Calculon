@@ -4054,6 +4054,27 @@ if ("serviceWorker" in navigator){
   }
   function optText(v){ var x = (v == null ? "" : String(v)).trim(); return x ? x : null; }
 
+  // F3P5A: normalizzazione tag deterministica. input non-array -> []; ignora non-stringa;
+  // lowercase (accenti conservati); tiene lettere/numeri/spazi/-, rimuove altra
+  // punteggiatura; collassa spazi; trim; max 24 caratteri; scarta i vuoti; dedup con
+  // ordine preservato; max 8 tag. Idempotente.
+  function sanitizeTags(tags){
+    if (!Array.isArray(tags)) return [];
+    var out = [], seen = {};
+    for (var i = 0; i < tags.length && out.length < 8; i++){
+      var t = tags[i];
+      if (typeof t !== "string") continue;
+      t = t.toLowerCase()
+           .replace(/[^\p{L}\p{N}\s-]+/gu, "")   // rimuove la punteggiatura non ammessa (accenti conservati)
+           .replace(/\s+/g, " ")
+           .trim();
+      if (t.length > 24) t = t.slice(0, 24).trim();
+      if (!t || seen[t]) continue;
+      seen[t] = 1; out.push(t);
+    }
+    return out;
+  }
+
   function validType(t){ return TYPES.indexOf(t) >= 0; }
   function validAmount(a){ return typeof a === "number" && isFinite(a) && Math.floor(a) === a && a > 0; }
   function validDate(d){
@@ -4102,6 +4123,7 @@ if ("serviceWorker" in navigator){
       return { type:"transfer", amount:input.amount, date:input.date,
         accountId:null, categoryId:null, fromAccountId:from, toAccountId:to,
         merchant:optText(input.merchant), note:optText(input.note),
+        tags:sanitizeTags(input.tags),   // F3P5A: tag ammessi anche sui giroconti (contesto trasversale)
         capitalMovement:true };   // ogni transfer e' movimento di capitale
     }
 
@@ -4112,6 +4134,7 @@ if ("serviceWorker" in navigator){
     return { type:type, amount:input.amount, date:input.date, accountId:accountId,
       categoryId:categoryId, fromAccountId:null, toAccountId:null,
       merchant:optText(input.merchant), note:optText(input.note),
+      tags:sanitizeTags(input.tags),   // F3P5A
       capitalMovement: input.capitalMovement === true };   // default false (compat F1)
   }
 
@@ -4137,7 +4160,7 @@ if ("serviceWorker" in navigator){
       accountId:v.accountId, categoryId:v.categoryId,
       fromAccountId:v.fromAccountId, toAccountId:v.toAccountId,
       merchant:v.merchant, note:v.note,
-      tags:[], capitalMovement:v.capitalMovement, deleted:false, createdAt:nowMs(),
+      tags:v.tags, capitalMovement:v.capitalMovement, deleted:false, createdAt:nowMs(),
       learningProvenance: (v.type === "transfer") ? { accountId:null, categoryId:null } : provClean((data || {}).learningProvenance) };
     await DB.put("transactions", rec);   // put imposta updatedAt
     return rec.id;
@@ -4158,13 +4181,14 @@ if ("serviceWorker" in navigator){
       toAccountId:   ("toAccountId"   in patch) ? patch.toAccountId   : cur.toAccountId,
       merchant:      ("merchant"      in patch) ? patch.merchant      : cur.merchant,
       note:          ("note"          in patch) ? patch.note          : cur.note,
+      tags:          ("tags"          in patch) ? patch.tags          : cur.tags,   // F3P5A: legacy senza tags -> sanitizeTags([]|undefined) = []
       capitalMovement: ("capitalMovement" in patch) ? patch.capitalMovement : cur.capitalMovement
     };
     var v = await buildValidated(merged);
     cur.type = v.type; cur.amount = v.amount; cur.date = v.date;
     cur.accountId = v.accountId; cur.categoryId = v.categoryId;
     cur.fromAccountId = v.fromAccountId; cur.toAccountId = v.toAccountId;
-    cur.merchant = v.merchant; cur.note = v.note;
+    cur.merchant = v.merchant; cur.note = v.note; cur.tags = v.tags;
     cur.spaceId = PID; cur.capitalMovement = v.capitalMovement;   // invarianti forzate (transfer -> true)
     // F3P2: provenance. Se il patch la porta, la si applica; altrimenti si preserva.
     // Il transfer non ha categoria/conto -> provenance azzerata.
@@ -4207,11 +4231,61 @@ if ("serviceWorker" in navigator){
     return { month:m, income:income, expense:expense, difference: income - expense };
   }
 
+  // ---- F3P5A: API tag (derivate dalle transazioni, nessuno store, nessun tombstone) ----
+  // Vocabolario: tag distinti + conteggio dai movimenti personali !deleted; ordinamento
+  // per frequenza desc, poi alfabetico. I tag memorizzati sono gia' canonici (sanitizeTags
+  // in scrittura), quindi i conteggi sono puliti.
+  async function tagVocabulary(){
+    var rows = await listAll();   // personale, !deleted
+    var counts = {};
+    rows.forEach(function(t){
+      var tg = Array.isArray(t.tags) ? t.tags : [];
+      tg.forEach(function(x){ counts[x] = (counts[x] || 0) + 1; });
+    });
+    return Object.keys(counts).map(function(k){ return { tag:k, count:counts[k] }; })
+      .sort(function(a, b){ return (b.count - a.count) || (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0); });
+  }
+  // Rinomina globale: riscrive tutte le transazioni che contengono oldTag; se newTag esiste
+  // gia' nella stessa transazione, sanitizeTags fa merge/dedup. updatedAt aggiornato dal put.
+  async function tagRename(oldTag, newTag){
+    var from = sanitizeTags([oldTag])[0] || null;
+    var to   = sanitizeTags([newTag])[0] || null;
+    if (!from) throw new Error("tag di origine non valido");
+    if (!to)   throw new Error("tag di destinazione non valido");
+    if (from === to) return 0;
+    var rows = await listAll(), n = 0;
+    for (var i = 0; i < rows.length; i++){
+      var t = rows[i], tg = Array.isArray(t.tags) ? t.tags : [];
+      if (tg.indexOf(from) < 0) continue;
+      t.tags = sanitizeTags(tg.map(function(x){ return x === from ? to : x; }));   // merge/dedup se to gia' presente
+      await DB.put("transactions", t);
+      n++;
+    }
+    return n;
+  }
+  // Eliminazione globale: rimuove il tag da tutte le transazioni che lo contengono.
+  async function tagDelete(tag){
+    var target = sanitizeTags([tag])[0] || null;
+    if (!target) throw new Error("tag non valido");
+    var rows = await listAll(), n = 0;
+    for (var i = 0; i < rows.length; i++){
+      var t = rows[i], tg = Array.isArray(t.tags) ? t.tags : [];
+      if (tg.indexOf(target) < 0) continue;
+      t.tags = tg.filter(function(x){ return x !== target; });
+      await DB.put("transactions", t);
+      n++;
+    }
+    return n;
+  }
+
   window.personalRuntime = window.personalRuntime || {};
   window.personalRuntime.transactions = {
     listAll: listAll, listMonth: listMonth, get: getTxn,
     create: create, update: update, delete: del, restore: restore,
-    monthTotals: monthTotals
+    monthTotals: monthTotals, sanitizeTags: sanitizeTags
+  };
+  window.personalRuntime.tags = {
+    vocabulary: tagVocabulary, rename: tagRename, delete: tagDelete, sanitize: sanitizeTags
   };
 })();
 /* F1P7-TXN-END */
