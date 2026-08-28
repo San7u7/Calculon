@@ -3986,6 +3986,69 @@ if ("serviceWorker" in navigator){
   async function balances(spaceId){ return balancesFrom(await listMembers(spaceId), await listTransactions(spaceId)); }
   async function settlementPlan(spaceId){ return window.settle(await balances(spaceId)); }
 
+  /* F4 · Passo 2B — gate di compatibilita' legacy (READ-ONLY, DIAGNOSTICO).
+     Rileva gli spazi legacy dove il saldo NATIVO (allocations, semantica Shared 2.0)
+     diverge dal saldo mostrato dal RUNTIME LEGACY. NON corregge, NON altera lo storico,
+     NON emula il bug legacy: la formula di balances() resta invariata. */
+  // Vero se un membro legacy CANCELLATO (deleted:true) e' ancora referenziato da un
+  // record NON tombstone (payer / allocatee / from / to): e' la condizione esatta per cui
+  // il legacy scartava l'intero record, generando la divergenza col nativo.
+  function inactiveReferenced(d){
+    var deleted = {};
+    (d.meta && d.meta.members || []).forEach(function(m){ if (m && m.deleted) deleted[m.id] = true; });
+    if (Object.keys(deleted).length === 0) return false;
+    var recs = d.records || {};
+    for (var k in recs){
+      var r = recs[k]; if (!r || r.deleted) continue;
+      if (r.kind === "expense"){
+        if (deleted[r.payer]) return true;
+        var parts = (r.split && r.split.parts) || {};
+        for (var id in parts) if (deleted[id]) return true;
+      } else if (r.kind === "payment"){
+        if (deleted[r.from] || deleted[r.to]) return true;
+      }
+    }
+    return false;
+  }
+  // CORE PURO: confronto membro-per-membro tra saldo legacy (window.balances sui dati
+  // legacy) e saldo nativo (balancesFrom sulle allocations proiettate). Nessuna persistenza.
+  function legacyCompatibilityFrom(members, txs, legacyData){
+    var nativeBalances = balancesFrom(members, txs);
+    if (!legacyData || !legacyData.meta){
+      return { compatible: true, reason: null, applicable: false, legacyBalances: null, nativeBalances: nativeBalances, differences: {} };
+    }
+    var recArr = legacyData.records ? Object.keys(legacyData.records).map(function(k){ return legacyData.records[k]; }) : [];
+    var legacyRaw = window.balances(legacyData.meta.members, recArr);   // {legacyMemberId -> centesimi}, esclude i deleted
+    var legacyBalances = {}, differences = {};
+    for (var i = 0; i < members.length; i++){
+      var m = members[i];
+      var lv = legacyRaw[m.legacyMemberId]; lv = (lv == null ? 0 : lv);   // membro assente nel legacy = 0
+      var nv = nativeBalances[m.id];        nv = (nv == null ? 0 : nv);
+      legacyBalances[m.id] = lv;
+      if (lv !== nv) differences[m.id] = { legacy: lv, native: nv, delta: nv - lv };
+    }
+    var compatible = Object.keys(differences).length === 0;
+    var reason = compatible ? null : (inactiveReferenced(legacyData) ? "inactive-member-history" : "balance-mismatch");
+    return { compatible: compatible, reason: reason, applicable: true, legacyBalances: legacyBalances, nativeBalances: nativeBalances, differences: differences };
+  }
+  // Adattatore async: carica spazio/membri/tx da IndexedDB e la sorgente legacy da
+  // localStorage (cc.data.<GID>), poi delega al core puro. Solo spazi con legacyGroupId.
+  async function legacyCompatibility(spaceId){
+    if (!spaceId) throw new Error("spaceId richiesto");
+    var space = await db().get("spaces", spaceId);
+    if (!space || !space.legacyGroupId){
+      return { compatible: true, reason: null, applicable: false, legacyBalances: null, nativeBalances: await balances(spaceId), differences: {} };
+    }
+    var members = await listMembers(spaceId);
+    var txs = await listTransactions(spaceId);
+    var raw = (typeof localStorage !== "undefined") ? localStorage.getItem("cc.data." + space.legacyGroupId) : null;
+    var d = null; try { d = raw ? JSON.parse(raw) : null; } catch(e){ d = null; }
+    var res = legacyCompatibilityFrom(members, txs, d);
+    res.legacyGroupId = space.legacyGroupId;
+    if (!d || !d.meta) res.note = "sorgente legacy assente in localStorage";
+    return res;
+  }
+
   window.sharedRuntime = {
     listMembers: listMembers,
     listTransactions: listTransactions,
@@ -3995,6 +4058,60 @@ if ("serviceWorker" in navigator){
     _balancesFrom: balancesFrom,
     _settlementPlanFrom: settlementPlanFrom,
     _validaTx: validaTx,
+    legacyCompatibility: legacyCompatibility,
+    _legacyCompatibilityFrom: legacyCompatibilityFrom,
+    _testLegacyCompat: async function(){
+      var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
+      var DB = window.calculonDB, proj = DB._projectGroup, SR = window.sharedRuntime;
+      function grp(gid, members, recArr){ var recs = {}; for (var i = 0; i < recArr.length; i++) recs[recArr[i].id] = recArr[i]; return { meta: { id: gid, name: gid, version: 1, deviceId: "t", updatedAt: 0, members: members }, records: recs }; }
+      function exp(id, payer, amt, mode, parts){ return { id: id, kind: "expense", version: 1, deviceId: "t", amountCents: amt, payer: payer, split: { mode: mode, parts: parts }, desc: id }; }
+      function pay(id, from, to, amt){ return { id: id, kind: "payment", version: 1, deviceId: "t", amountCents: amt, from: from, to: to }; }
+      var M = [{ id:"m1", name:"A" }, { id:"m2", name:"B" }, { id:"m3", name:"C" }];
+      function compatOf(gid, d){ var p = proj(gid, d); return SR._legacyCompatibilityFrom(p.members, p.transactions, d); }
+
+      var before = (await DB.list("transactions")).length;   // per provare: nessuna scrittura
+
+      ok("legacy normale -> compatible", compatOf("N00001", grp("N00001", M, [ exp("r1","m1",1000,"equal",{m1:1,m2:1,m3:1}) ])).compatible === true);
+      ok("equal -> compatible",   compatOf("E00001", grp("E00001", M, [ exp("r1","m1",1000,"equal",{m1:1,m2:1,m3:1}) ])).compatible === true);
+      ok("shares -> compatible",  compatOf("S00001", grp("S00001", M, [ exp("r1","m1",1000,"shares",{m1:1,m2:2,m3:1}) ])).compatible === true);
+      ok("percent -> compatible", compatOf("P00001", grp("P00001", M, [ exp("r1","m1",1000,"percent",{m1:2500,m2:2500,m3:5000}) ])).compatible === true);
+      ok("exact -> compatible",   compatOf("X00001", grp("X00001", M, [ exp("r1","m1",1000,"exact",{m1:100,m2:200,m3:700}) ])).compatible === true);
+      ok("settlement -> compatible", compatOf("T00001", grp("T00001", M, [ exp("r1","m1",900,"equal",{m1:1,m2:1,m3:1}), pay("r2","m2","m1",300) ])).compatible === true);
+      ok("compatibile -> reason null", compatOf("N00002", grp("N00002", M, [ exp("r1","m1",1000,"equal",{m1:1,m2:1,m3:1}) ])).reason === null);
+
+      // membro cancellato SENZA riferimenti storici -> compatible true
+      var Mdel = [{ id:"m1", name:"A" }, { id:"m2", name:"B" }, { id:"m3", name:"C", deleted:true }];
+      var cNoRef = compatOf("D00001", grp("D00001", Mdel, [ exp("r1","m1",1000,"equal",{m1:1,m2:1}) ]));
+      ok("cancellato senza riferimenti -> compatible", cNoRef.compatible === true);
+      ok("cancellato senza riferimenti -> differences vuoto", Object.keys(cNoRef.differences).length === 0);
+
+      // membro cancellato CON riferimenti storici e saldo divergente -> false
+      var cRef = compatOf("D00002", grp("D00002", Mdel, [ exp("r1","m1",900,"equal",{m1:1,m2:1,m3:1}) ]));
+      ok("cancellato con riferimenti -> incompatible", cRef.compatible === false);
+      ok("reason = inactive-member-history", cRef.reason === "inactive-member-history");
+      ok("diff m1: legacy 0 / native +600", cRef.differences["D00002:m1"] && cRef.differences["D00002:m1"].legacy === 0 && cRef.differences["D00002:m1"].native === 600);
+      ok("diff m2: native -300", cRef.differences["D00002:m2"] && cRef.differences["D00002:m2"].native === -300);
+      ok("diff m3: native -300 (referenziato)", cRef.differences["D00002:m3"] && cRef.differences["D00002:m3"].native === -300);
+      ok("delta = native - legacy (600)", cRef.differences["D00002:m1"].delta === 600);
+
+      // il saldo nativo NON viene alterato: resta quello canonico Shared 2.0
+      var pRef = proj("D00003", grp("D00003", Mdel, [ exp("r1","m1",900,"equal",{m1:1,m2:1,m3:1}) ]));
+      var natRef = SR._balancesFrom(pRef.members, pRef.transactions);
+      ok("native invariato (m1=+600)", natRef["D00003:m1"] === 600);
+
+      // async: spazio non-legacy -> applicable false, compatible true
+      var pc = await SR.legacyCompatibility("personal:local");
+      ok("non-legacy -> applicable false", pc.applicable === false);
+      ok("non-legacy -> compatible true", pc.compatible === true);
+      var threw = false; try { await SR.legacyCompatibility(); } catch(e){ threw = true; }
+      ok("spaceId richiesto -> throw", threw);
+
+      var after = (await DB.list("transactions")).length;
+      ok("nessuna scrittura (transactions invariate)", before === after);
+
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    },
     _testSharedRuntime: function(){
       var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
       var proj = window.calculonDB._projectGroup;
