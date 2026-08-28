@@ -3908,6 +3908,175 @@ if ("serviceWorker" in navigator){
 /* F1P2-PRT-END */
 </script>
 
+<!-- ==== MODULE: shared-runtime ==== -->
+<script>
+"use strict";
+/* F4P2-SHARED-START */
+/* F4 · Passo 2 — motore READ-ONLY di saldi e settlement sul nuovo modello IndexedDB.
+   spaceId ESPLICITO ad ogni chiamata: nessun singleton GID/D. Nessun write-path, nessun
+   dual-write, nessun sync, nessuna integrazione Personale, Worker/wire invariati.
+   NON dipende da shares(): le allocations SONO lo snapshot canonico gia' materializzato.
+   Riusa la primitiva pura globale settle(net). Fail-closed: dati incoerenti -> throw. */
+(function(){
+  function db(){ return window.calculonDB; }
+  function centInt(n){ return typeof n === "number" && isFinite(n) && Math.floor(n) === n; }
+
+  // Membri dello spazio: attivi E inattivi (active:false) restano validi per storico e
+  // risoluzione identita'. Esclusi solo i tombstone (deleted:true) del record membro.
+  async function listMembers(spaceId){
+    if (!spaceId) throw new Error("spaceId richiesto");
+    return await db().list("spaceMembers", function(m){ return m && m.spaceId === spaceId && m.deleted !== true; });
+  }
+  // Transazioni dello spazio, tombstone esclusi.
+  async function listTransactions(spaceId){
+    if (!spaceId) throw new Error("spaceId richiesto");
+    return await db().list("transactions", function(t){ return t && t.spaceId === spaceId && t.deleted !== true; });
+  }
+
+  // Validazione fail-closed di UNA transazione shared. `noto(id)` = membro presente in net.
+  function validaTx(tx, noto){
+    if (!tx || typeof tx !== "object") return "transazione assente";
+    if (tx.type === "expense"){
+      if (!centInt(tx.amount) || tx.amount <= 0) return "amount non intero/<=0";
+      if (!noto(tx.paidById)) return "payer inesistente: " + tx.paidById;
+      var alloc = tx.allocations;
+      if (!Array.isArray(alloc) || alloc.length === 0) return "allocations vuoto";
+      var somma = 0;
+      for (var i = 0; i < alloc.length; i++){
+        var a = alloc[i];
+        if (!a || !noto(a.memberId)) return "allocation: membro inesistente: " + (a && a.memberId);
+        if (!centInt(a.amount) || a.amount < 0) return "allocation: importo non intero/<0";
+        somma += a.amount;
+      }
+      if (somma !== tx.amount) return "allocazioni (" + somma + ") != amount (" + tx.amount + ")";
+      return null;
+    }
+    if (tx.type === "settlement"){
+      if (!centInt(tx.amount) || tx.amount <= 0) return "amount non intero/<=0";
+      if (!noto(tx.fromMemberId) || !noto(tx.toMemberId)) return "settlement from/to inesistente";
+      if (tx.fromMemberId === tx.toMemberId) return "settlement from === to";
+      return null;
+    }
+    return "tipo non supportato: " + tx.type;
+  }
+
+  // CORE PURO: net[memberId] in centesimi interi da membri + transazioni (gia' filtrate per spazio).
+  // net iniziale = 0 per OGNI membro (attivi+inattivi) -> zero-sum garantito. Tombstone saltati.
+  function balancesFrom(members, txs){
+    var net = {};
+    for (var i = 0; i < members.length; i++) net[members[i].id] = 0;
+    var noto = function(id){ return Object.prototype.hasOwnProperty.call(net, id); };
+    for (var j = 0; j < txs.length; j++){
+      var tx = txs[j];
+      if (tx && tx.deleted === true) continue;                 // tombstone esclusi
+      var err = validaTx(tx, noto);
+      if (err) throw new Error("tx " + (tx && tx.id) + ": " + err);   // fail-closed
+      if (tx.type === "expense"){
+        net[tx.paidById] += tx.amount;
+        for (var k = 0; k < tx.allocations.length; k++) net[tx.allocations[k].memberId] -= tx.allocations[k].amount;
+      } else {                                                  // settlement
+        net[tx.fromMemberId] += tx.amount;
+        net[tx.toMemberId]   -= tx.amount;
+      }
+    }
+    return net;
+  }
+  function settlementPlanFrom(members, txs){ return window.settle(balancesFrom(members, txs)); }
+
+  async function balances(spaceId){ return balancesFrom(await listMembers(spaceId), await listTransactions(spaceId)); }
+  async function settlementPlan(spaceId){ return window.settle(await balances(spaceId)); }
+
+  window.sharedRuntime = {
+    listMembers: listMembers,
+    listTransactions: listTransactions,
+    balances: balances,
+    settlementPlan: settlementPlan,
+    // helper puri per i test (nessuna persistenza)
+    _balancesFrom: balancesFrom,
+    _settlementPlanFrom: settlementPlanFrom,
+    _validaTx: validaTx,
+    _testSharedRuntime: function(){
+      var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
+      var proj = window.calculonDB._projectGroup;
+      // costruttori fixture legacy (in memoria, nessuna scrittura)
+      function grp(gid, members, recArr){
+        var recs = {}; for (var i = 0; i < recArr.length; i++) recs[recArr[i].id] = recArr[i];
+        return { meta: { id: gid, name: gid, version: 1, deviceId: "t", updatedAt: 0, members: members }, records: recs };
+      }
+      function exp(id, payer, amt, mode, parts){ return { id: id, kind: "expense", version: 1, deviceId: "t", amountCents: amt, payer: payer, split: { mode: mode, parts: parts }, desc: id }; }
+      function pay(id, from, to, amt){ return { id: id, kind: "payment", version: 1, deviceId: "t", amountCents: amt, from: from, to: to }; }
+      var M = [{ id:"m1", name:"A" }, { id:"m2", name:"B" }, { id:"m3", name:"C" }];
+      function zeroSum(net){ var s = 0; for (var k in net) s += net[k]; return s === 0; }
+      // confronto legacy(members,recordsArray) vs nuovo(_balancesFrom(proj)) membro-per-membro
+      function equivale(gid, d){
+        var legacy = window.balances(d.meta.members, Object.keys(d.records).map(function(k){ return d.records[k]; }));
+        var p = proj(gid, d);
+        var nuovo = window.sharedRuntime._balancesFrom(p.members, p.transactions);
+        for (var mi = 0; mi < p.members.length; mi++){
+          var mem = p.members[mi];
+          var l = legacy[mem.legacyMemberId]; if (l == null) l = 0;
+          if ((nuovo[mem.id] | 0) !== (l | 0)) return false;
+        }
+        return zeroSum(nuovo);
+      }
+      // --- equivalenza legacy al centesimo, 4 modi + settlement ---
+      ok("equal migrato == legacy",   equivale("EQ0001", grp("EQ0001", M, [ exp("r1","m1",1000,"equal",{m1:1,m2:1,m3:1}) ])));
+      ok("shares migrato == legacy",  equivale("SH0001", grp("SH0001", M, [ exp("r1","m1",1000,"shares",{m1:1,m2:2,m3:1}) ])));
+      ok("percent migrato == legacy", equivale("PC0001", grp("PC0001", M, [ exp("r1","m1",1000,"percent",{m1:2500,m2:2500,m3:5000}) ])));
+      ok("exact migrato == legacy",   equivale("EX0001", grp("EX0001", M, [ exp("r1","m1",1000,"exact",{m1:100,m2:200,m3:700}) ])));
+      ok("settlement == legacy",      equivale("ST0001", grp("ST0001", M, [ exp("r1","m1",900,"equal",{m1:1,m2:1,m3:1}), pay("r2","m2","m1",300) ])));
+      ok("misto (tutti i tipi) == legacy", equivale("MX0001", grp("MX0001", M, [
+        exp("r1","m1",1000,"shares",{m1:1,m2:2,m3:1}), exp("r2","m2",600,"exact",{m1:200,m2:200,m3:200}), pay("r3","m3","m1",150) ])));
+      // --- valori attesi espliciti (equal 1000 su 3: 333/333/334) ---
+      var pEq = proj("EQ0002", grp("EQ0002", M, [ exp("r1","m1",1000,"equal",{m1:1,m2:1,m3:1}) ]));
+      var nEq = window.sharedRuntime._balancesFrom(pEq.members, pEq.transactions);
+      ok("equal m1=+667", nEq["EQ0002:m1"] === 667);
+      ok("equal m2=-333", nEq["EQ0002:m2"] === -333);
+      ok("equal m3=-334", nEq["EQ0002:m3"] === -334);
+      // --- membro inattivo nello storico: resta nel calcolo (NUOVA semantica) ---
+      var Minact = [{ id:"m1", name:"A" }, { id:"m2", name:"B" }, { id:"m3", name:"C", deleted:true }];
+      var pIn = proj("IN0001", grp("IN0001", Minact, [ exp("r1","m3",900,"equal",{m1:1,m2:1,m3:1}) ]));
+      var nIn = window.sharedRuntime._balancesFrom(pIn.members, pIn.transactions);
+      ok("inattivo m3 incluso (+600)", nIn["IN0001:m3"] === 600);
+      ok("inattivo: m1=-300", nIn["IN0001:m1"] === -300);
+      ok("inattivo: zero-sum", zeroSum(nIn));
+      // --- piu' spazi completamente isolati ---
+      var pa = proj("SPA001", grp("SPA001", M, [ exp("r1","m1",300,"equal",{m1:1,m2:1,m3:1}) ]));
+      var pb = proj("SPB001", grp("SPB001", M, [ exp("r1","m2",600,"equal",{m1:1,m2:1,m3:1}) ]));
+      var na = window.sharedRuntime._balancesFrom(pa.members, pa.transactions);
+      var nb = window.sharedRuntime._balancesFrom(pb.members, pb.transactions);
+      ok("spazio A isolato (m1=+200)", na["SPA001:m1"] === 200);
+      ok("spazio B isolato (m2=+400)", nb["SPB001:m2"] === 400);
+      ok("nessuna chiave A dentro B", Object.keys(nb).every(function(k){ return k.indexOf("SPB001:") === 0; }));
+      var mescolatoThrow = false;
+      try { window.sharedRuntime._balancesFrom(pa.members, pa.transactions.concat(pb.transactions)); } catch(e){ mescolatoThrow = true; }
+      ok("cross-space respinto (fail-closed)", mescolatoThrow);
+      // --- settlement plan (riusa settle puro) ---
+      var pPlan = proj("PL0001", grp("PL0001", M, [ exp("r1","m1",900,"equal",{m1:1,m2:1,m3:1}) ]));
+      var plan = window.sharedRuntime._settlementPlanFrom(pPlan.members, pPlan.transactions);
+      var incassoM1 = plan.filter(function(x){ return x.to === "PL0001:m1"; }).reduce(function(s,x){ return s + x.amount; }, 0);
+      ok("settlement plan salda verso m1 (600)", incassoM1 === 600);
+      ok("settlement plan: solo membri dello spazio", plan.every(function(x){ return x.from.indexOf("PL0001:") === 0 && x.to.indexOf("PL0001:") === 0; }));
+      // --- fail-closed su record invalidi ---
+      var membriOk = [{ id:"s:m1" }, { id:"s:m2" }];
+      function throws(txs){ try { window.sharedRuntime._balancesFrom(membriOk, txs); return false; } catch(e){ return true; } }
+      ok("fail: allocazioni != amount", throws([{ id:"x", type:"expense", amount:1000, paidById:"s:m1", allocations:[{memberId:"s:m1",amount:400},{memberId:"s:m2",amount:500}] }]));
+      ok("fail: payer inesistente",     throws([{ id:"x", type:"expense", amount:100, paidById:"s:zz", allocations:[{memberId:"s:m1",amount:100}] }]));
+      ok("fail: allocatee inesistente", throws([{ id:"x", type:"expense", amount:100, paidById:"s:m1", allocations:[{memberId:"s:zz",amount:100}] }]));
+      ok("fail: settlement from/to inesistente", throws([{ id:"x", type:"settlement", amount:100, fromMemberId:"s:zz", toMemberId:"s:m1" }]));
+      ok("fail: settlement from===to",  throws([{ id:"x", type:"settlement", amount:100, fromMemberId:"s:m1", toMemberId:"s:m1" }]));
+      ok("fail: amount non intero",     throws([{ id:"x", type:"expense", amount:10.5, paidById:"s:m1", allocations:[{memberId:"s:m1",amount:10.5}] }]));
+      ok("fail: amount <= 0",           throws([{ id:"x", type:"expense", amount:0, paidById:"s:m1", allocations:[{memberId:"s:m1",amount:0}] }]));
+      ok("fail: tipo non supportato",   throws([{ id:"x", type:"income", amount:100, paidById:"s:m1", allocations:[{memberId:"s:m1",amount:100}] }]));
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    },
+  };
+})();
+/* F4P2-SHARED-END */
+</script>
+<!-- ==== /MODULE: shared-runtime ==== -->
+
 <script>
 "use strict";
 /* F1 Passo 2 — attivazione IndexedDB al boot SOLO per il dominio Personale.
