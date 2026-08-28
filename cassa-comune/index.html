@@ -621,6 +621,23 @@ body.no-splash #app{animation:none}
 .sw-none{background:rgba(255,255,255,.92);display:grid;place-items:center;color:var(--grigio);font-size:15px}
 .sub-icon-in{max-width:120px;text-align:center;font-size:22px}
 .sub-form .err{color:var(--rosso);font-size:13px;font-weight:600;margin:2px 0 14px}
+/* ---------- F3P5B · tag nel form completo ---------- */
+.tag-chips{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 9px}
+.tag-chips:empty{display:none}
+.tag-chip{display:inline-flex;align-items:center;gap:6px;min-height:34px;
+  padding:5px 6px 5px 13px;border-radius:99px;background:var(--sole);color:#fff;
+  font-size:14px;font-weight:700;box-shadow:0 4px 14px rgba(123,92,255,.24)}
+.tag-chip-x{border:0;background:rgba(255,255,255,.22);color:#fff;width:24px;height:24px;
+  border-radius:50%;font-size:16px;line-height:1;font-weight:700;padding:0;
+  display:grid;place-items:center;cursor:pointer;transition:transform .3s var(--curva)}
+.tag-chip-x:active{transform:scale(.85)}
+.tag-suggest-box{display:flex;flex-wrap:wrap;gap:8px;margin:9px 0 4px}
+.tag-suggest{min-height:34px;padding:6px 14px;border-radius:99px;border:0;
+  background:rgba(255,255,255,.7);color:var(--inchiostro);font-family:var(--sf);
+  font-size:14px;font-weight:600;box-shadow:0 2px 8px rgba(26,18,48,.08);
+  transition:transform .3s var(--curva)}
+.tag-suggest:active{transform:scale(.9)}
+.tag-err{color:var(--rosso);font-size:13px;font-weight:600;margin:2px 0 0}
 .sub-toast{position:fixed;left:50%;bottom:calc(28px + env(safe-area-inset-bottom));z-index:90;
   transform:translateX(-50%) translateY(20px);background:var(--inchiostro);color:#fff;
   padding:11px 20px;border-radius:99px;font-size:14px;font-weight:600;
@@ -1426,6 +1443,11 @@ body.no-splash #app{animation:none}
       <input id="txn-merchant" type="text" autocomplete="off" placeholder="Es. Spesa al Conad" maxlength="80">
       <label class="lbl" for="txn-note">Nota <span class="lbl-opt">(opzionale)</span></label>
       <input id="txn-note" type="text" autocomplete="off" maxlength="140">
+      <label class="lbl" for="txn-tags-input">Tag <span class="lbl-opt">(opzionale)</span></label>
+      <div class="tag-chips" id="txn-tags-chips"></div>
+      <input id="txn-tags-input" type="text" autocomplete="off" placeholder="Aggiungi un tag e premi Invio" maxlength="24">
+      <p class="err tag-err" id="txn-tags-err" hidden></p>
+      <div class="tag-suggest-box" id="txn-tags-suggest" hidden></div>
       <p class="err" id="txn-err" hidden></p>
       <div class="due">
         <button class="btn btn-ghost" type="button" data-p8-back>Annulla</button>
@@ -5216,7 +5238,7 @@ if ("serviceWorker" in navigator){
   if (!ovMese || !ovTxn) return;   // F2P0: non dipende piu' dal launcher legacy
 
   var curMonth = null;
-  var txnState = { id:null, type:"expense", prov:{ accountId:null, categoryId:null } };
+  var txnState = { id:null, type:"expense", prov:{ accountId:null, categoryId:null }, tags:[] };
 
   /* ---- formattazione ---- */
   function pad2(n){ return (n < 10 ? "0" : "") + n; }
@@ -5374,6 +5396,58 @@ if ("serviceWorker" in navigator){
     Array.prototype.forEach.call($("txn-type").children, function(b){ b.classList.toggle("is-on", b.dataset.type === txnState.type); });
   }
 
+  /* ---- F3P5B: tag nel form completo (riuso manuale, nessun suggerimento automatico) ---- */
+  var txnVocab = [];   // vocabolario tag caricato all'apertura, solo per riuso tappabile
+  function tagSanitizeOne(raw){ var a = PR.transactions.sanitizeTags([raw]); return a.length ? a[0] : null; }
+  function clearTagErr(){ var e = $("txn-tags-err"); if (e){ e.hidden = true; e.textContent = ""; } }
+  function showTagErr(msg){ var e = $("txn-tags-err"); if (e){ e.textContent = msg; e.hidden = false; } }
+  function renderTagChips(){
+    var box = $("txn-tags-chips"); box.textContent = "";
+    txnState.tags.forEach(function(tag){
+      var chip = doc.createElement("span"); chip.className = "tag-chip";
+      var lab = doc.createElement("span"); lab.textContent = tag; chip.appendChild(lab);
+      var x = doc.createElement("button"); x.type = "button"; x.className = "tag-chip-x";
+      x.setAttribute("aria-label", "Rimuovi " + tag); x.textContent = "×";
+      x.onclick = function(){ removeTag(tag); };
+      chip.appendChild(x); box.appendChild(chip);
+    });
+  }
+  function renderTagSuggest(){
+    var box = $("txn-tags-suggest"); box.textContent = "";
+    var shown = 0;
+    for (var i = 0; i < txnVocab.length && shown < 12; i++){
+      var tag = txnVocab[i];
+      if (txnState.tags.indexOf(tag) >= 0) continue;   // gia' selezionato -> non riproporre
+      var b = doc.createElement("button"); b.type = "button"; b.className = "tag-suggest"; b.textContent = tag;
+      (function(t){ b.onclick = function(){ addTagValue(t); }; })(tag);
+      box.appendChild(b); shown++;
+    }
+    box.hidden = shown === 0;
+  }
+  // Aggiunge un tag gia' canonico (dai chip di riuso). Silenzioso su dedup; errore leggero al limite.
+  function addTagValue(c){
+    if (!c || txnState.tags.indexOf(c) >= 0) return;
+    if (txnState.tags.length >= 8){ showTagErr("Puoi aggiungere al massimo 8 tag."); return; }
+    txnState.tags.push(c); clearTagErr(); renderTagChips(); renderTagSuggest();
+  }
+  // Commit dal campo di testo (Invio o virgola). Normalizza, dedup, rispetta il limite.
+  function addTagFromInput(inp){
+    var raw = inp.value;
+    if (!raw.trim()){ return; }
+    var c = tagSanitizeOne(raw);
+    if (!c){ inp.value = ""; clearTagErr(); return; }                        // solo punteggiatura/spazi
+    if (txnState.tags.indexOf(c) >= 0){ inp.value = ""; clearTagErr(); return; }   // dedup silenzioso
+    if (txnState.tags.length >= 8){ showTagErr("Puoi aggiungere al massimo 8 tag."); return; }   // mantiene il testo
+    txnState.tags.push(c); inp.value = ""; clearTagErr(); renderTagChips(); renderTagSuggest();
+  }
+  function removeTag(tag){
+    var i = txnState.tags.indexOf(tag); if (i < 0) return;
+    txnState.tags.splice(i, 1); clearTagErr(); renderTagChips(); renderTagSuggest();
+  }
+  $("txn-tags-input").addEventListener("keydown", function(e){
+    if (e.key === "Enter" || e.key === ","){ e.preventDefault(); addTagFromInput(e.target); }   // Enter/virgola creano; Enter non invia il form
+  });
+
   async function openTxn(id, prefill){
     var rec = id ? await PR.transactions.get(id) : null;
     if (id && !rec) return;   // eliminata nel frattempo
@@ -5398,6 +5472,11 @@ if ("serviceWorker" in navigator){
       await fillCategorySelect(txnState.type, rec ? rec.categoryId : (pf.categoryId || null));
     }
     $("txn-delete").hidden = !rec;
+    // F3P5B: tag del record in edit, oppure eventuali tag nella bozza (Quick Add "Più dettagli").
+    txnState.tags = PR.transactions.sanitizeTags(rec ? rec.tags : (pf.tags || []));
+    $("txn-tags-input").value = ""; clearTagErr();
+    try { txnVocab = (await PR.tags.vocabulary()).map(function(v){ return v.tag; }); } catch(e){ txnVocab = []; }
+    renderTagChips(); renderTagSuggest();
     lock(); ovTxn.hidden = false; ovTxn.querySelector(".sub-body").scrollTop = 0;
     setTimeout(function(){ $("txn-amt").focus(); }, 60);
   }
@@ -5440,12 +5519,14 @@ if ("serviceWorker" in navigator){
       if (fromId === toId){ err.textContent = "Il conto di partenza e quello di arrivo devono essere diversi."; err.hidden = false; return; }
       data = { type: "transfer", amount: cents, date: $("txn-date").value,
         fromAccountId: fromId, toAccountId: toId,
-        merchant: $("txn-merchant").value.trim() || null, note: $("txn-note").value.trim() || null };
+        merchant: $("txn-merchant").value.trim() || null, note: $("txn-note").value.trim() || null,
+        tags: txnState.tags };   // F3P5B
     } else {
       var accId = $("txn-account").value || null, catId = $("txn-category").value || null;
       data = { type: txnState.type, amount: cents, date: $("txn-date").value,
         accountId: accId, categoryId: catId,
         merchant: $("txn-merchant").value.trim() || null, note: $("txn-note").value.trim() || null,
+        tags: txnState.tags,   // F3P5B
         learningProvenance: { accountId: accId ? txnState.prov.accountId : null,
                               categoryId: catId ? txnState.prov.categoryId : null } };   // F3P2
     }
