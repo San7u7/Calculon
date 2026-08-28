@@ -638,6 +638,15 @@ body.no-splash #app{animation:none}
   transition:transform .3s var(--curva)}
 .tag-suggest:active{transform:scale(.9)}
 .tag-err{color:var(--rosso);font-size:13px;font-weight:600;margin:2px 0 0}
+/* ---------- F3P5C · gestione tag (Impostazioni) ---------- */
+.tag-edit{background:rgba(255,255,255,.72);border-radius:var(--r-sm);
+  padding:14px;margin-bottom:10px;box-shadow:0 4px 14px rgba(26,18,48,.06)}
+.tag-edit .tag-edit-name{font-weight:700;font-size:15px;margin:0 0 10px;overflow-wrap:anywhere}
+.tag-edit .nota{margin:0 0 12px}
+.tag-edit input[type=text]{margin-bottom:10px}
+.tag-edit .err{margin:0 0 10px}
+.tag-edit .due{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.tag-edit .due .btn{width:100%}
 .sub-toast{position:fixed;left:50%;bottom:calc(28px + env(safe-area-inset-bottom));z-index:90;
   transform:translateX(-50%) translateY(20px);background:var(--inchiostro);color:#fff;
   padding:11px 20px;border-radius:99px;font-size:14px;font-weight:600;
@@ -1379,6 +1388,21 @@ body.no-splash #app{animation:none}
   </div>
 </div>
 
+<!-- ============ F3P5C · TAG (sotto-schermata Impostazioni) ============ -->
+<div class="subscreen" id="ov-tags" hidden>
+  <div class="sub-head">
+    <button class="sub-back" type="button" id="tags-back">‹ Indietro</button>
+    <span class="sub-title">Tag</span>
+  </div>
+  <div class="sub-body">
+    <p class="appr-intro">I tag ti aiutano a ritrovare i movimenti. Qui puoi rinominarli o eliminarli: le modifiche valgono su tutto lo storico.</p>
+    <div class="sub-empty" id="tags-empty" hidden>
+      <p class="nota">Non hai ancora usato nessun tag.</p>
+    </div>
+    <div id="tags-list"></div>
+  </div>
+</div>
+
 <!-- ============ F1P8 · MESE (superficie autonoma del dominio Personale) ============ -->
 <div class="subscreen" id="ov-mese" hidden>
   <div class="sub-head">
@@ -1640,6 +1664,7 @@ body.no-splash #app{animation:none}
       <button class="home-link" type="button" id="home-conti">Conti</button>
       <button class="home-link" type="button" id="home-categorie">Categorie</button>
       <button class="home-link" type="button" id="home-apprendi">Apprendimento</button>
+      <button class="home-link" type="button" id="home-tags">Tag</button>
     </div>
   </div>
 </div>
@@ -6946,5 +6971,133 @@ if ("serviceWorker" in navigator){
 /* F3P4B-LEARN-UI-END */
 </script>
 <!-- ==== /MODULE: learn-ui ==== -->
+
+<script>
+"use strict";
+/* F3P5C-TAG-UI-START */
+/* F3 Passo 5C — Gestione tag (Impostazioni del Personale). Usa ESCLUSIVAMENTE
+   personalRuntime.tags (vocabulary / rename / delete): nessun nuovo store, nessun
+   accesso diretto a IndexedDB, niente colori/icone/gerarchie, niente #tag nel Quick
+   Add, nessun suggerimento automatico, nessun tocco a F2 o al learning. rename/delete
+   modificano lo storico dei movimenti (comportamento del data layer 5A), i movimenti
+   NON vengono eliminati. Overlay fisso autonomo, aperto dalle Impostazioni della Home. */
+(function(){
+  var PR = window.personalRuntime;
+  if (!PR || !PR.tags) return;
+  var doc = document;
+  function $(id){ return doc.getElementById(id); }
+  var ov = $("ov-tags");
+  if (!ov) return;
+
+  /* ---- toast ---- */
+  var toastEl = $("sub-toast"), toastT = null;
+  function toast(msg){
+    if (!toastEl) return;
+    toastEl.textContent = msg; toastEl.hidden = false;
+    void toastEl.offsetWidth; toastEl.classList.add("show");
+    if (toastT) clearTimeout(toastT);
+    toastT = setTimeout(function(){ toastEl.classList.remove("show"); setTimeout(function(){ toastEl.hidden = true; }, 260); }, 1500);
+  }
+
+  /* ---- blocco scroll di sfondo ---- */
+  var locks = 0;
+  function lockBody(){ locks++; doc.body.style.overflow = "hidden"; }
+  function unlockBody(){ locks = Math.max(0, locks - 1); if (!locks) doc.body.style.overflow = ""; }
+
+  // Solo una riga per volta puo' essere in modifica/conferma.
+  var editing = null;   // { tag:"...", mode:"rename"|"delete" }
+
+  function countLabel(n){ return n === 1 ? "1 movimento" : n + " movimenti"; }
+
+  function el(tag, cls, txt){ var e = doc.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
+
+  // Riga normale: # · nome · conteggio · Rinomina / Elimina
+  function normalRow(v){
+    var row = el("div", "sub-row");
+    var dot = el("span", "sub-dot", "#");
+    row.appendChild(dot);
+    row.appendChild(el("span", "sub-name", v.tag));
+    row.appendChild(el("span", "sub-badge", countLabel(v.count)));
+    var act = el("span", "sub-actions");
+    var bR = el("button", "sub-mini", "Rinomina"); bR.type = "button";
+    bR.onclick = function(){ editing = { tag:v.tag, mode:"rename" }; render(); };
+    var bD = el("button", "sub-mini muted", "Elimina"); bD.type = "button";
+    bD.onclick = function(){ editing = { tag:v.tag, mode:"delete" }; render(); };
+    act.appendChild(bR); act.appendChild(bD);
+    row.appendChild(act);
+    return row;
+  }
+
+  // Pannello rinomina: input nuovo nome + copy sullo storico + Salva/Annulla.
+  function renamePanel(v){
+    var box = el("div", "tag-edit");
+    box.appendChild(el("p", "tag-edit-name", v.tag));
+    var inp = el("input"); inp.type = "text"; inp.setAttribute("autocomplete", "off");
+    inp.maxLength = 24; inp.value = v.tag; inp.placeholder = "Nuovo nome";
+    box.appendChild(inp);
+    box.appendChild(el("p", "nota", "Il nuovo nome verrà aggiornato in tutti i movimenti che usano questo tag."));
+    var err = el("p", "err"); err.hidden = true; box.appendChild(err);
+    var due = el("div", "due");
+    var cancel = el("button", "btn btn-ghost", "Annulla"); cancel.type = "button";
+    cancel.onclick = function(){ editing = null; render(); };
+    var save = el("button", "btn btn-primary", "Salva"); save.type = "button";
+    save.onclick = async function(){
+      var c = PR.tags.sanitize([inp.value]); c = c.length ? c[0] : null;
+      if (!c){ err.textContent = "Scrivi un nome valido."; err.hidden = false; return; }
+      try { await PR.tags.rename(v.tag, c); }
+      catch(ex){ err.textContent = String((ex && ex.message) || ex); err.hidden = false; return; }
+      editing = null; await render(); toast(c === v.tag ? "Nessuna modifica" : "Tag rinominato");
+    };
+    due.appendChild(cancel); due.appendChild(save);
+    box.appendChild(due);
+    setTimeout(function(){ inp.focus(); inp.select(); }, 40);
+    return box;
+  }
+
+  // Pannello conferma eliminazione: modifica lo storico -> conferma esplicita.
+  function deletePanel(v){
+    var box = el("div", "tag-edit");
+    box.appendChild(el("p", "tag-edit-name", v.tag));
+    box.appendChild(el("p", "nota", "Rimuoverò questo tag da " + countLabel(v.count) + ". I movimenti non verranno eliminati."));
+    var err = el("p", "err"); err.hidden = true; box.appendChild(err);
+    var due = el("div", "due");
+    var cancel = el("button", "btn btn-ghost", "Annulla"); cancel.type = "button";
+    cancel.onclick = function(){ editing = null; render(); };
+    var conf = el("button", "btn btn-primary", "Elimina il tag"); conf.type = "button";
+    conf.onclick = async function(){
+      try { await PR.tags.delete(v.tag); }
+      catch(ex){ err.textContent = String((ex && ex.message) || ex); err.hidden = false; return; }
+      editing = null; await render(); toast("Tag eliminato");
+    };
+    due.appendChild(cancel); due.appendChild(conf);
+    box.appendChild(due);
+    return box;
+  }
+
+  async function render(){
+    var vocab = await PR.tags.vocabulary();   // ordinamento (freq desc, poi alfabetico) fornito dal runtime
+    var list = $("tags-list"); list.textContent = "";
+    $("tags-empty").hidden = vocab.length > 0;
+    // Se il tag in modifica non esiste piu' (es. dopo delete/merge), esci dallo stato di modifica.
+    if (editing && !vocab.some(function(v){ return v.tag === editing.tag; })) editing = null;
+    vocab.forEach(function(v){
+      if (editing && editing.tag === v.tag){
+        list.appendChild(editing.mode === "rename" ? renamePanel(v) : deletePanel(v));
+      } else {
+        list.appendChild(normalRow(v));
+      }
+    });
+  }
+
+  async function open(){ editing = null; lockBody(); ov.hidden = false; ov.querySelector(".sub-body").scrollTop = 0; try { await PR.seedDefaults(); } catch(e){} await render(); }
+  function close(){ ov.hidden = true; unlockBody(); }
+  window.calculonTags = { open: open };
+
+  $("tags-back").onclick = function(){ if (editing){ editing = null; render(); } else close(); };
+  if ($("home-tags")) $("home-tags").onclick = function(){ open(); };
+})();
+/* F3P5C-TAG-UI-END */
+</script>
+
 </body>
 </html>
