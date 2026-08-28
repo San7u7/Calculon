@@ -3536,7 +3536,40 @@ if ("serviceWorker" in navigator){
       }
       transactions.push(base);
     }
+    var _sv = validaSpace(space);   // guardia F4/1: lo space proiettato deve rispettare il modello canonico
+    if (_sv) throw new Error("space non valido: " + _sv);
     return { space: space, members: members, transactions: transactions };
+  }
+
+  // ---- F4/Passo 1: modello canonico del ciclo di vita degli Spazi ----
+  // kind + status sono l'UNICA autorita' sul ciclo di vita di uno spazio.
+  // Solo definizione/validazione: nessuna UI, nessun write-path shared, nessun adapter,
+  // nessun dual-write, nessun sync, nessuna E2EE. Worker/wire legacy invariati.
+  var SPACE_KINDS = ["personal", "experience", "ongoing"];
+  var SPACE_STATUS = {
+    personal:   [null],                         // spazio locale personale: nessuno stato di ciclo di vita
+    experience: ["active", "settled", "archived"],
+    ongoing:    ["active", "archived"],         // ongoing NON usa "settled": un contesto persistente non si salda-e-chiude
+  };
+  function statusValidiPer(kind){ var a = SPACE_STATUS[kind]; return a ? a.slice() : null; }
+  function validaSpace(sp){
+    if (!sp || typeof sp !== "object") return "space assente";
+    if (SPACE_KINDS.indexOf(sp.kind) < 0) return "kind sconosciuto: " + sp.kind;
+    var ammessi = SPACE_STATUS[sp.kind];
+    var st = ("status" in sp) ? sp.status : null;   // status assente = null
+    if (ammessi.indexOf(st) < 0) return sp.kind + ": status non ammesso: " + String(st);
+    return null;
+  }
+  // Predisposizione conversione experience -> ongoing (azione ESPLICITA futura): PURA, nessuna persistenza.
+  // Lo storico transazioni NON viene toccato; "settled" non esiste in ongoing e si normalizza ad "active".
+  function convertiAOngoing(sp){
+    if (!sp || typeof sp !== "object") throw new Error("space assente");
+    if (sp.kind === "ongoing") return Object.assign({}, sp);                 // idempotente
+    if (sp.kind !== "experience") throw new Error("solo un experience puo' diventare ongoing");
+    var out = Object.assign({}, sp);
+    out.kind = "ongoing";
+    out.status = (sp.status === "archived") ? "archived" : "active";         // settled/active/null -> active
+    return out;
   }
 
   // Personal Space: inizializzato SEMPRE, idempotente (put solo se assente).
@@ -3687,6 +3720,39 @@ if ("serviceWorker" in navigator){
     migrationIssues: async function(){ var db = await open(); return listaMeta(db, "migrationIssue:"); },
     _collectLegacy: raccogliLegacy,       // helper per i test (sola lettura)
     _projectGroup: proiettaGruppo,        // helper per i test (proiezione pura di un gruppo)
+    // F4/1: modello canonico del ciclo di vita, esposto puro per i test (nessuna persistenza)
+    SPACE_KINDS: SPACE_KINDS.slice(),
+    SPACE_STATUS: { personal: SPACE_STATUS.personal.slice(), experience: SPACE_STATUS.experience.slice(), ongoing: SPACE_STATUS.ongoing.slice() },
+    validaSpace: validaSpace,
+    statusValidiPer: statusValidiPer,
+    convertiAOngoing: convertiAOngoing,
+    _testSpaceModel: function(){
+      var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
+      ok("personal status:null valido",        validaSpace({ id:"x", kind:"personal", status:null }) === null);
+      ok("personal senza status valido",       validaSpace({ id:"x", kind:"personal" }) === null);
+      ok("personal status:active RESPINTO",    validaSpace({ id:"x", kind:"personal", status:"active" }) !== null);
+      ok("experience active",                  validaSpace({ kind:"experience", status:"active" }) === null);
+      ok("experience settled",                 validaSpace({ kind:"experience", status:"settled" }) === null);
+      ok("experience archived",                validaSpace({ kind:"experience", status:"archived" }) === null);
+      ok("ongoing active",                     validaSpace({ kind:"ongoing", status:"active" }) === null);
+      ok("ongoing archived",                   validaSpace({ kind:"ongoing", status:"archived" }) === null);
+      ok("ongoing settled RESPINTO",           validaSpace({ kind:"ongoing", status:"settled" }) !== null);
+      ok("kind sconosciuto RESPINTO",          validaSpace({ kind:"pippo", status:"active" }) !== null);
+      var proj = proiettaGruppo("ABC123", { meta:{ name:"g", version:1, members:[{ id:"m1", name:"A" }] }, records:{} });
+      ok("migrazione: kind experience",        proj.space.kind === "experience");
+      ok("migrazione: status active",          proj.space.status === "active");
+      ok("migrazione: space valido",           validaSpace(proj.space) === null);
+      var conv = convertiAOngoing(proj.space);
+      ok("conversione: kind ongoing",          conv.kind === "ongoing");
+      ok("conversione: status active",         conv.status === "active");
+      ok("conversione settled -> active",      convertiAOngoing({ kind:"experience", status:"settled" }).status === "active");
+      ok("conversione archived resta archived",convertiAOngoing({ kind:"experience", status:"archived" }).status === "archived");
+      ok("conversione idempotente su ongoing", convertiAOngoing(conv).kind === "ongoing");
+      ok("conversione non muta l'originale",   proj.space.kind === "experience");
+      ok("validaSpace deterministico",         validaSpace(proj.space) === validaSpace(proj.space));
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    },
   };
 })();
 /* F0P3-DB-END */
