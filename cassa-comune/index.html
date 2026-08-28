@@ -632,6 +632,24 @@ body.no-splash #app{animation:none}
   text-decoration:underline;text-underline-offset:3px;padding:2px 2px}
 .sub-toast-act:active{opacity:.7}
 
+/* ---------- F3P4B · Apprendimento ---------- */
+.appr-intro{margin:2px 0 20px;font-size:14px;line-height:1.5;color:var(--grigio)}
+.appr-toggle{display:flex;align-items:center;gap:12px;justify-content:space-between;
+  background:rgba(255,255,255,.72);border-radius:var(--r-sm);padding:14px;
+  box-shadow:0 4px 14px rgba(26,18,48,.06)}
+.appr-toggle-lbl{font-weight:600;font-size:15px;flex:1;min-width:0}
+.appr-sw{flex:none;width:50px;height:30px;border-radius:99px;border:0;padding:0;
+  background:var(--carta2);position:relative;transition:background .25s ease}
+.appr-sw > i{position:absolute;top:3px;left:3px;width:24px;height:24px;border-radius:50%;
+  background:#fff;box-shadow:0 2px 6px rgba(26,18,48,.24);transition:transform .25s var(--curva)}
+.appr-sw[aria-checked="true"]{background:var(--sole)}
+.appr-sw[aria-checked="true"] > i{transform:translateX(20px)}
+.appr-note{font-size:13px;color:var(--grigio);margin:10px 2px 4px;line-height:1.45}
+.appr-sub{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+.appr-rule{font-size:13px;color:var(--grigio);overflow-wrap:anywhere}
+.appr-warn{font-size:12px;color:#A85A0C;margin-top:3px;font-weight:600;overflow-wrap:anywhere}
+.sub-row.warn{box-shadow:0 0 0 1px var(--arancio) inset,0 4px 14px rgba(26,18,48,.06)}
+
 /* ---------- F1P8 · superficie Mese + movimenti ---------- */
 .mese-nav{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:6px 0 22px}
 .mese-arrow{flex:none;width:44px;height:44px;border-radius:50%;border:0;
@@ -1264,6 +1282,86 @@ body.no-splash #app{animation:none}
   </div>
 </div>
 
+<!-- ============ F3P4B · APPRENDIMENTO (sotto-schermata Impostazioni) ============ -->
+<div class="subscreen" id="ov-apprendi" hidden>
+  <div class="sub-head">
+    <button class="sub-back" type="button" data-appr-back>‹ Indietro</button>
+    <span class="sub-title" id="appr-title">Apprendimento</span>
+  </div>
+  <div class="sub-body">
+
+    <!-- PANNELLO PRINCIPALE -->
+    <div id="appr-main">
+      <p class="appr-intro">Calculon può ricordare come classifichi certe spese. Se cambia qualcosa, glielo insegni di nuovo.</p>
+
+      <div class="appr-toggle">
+        <span class="appr-toggle-lbl">Calculon impara dalle mie correzioni</span>
+        <button type="button" class="appr-sw" id="appr-enabled" role="switch" aria-checked="true" aria-label="Apprendimento"><i></i></button>
+      </div>
+      <p class="appr-note" id="appr-toggle-note"></p>
+
+      <div class="sub-group">
+        <span class="sez-k">Regole merchant</span>
+        <button class="btn btn-primary w" type="button" id="appr-ov-add">+ Nuova regola</button>
+        <div class="sub-empty" id="appr-ov-empty" hidden>
+          <p class="nota">Nessuna regola. Fissa una categoria o un conto per un negozio, oppure silenzia un suggerimento.</p>
+        </div>
+        <div id="appr-ov-list"></div>
+      </div>
+
+      <div class="sub-group">
+        <span class="sez-k">Alias merchant</span>
+        <button class="btn btn-primary w" type="button" id="appr-al-add">+ Nuovo alias</button>
+        <div class="sub-empty" id="appr-al-empty" hidden>
+          <p class="nota">Nessun alias. Collega due nomi che indicano lo stesso posto.</p>
+        </div>
+        <div id="appr-al-list"></div>
+      </div>
+    </div>
+
+    <!-- FORM REGOLA (override) -->
+    <form class="sub-form" id="appr-ov-form" hidden novalidate>
+      <label class="lbl" for="appr-ov-merchant">Merchant</label>
+      <input id="appr-ov-merchant" type="text" autocomplete="off" placeholder="Es. Esselunga" maxlength="60">
+      <label class="lbl" for="appr-ov-type">Tipo di movimento</label>
+      <select id="appr-ov-type">
+        <option value="expense">Spesa</option>
+        <option value="income">Entrata</option>
+      </select>
+      <label class="lbl" for="appr-ov-rule">Regola</label>
+      <select id="appr-ov-rule">
+        <option value="pin:categoryId">Usa sempre questa categoria</option>
+        <option value="pin:accountId">Usa sempre questo conto</option>
+        <option value="suppress:categoryId">Non suggerire categoria</option>
+        <option value="suppress:accountId">Non suggerire conto</option>
+      </select>
+      <div id="appr-ov-valwrap">
+        <label class="lbl" for="appr-ov-value" id="appr-ov-value-lbl">Categoria</label>
+        <select id="appr-ov-value"></select>
+      </div>
+      <p class="err" id="appr-ov-err" hidden></p>
+      <div class="due">
+        <button class="btn btn-ghost" type="button" data-appr-cancel>Annulla</button>
+        <button class="btn btn-primary" type="submit">Salva</button>
+      </div>
+    </form>
+
+    <!-- FORM ALIAS -->
+    <form class="sub-form" id="appr-al-form" hidden novalidate>
+      <p class="nota" style="margin:2px 0 16px">Quando scrivo <b>l'alias</b>, consideralo <b>il merchant canonico</b>.</p>
+      <label class="lbl" for="appr-al-alias">Alias (quello che scrivo)</label>
+      <input id="appr-al-alias" type="text" autocomplete="off" placeholder="Es. Essel" maxlength="60">
+      <label class="lbl" for="appr-al-canon">Merchant canonico</label>
+      <input id="appr-al-canon" type="text" autocomplete="off" placeholder="Es. Esselunga" maxlength="60">
+      <p class="err" id="appr-al-err" hidden></p>
+      <div class="due">
+        <button class="btn btn-ghost" type="button" data-appr-cancel>Annulla</button>
+        <button class="btn btn-primary" type="submit">Salva</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <!-- ============ F1P8 · MESE (superficie autonoma del dominio Personale) ============ -->
 <div class="subscreen" id="ov-mese" hidden>
   <div class="sub-head">
@@ -1519,6 +1617,7 @@ body.no-splash #app{animation:none}
       <span class="sez-k">Impostazioni</span>
       <button class="home-link" type="button" id="home-conti">Conti</button>
       <button class="home-link" type="button" id="home-categorie">Categorie</button>
+      <button class="home-link" type="button" id="home-apprendi">Apprendimento</button>
     </div>
   </div>
 </div>
@@ -6427,6 +6526,7 @@ if ("serviceWorker" in navigator){
   $("home-see-month").onclick = function(){ (M.open || M.openMese)(); };
   $("home-conti").onclick = function(){ if (window.calculonConti) window.calculonConti.open(); };
   $("home-categorie").onclick = function(){ if (window.calculonCategorie) window.calculonCategorie.open(); };
+  $("home-apprendi").onclick = function(){ if (window.calculonApprendi) window.calculonApprendi.open(); };
 
   window.calculonHome = { render: renderHome, show: goHome, hide: goSpazi };
 
@@ -6444,6 +6544,252 @@ if ("serviceWorker" in navigator){
 <!-- ==== MODULE: analytics-ui ==== -->
 <!-- ==== /MODULE: analytics-ui ==== -->
 <!-- ==== MODULE: learn-ui ==== -->
+<script>
+"use strict";
+/* F3P4B-LEARN-UI-START */
+/* F3 Passo 4B — Micro-UI Apprendimento (Impostazioni del Personale). Usa ESCLUSIVAMENTE
+   personalRuntime.learning (toggle / override / alias) + accounts/categories per i picker
+   (solo attivi). Nessun reset memoria, niente tag, niente fuzzy, nessun tocco a F2 ne' al
+   Quick Add. Overlay fisso autonomo, aperto dalle Impostazioni della Home. */
+(function(){
+  var PR = window.personalRuntime;
+  if (!PR || !PR.learning || !PR.accounts || !PR.categories) return;
+  var L = PR.learning;
+  var doc = document;
+  function $(id){ return doc.getElementById(id); }
+  var ov = $("ov-apprendi");
+  if (!ov) return;
+
+  var TYPE_LABEL = { expense:"Spesa", income:"Entrata" };
+
+  function lockBody(){ doc.body.style.overflow = "hidden"; }
+  function unlockBody(){ doc.body.style.overflow = ""; }
+
+  var toastEl = $("sub-toast"), toastT = null;
+  function toast(msg){
+    if (!toastEl) return;
+    toastEl.textContent = msg; toastEl.hidden = false;
+    void toastEl.offsetWidth; toastEl.classList.add("show");
+    if (toastT) clearTimeout(toastT);
+    toastT = setTimeout(function(){
+      toastEl.classList.remove("show");
+      setTimeout(function(){ toastEl.hidden = true; }, 260);
+    }, 1500);
+  }
+
+  var TITLES = { main:"Apprendimento", ov:"Regola merchant", al:"Alias merchant" };
+  function setPanel(which){
+    $("appr-main").hidden = which !== "main";
+    $("appr-ov-form").hidden = which !== "ov";
+    $("appr-al-form").hidden = which !== "al";
+    $("appr-title").textContent = TITLES[which] || TITLES.main;
+    var b = ov.querySelector(".sub-body"); if (b) b.scrollTop = 0;
+    ov.dataset.panel = which;
+  }
+
+  /* ================= TOGGLE ================= */
+  async function renderToggle(){
+    var on = await L.isEnabled();
+    $("appr-enabled").setAttribute("aria-checked", on ? "true" : "false");
+    $("appr-toggle-note").textContent = on
+      ? "Dove sono sicuro compilo da solo, altrimenti propongo con discrezione."
+      : "Spento: non propongo e non compilo da solo. Quello che ho già imparato resta e torna se riaccendi.";
+  }
+  $("appr-enabled").onclick = async function(){
+    var on = await L.isEnabled();
+    await L.setEnabled(!on);
+    await renderToggle();
+    toast(!on ? "Apprendimento acceso" : "Apprendimento spento");
+  };
+
+  /* ================= REGOLE (override) ================= */
+  var accMap = {}, catMap = {};   // id -> {name,archived}; da listAll (include archiviati, esclude tombstone)
+  async function loadMaps(){
+    accMap = {}; catMap = {};
+    (await PR.accounts.listAll()).forEach(function(a){ accMap[a.id] = { name:a.name, archived:!!a.archived }; });
+    (await PR.categories.listAll()).forEach(function(c){ catMap[c.id] = { name:c.name, archived:!!c.archived, kind:c.kind }; });
+  }
+  function splitKey(k){
+    var parts = String(k).split("|");
+    var field = parts.pop(), type = parts.pop(), merchant = parts.join("|");
+    return { merchant:merchant, type:type, field:field };
+  }
+  // Testo regola + se il bersaglio di un PIN e' archiviato / sparito.
+  function describeOverride(p, o){
+    var fieldWord = (p.field === "categoryId") ? "categoria" : "conto";
+    if (o.mode === "suppress") return { text:"Non suggerire " + fieldWord, archived:false };
+    var map = (p.field === "categoryId") ? catMap : accMap;
+    var rec = map[o.value];
+    var label = (p.field === "categoryId") ? "Categoria" : "Conto";
+    if (!rec) return { text: label + ": (non più disponibile)", archived:true };
+    if (rec.archived) return { text: label + ": " + rec.name + " (archiviato)", archived:true };
+    return { text: label + ": " + rec.name, archived:false };
+  }
+  function ovRowEl(p, o){
+    var d = describeOverride(p, o);
+    var row = doc.createElement("div");
+    row.className = "sub-row" + (d.archived ? " warn" : "");
+    var dot = doc.createElement("span");
+    dot.className = "sub-dot"; dot.textContent = (o.mode === "pin") ? "📌" : "🔕";
+    row.appendChild(dot);
+    var sub = doc.createElement("div"); sub.className = "appr-sub";
+    var name = doc.createElement("span"); name.className = "sub-name"; name.textContent = p.merchant;
+    sub.appendChild(name);
+    var rule = doc.createElement("span"); rule.className = "appr-rule";
+    rule.textContent = (TYPE_LABEL[p.type] || p.type) + " · " + d.text;
+    sub.appendChild(rule);
+    if (d.archived && o.mode === "pin"){
+      var w = doc.createElement("span"); w.className = "appr-warn";
+      w.textContent = "Punta a un elemento archiviato: non viene applicata. Modificala o rimuovila.";
+      sub.appendChild(w);
+    }
+    row.appendChild(sub);
+    var act = doc.createElement("span"); act.className = "sub-actions";
+    var edit = doc.createElement("button");
+    edit.type = "button"; edit.className = "sub-mini"; edit.textContent = "Modifica";
+    edit.onclick = function(){ openOvForm(p, o); };
+    act.appendChild(edit);
+    var del = doc.createElement("button");
+    del.type = "button"; del.className = "sub-mini muted"; del.textContent = "Rimuovi";
+    del.onclick = async function(){
+      await L.removeOverride(p.merchant, p.type, p.field);
+      await renderOverrides(); toast("Regola rimossa");
+    };
+    act.appendChild(del);
+    row.appendChild(act);
+    return row;
+  }
+  async function renderOverrides(){
+    await loadMaps();
+    var ovs = await L.getOverrides();
+    var keys = Object.keys(ovs).sort();
+    var box = $("appr-ov-list"); box.textContent = "";
+    $("appr-ov-empty").hidden = keys.length > 0;
+    keys.forEach(function(k){
+      var p = splitKey(k);
+      if (p.field !== "categoryId" && p.field !== "accountId") return;   // difensivo
+      box.appendChild(ovRowEl(p, ovs[k]));
+    });
+  }
+
+  /* ---- form regola ---- */
+  var editOv = null;   // {merchant,type,field} originale: per togliere la vecchia chiave se cambia
+  function parseRule(){ var v = $("appr-ov-rule").value.split(":"); return { mode:v[0], field:v[1] }; }
+  async function fillValuePicker(preId){
+    var r = parseRule();
+    var wrap = $("appr-ov-valwrap"), sel = $("appr-ov-value"), lbl = $("appr-ov-value-lbl");
+    if (r.mode !== "pin"){ wrap.hidden = true; sel.innerHTML = ""; return; }
+    wrap.hidden = false;
+    var type = $("appr-ov-type").value, list;
+    if (r.field === "categoryId"){
+      lbl.textContent = "Categoria";
+      list = (await PR.categories.listActive()).filter(function(c){ return c.kind === type; });   // solo attivi + coerenti col type
+    } else {
+      lbl.textContent = "Conto";
+      list = await PR.accounts.listActive();   // solo attivi
+    }
+    sel.innerHTML = "";
+    list.forEach(function(x){ var o = doc.createElement("option"); o.value = x.id; o.textContent = x.name; sel.appendChild(o); });
+    if (preId){ for (var i = 0; i < sel.options.length; i++){ if (sel.options[i].value === preId){ sel.value = preId; break; } } }
+  }
+  function openOvForm(p, o){
+    editOv = p ? { merchant:p.merchant, type:p.type, field:p.field } : null;
+    $("appr-ov-err").hidden = true;
+    $("appr-ov-merchant").value = p ? p.merchant : "";
+    $("appr-ov-type").value = p ? p.type : "expense";
+    $("appr-ov-rule").value = p ? (o.mode + ":" + p.field) : "pin:categoryId";
+    fillValuePicker(o && o.mode === "pin" ? o.value : null);
+    setPanel("ov");
+    setTimeout(function(){ $("appr-ov-merchant").focus(); }, 60);
+  }
+  $("appr-ov-add").onclick = function(){ openOvForm(null, null); };
+  $("appr-ov-rule").onchange = function(){ fillValuePicker(null); };
+  $("appr-ov-type").onchange = function(){ if (parseRule().field === "categoryId") fillValuePicker(null); };
+  $("appr-ov-form").addEventListener("submit", async function(e){
+    e.preventDefault();
+    var err = $("appr-ov-err"); err.hidden = true;
+    var merchant = $("appr-ov-merchant").value.trim();
+    if (!merchant){ err.textContent = "Scrivi il nome del merchant."; err.hidden = false; return; }
+    var type = $("appr-ov-type").value, r = parseRule();
+    var value = (r.mode === "pin") ? ($("appr-ov-value").value || null) : null;
+    if (r.mode === "pin" && !value){ err.textContent = (r.field === "categoryId" ? "Scegli una categoria." : "Scegli un conto."); err.hidden = false; return; }
+    try {
+      if (editOv && (editOv.merchant !== L.normMerchant(merchant) || editOv.type !== type || editOv.field !== r.field)){
+        await L.removeOverride(editOv.merchant, editOv.type, editOv.field);   // chiave cambiata -> rimuovo la vecchia
+      }
+      await L.setOverride(merchant, type, r.field, r.mode, value);
+    } catch(ex){ err.textContent = String((ex && ex.message) || ex); err.hidden = false; return; }
+    editOv = null;
+    setPanel("main"); await renderOverrides(); toast("Regola salvata");
+  });
+
+  /* ================= ALIAS ================= */
+  function alRowEl(alias, canon){
+    var row = doc.createElement("div"); row.className = "sub-row";
+    var dot = doc.createElement("span"); dot.className = "sub-dot"; dot.textContent = "↦"; row.appendChild(dot);
+    var sub = doc.createElement("div"); sub.className = "appr-sub";
+    var name = doc.createElement("span"); name.className = "sub-name"; name.textContent = alias; sub.appendChild(name);
+    var rule = doc.createElement("span"); rule.className = "appr-rule"; rule.textContent = "→ " + canon; sub.appendChild(rule);
+    row.appendChild(sub);
+    var act = doc.createElement("span"); act.className = "sub-actions";
+    var edit = doc.createElement("button"); edit.type = "button"; edit.className = "sub-mini"; edit.textContent = "Modifica";
+    edit.onclick = function(){ openAlForm(alias, canon); }; act.appendChild(edit);
+    var del = doc.createElement("button"); del.type = "button"; del.className = "sub-mini muted"; del.textContent = "Rimuovi";
+    del.onclick = async function(){ await L.removeAlias(alias); await renderAliases(); toast("Alias rimosso"); };
+    act.appendChild(del);
+    row.appendChild(act);
+    return row;
+  }
+  async function renderAliases(){
+    var al = await L.getAliases();
+    var keys = Object.keys(al).sort();
+    var box = $("appr-al-list"); box.textContent = "";
+    $("appr-al-empty").hidden = keys.length > 0;
+    keys.forEach(function(k){ box.appendChild(alRowEl(k, al[k])); });
+  }
+  var editAl = null;   // alias originale
+  function openAlForm(alias, canon){
+    editAl = alias || null;
+    $("appr-al-err").hidden = true;
+    $("appr-al-alias").value = alias || "";
+    $("appr-al-canon").value = canon || "";
+    setPanel("al");
+    setTimeout(function(){ $("appr-al-alias").focus(); }, 60);
+  }
+  $("appr-al-add").onclick = function(){ openAlForm(null, null); };
+  $("appr-al-form").addEventListener("submit", async function(e){
+    e.preventDefault();
+    var err = $("appr-al-err"); err.hidden = true;
+    var alias = $("appr-al-alias").value.trim(), canon = $("appr-al-canon").value.trim();
+    try {
+      if (editAl && editAl !== L.normMerchant(alias)) await L.removeAlias(editAl);   // alias cambiato -> rimuovo il vecchio
+      await L.setAlias(alias, canon);
+    } catch(ex){ err.textContent = String((ex && ex.message) || ex); err.hidden = false; return; }
+    editAl = null;
+    setPanel("main"); await renderAliases(); toast("Alias salvato");
+  });
+
+  /* ================= APERTURA / CHIUSURA ================= */
+  async function open(){
+    lockBody(); ov.hidden = false; setPanel("main");
+    try { await PR.seedDefaults(); } catch(e){}
+    await renderToggle(); await renderOverrides(); await renderAliases();
+  }
+  function close(){ ov.hidden = true; unlockBody(); }
+  window.calculonApprendi = { open: open };
+
+  Array.prototype.forEach.call(ov.querySelectorAll("[data-appr-back]"), function(btn){
+    btn.onclick = function(){
+      if (ov.dataset.panel && ov.dataset.panel !== "main"){ editOv = null; editAl = null; setPanel("main"); }
+      else close();
+    };
+  });
+  Array.prototype.forEach.call(ov.querySelectorAll("[data-appr-cancel]"), function(btn){
+    btn.onclick = function(){ editOv = null; editAl = null; setPanel("main"); };
+  });
+})();
+/* F3P4B-LEARN-UI-END */
+</script>
 <!-- ==== /MODULE: learn-ui ==== -->
 </body>
 </html>
