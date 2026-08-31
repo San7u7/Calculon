@@ -3497,7 +3497,7 @@ if ("serviceWorker" in navigator){
     var sid = spaceIdOf(gid);
     var space = { id: sid, name: meta.name, kind: "experience", status: "active",
       currency: "EUR", encrypted: false, keyVersion: null, icon: null, color: null,
-      legacyGroupId: gid,
+      legacyGroupId: gid, authority: "legacy",   // F4/6B: uno spazio legacy proiettato ha authority legacy (write-path nativo bloccato)
       version: (meta.version | 0), deviceId: (meta.deviceId != null ? meta.deviceId : null),
       updatedAt: (meta.updatedAt != null ? meta.updatedAt : null) };
     if (meta.dataInizio != null) space.dataInizio = meta.dataInizio;   // estensione legacy preservata
@@ -3558,6 +3558,8 @@ if ("serviceWorker" in navigator){
     var ammessi = SPACE_STATUS[sp.kind];
     var st = ("status" in sp) ? sp.status : null;   // status assente = null
     if (ammessi.indexOf(st) < 0) return sp.kind + ": status non ammesso: " + String(st);
+    // F4/6B: authority (se presente) deve essere legacy|native; il personal non la usa (null/assente).
+    if (sp.authority != null && sp.authority !== "legacy" && sp.authority !== "native") return "authority invalida: " + String(sp.authority);
     return null;
   }
   // Predisposizione conversione experience -> ongoing (azione ESPLICITA futura): PURA, nessuna persistenza.
@@ -3920,6 +3922,15 @@ if ("serviceWorker" in navigator){
 (function(){
   function db(){ return window.calculonDB; }
   function centInt(n){ return typeof n === "number" && isFinite(n) && Math.floor(n) === n; }
+  // F4/6B — authority effettiva di uno spazio (fail-closed). Migrazione deterministica dei record
+  // pre-6B senza toccare i dati: authority assente => legacy se c'e' legacyGroupId, altrimenti native.
+  // Il personal (kind != experience|ongoing) non usa authority -> null.
+  function authorityEffettiva(sp){
+    if (!sp || (sp.kind !== "experience" && sp.kind !== "ongoing")) return null;
+    if (sp.authority == null) return sp.legacyGroupId ? "legacy" : "native";
+    if (sp.authority !== "legacy" && sp.authority !== "native") throw new Error("authority invalida: " + String(sp.authority));
+    return sp.authority;
+  }
   // F4/5E — date canonica YYYY-MM-DD (fail-closed): nessun default silenzioso a oggi nel data layer.
   function validDateStr(d){
     if (typeof d !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(d)) return false;
@@ -4086,8 +4097,10 @@ if ("serviceWorker" in navigator){
     if (!spaceId) throw new Error("spaceId richiesto");
     var sp = await db().get("spaces", spaceId);
     if (!sp || sp.deleted === true) throw new Error("spazio inesistente: " + spaceId);
-    if (sp.legacyGroupId) throw new Error("spazio legacy: read-only in questo passo");
     if (sp.kind !== "experience" && sp.kind !== "ongoing") throw new Error("spazio non shared: kind " + sp.kind);
+    // F4/6B: write consentito SOLO se authority native. Un legacy (authority legacy) resta read-only;
+    // il legacyGroupId da solo non blocca piu' (un futuro cut-over legacy+native e' modellisticamente scrivibile).
+    if (authorityEffettiva(sp) !== "native") throw new Error("spazio non scrivibile: authority " + String(authorityEffettiva(sp)));
     if (sp.status !== "active") throw new Error("spazio non active: status " + String(sp.status));
     // F4/3C: invariante selfMemberId effettivo su ogni write nativo (unica funzione canonica, vedi verificaSelf).
     // Il self deve essere solo IDENTIFICABILE nello spazio, non partecipare alla singola transazione.
@@ -4329,8 +4342,9 @@ if ("serviceWorker" in navigator){
     if (!spaceId) throw new Error("spaceId richiesto");
     var sp = await db().get("spaces", spaceId);
     if (!sp || sp.deleted === true) throw new Error("spazio inesistente: " + spaceId);
-    if (sp.legacyGroupId) throw new Error("spazio legacy: non modificabile");
     if (sp.kind !== "experience" && sp.kind !== "ongoing") throw new Error("spazio non shared: kind " + sp.kind);
+    // F4/6B: modifica consentita solo con authority native (coerente con spazioScrivibile).
+    if (authorityEffettiva(sp) !== "native") throw new Error("spazio non modificabile: authority " + String(authorityEffettiva(sp)));
     return sp;
   }
   // Coerenza dell'identita' "io" per uno spazio nativo (fail-closed).
@@ -4358,7 +4372,8 @@ if ("serviceWorker" in navigator){
     var now = Date.now();
     var spaceId = nuovoSpaceId(), selfMemberId = nuovoMemberId(spaceId);
     var space = { id: spaceId, name: name, kind: kind, status: "active", currency: "EUR",
-      legacyGroupId: null, selfMemberId: selfMemberId, createdAt: now, updatedAt: now, deleted: false };
+      legacyGroupId: null, authority: "native",   // F4/6B: nato nativo -> authority native
+      selfMemberId: selfMemberId, createdAt: now, updatedAt: now, deleted: false };
     var membro = { id: selfMemberId, spaceId: spaceId, name: selfName, active: true,
       createdAt: now, updatedAt: now, deleted: false };
     var sv = db().validaSpace(space); if (sv) throw new Error("space non valido: " + sv);   // validatore canonico F4/1
@@ -4556,6 +4571,9 @@ if ("serviceWorker" in navigator){
     archiveMember: archiveMember,
     restoreMember: restoreMember,
     _scriviAtomico: scriviAtomico,   // esposto solo per il test di rollback atomico
+    // F4/6B: authority per-spazio (resolver + guard esposti per i test)
+    _effectiveAuthority: authorityEffettiva,
+    _spazioScrivibile: spazioScrivibile,
     // F4/4A: data layer share rules (default per nuove spese; NON tocca lo storico)
     getShareRule: getShareRule,
     setShareRule: setShareRule,
@@ -5197,6 +5215,69 @@ if ("serviceWorker" in navigator){
 
       ok("OG zero-sum finale", await zs(OG));
       ok("EX zero-sum finale", await zs(EX));
+
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    },
+    // F4/6B — modello authority per-spazio.
+    _testAuthority: async function(){
+      var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
+      var DB = window.calculonDB, SR = window.sharedRuntime;
+      var EA = SR._effectiveAuthority;
+      function throws(fn){ try { fn(); return false; } catch(e){ return true; } }
+      async function throwsA(fn){ try { await fn(); return false; } catch(e){ return true; } }
+      function O1(k, v){ var o = {}; o[k] = v; return o; }
+
+      // resolver (migrazione deterministica dei record pre-6B, nessun dato toccato)
+      ok("native-born (no legacy) -> native", EA({ kind: "experience", legacyGroupId: null }) === "native");
+      ok("ongoing native -> native", EA({ kind: "ongoing" }) === "native");
+      ok("legacy proiettato (authority legacy) -> legacy", EA({ kind: "experience", legacyGroupId: "g", authority: "legacy" }) === "legacy");
+      ok("pre-6B legacy (authority assente) -> legacy", EA({ kind: "experience", legacyGroupId: "g" }) === "legacy");
+      ok("pre-6B native (authority assente, no legacy) -> native", EA({ kind: "experience" }) === "native");
+      ok("cutover (legacy + authority native) -> native", EA({ kind: "experience", legacyGroupId: "g", authority: "native" }) === "native");
+      ok("personal -> authority null", EA({ kind: "personal" }) === null);
+      ok("authority invalida -> resolver fail-closed", throws(function(){ return EA({ kind: "experience", authority: "bogus" }); }));
+
+      // proiettaGruppo assegna authority legacy
+      var grp = { meta: { id: "G00001", name: "G", version: 1, deviceId: "t", updatedAt: 0, members: [{ id: "m1", name: "A" }] }, records: {} };
+      ok("proiettaGruppo -> authority legacy", DB._projectGroup("G00001", grp).space.authority === "legacy");
+
+      // createSpace nativo
+      var og = await SR.createSpace({ kind: "ongoing", name: "Auth", selfName: "Gio" });
+      var ex = await SR.createSpace({ kind: "experience", name: "Auth2", selfName: "Gio" });
+      ok("createSpace ongoing -> authority native", (await DB.get("spaces", og.spaceId)).authority === "native");
+      ok("createSpace experience -> authority native", (await DB.get("spaces", ex.spaceId)).authority === "native");
+
+      // personal invariato
+      var pers = await DB.get("spaces", "personal:local");
+      ok("personal: authority assente/null", pers && pers.authority == null);
+
+      // native-born: write consentito
+      var mm = await SR.addMember(og.spaceId, { name: "Anna" });
+      var eid = await SR.createExpense(og.spaceId, { amount: 100, paidById: og.selfMemberId, allocationMode: "exact", parts: O1(og.selfMemberId, 100), date: "2026-08-01" });
+      ok("native-born: write consentito", typeof eid === "string");
+
+      // legacy (authority legacy): write respinto
+      var LG = "t:auth-legacy"; await DB.put("spaces", { id: LG, name: "L", kind: "experience", status: "active", legacyGroupId: "gL", authority: "legacy", selfMemberId: LG + ":a", deleted: false });
+      await DB.put("spaceMembers", { id: LG + ":a", spaceId: LG, name: "A", active: true, deleted: false });
+      ok("legacy authority -> guard respinto", await throwsA(function(){ return SR._spazioScrivibile(LG); }));
+      ok("legacy authority -> createExpense respinto", await throwsA(function(){ return SR.createExpense(LG, { amount: 100, paidById: LG + ":a", allocationMode: "exact", parts: O1(LG + ":a", 100), date: "2026-08-01" }); }));
+
+      // pre-6B legacy senza campo authority: interpretata legacy -> respinto
+      var LG2 = "t:auth-legacy2"; await DB.put("spaces", { id: LG2, name: "L2", kind: "experience", status: "active", legacyGroupId: "gL2", selfMemberId: LG2 + ":a", deleted: false });
+      await DB.put("spaceMembers", { id: LG2 + ":a", spaceId: LG2, name: "A", active: true, deleted: false });
+      ok("pre-6B legacy (no authority) -> respinto", await throwsA(function(){ return SR._spazioScrivibile(LG2); }));
+
+      // futuro cut-over: legacyGroupId + authority native -> modellisticamente scrivibile (guard passa)
+      var CO = "t:auth-cutover"; await DB.put("spaces", { id: CO, name: "C", kind: "experience", status: "active", legacyGroupId: "gCO", authority: "native", selfMemberId: CO + ":a", deleted: false });
+      await DB.put("spaceMembers", { id: CO + ":a", spaceId: CO, name: "A", active: true, deleted: false });
+      var spCO = await SR._spazioScrivibile(CO);
+      ok("cutover (legacy + native) -> guard consentito", spCO && spCO.id === CO);
+
+      // authority invalida su record persistito -> fail closed al guard
+      var BAD = "t:auth-bad"; await DB.put("spaces", { id: BAD, name: "B", kind: "experience", status: "active", legacyGroupId: null, authority: "bogus", selfMemberId: BAD + ":a", deleted: false });
+      await DB.put("spaceMembers", { id: BAD + ":a", spaceId: BAD, name: "A", active: true, deleted: false });
+      ok("authority invalida -> guard fail-closed", await throwsA(function(){ return SR._spazioScrivibile(BAD); }));
 
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
