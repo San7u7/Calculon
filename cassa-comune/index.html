@@ -5287,8 +5287,51 @@ if ("serviceWorker" in navigator){
     throw new Error("tipo non supportato: " + tx.type);
   }
 
+  /* F4 · Passo 5C — aggregatore PURO delle liability legs. signedAmount e' l'UNICA fonte di verita'
+     (direction/effect NON rientrano nel calcolo). Convenzione: >0 mi devono, <0 devo, 0 saldato.
+     Nessun clamp: un over-settlement puo' far cambiare segno alla posizione (contabilita' Shared,
+     non correzione). Invariante: totalSignedAmount === sharedRuntime.balances(spaceId)[selfMemberId]. */
+  function centIntC(n){ return typeof n === "number" && isFinite(n) && Math.floor(n) === n; }
+  function aggregateLiabilities(legs){
+    if (!Array.isArray(legs)) throw new Error("legs non array");
+    var map = {}, total = 0;
+    for (var i = 0; i < legs.length; i++){
+      var l = legs[i];
+      if (!l || typeof l !== "object") throw new Error("leg non valida");
+      var cp = l.counterpartMemberId;
+      if (cp == null) throw new Error("leg senza counterpartMemberId");
+      var s = l.signedAmount;
+      if (!centIntC(s)) throw new Error("signedAmount non intero");
+      if (!Object.prototype.hasOwnProperty.call(map, cp)) map[cp] = 0;
+      map[cp] += s; total += s;
+    }
+    var keys = Object.keys(map).sort();   // ordinamento deterministico per counterpartMemberId
+    var byCounterpart = [];
+    for (var k = 0; k < keys.length; k++){
+      var id = keys[k], v = map[id];
+      if (v === 0) continue;              // posizioni saldate ESCLUSE esplicitamente (total non cambia: +0)
+      byCounterpart.push({ counterpartMemberId: id, signedAmount: v, direction: (v > 0 ? "receivable" : "payable") });
+    }
+    return { totalSignedAmount: total, byCounterpart: byCounterpart };
+  }
+  // Helper end-to-end puro: da una lista di shared tx alla posizione di liability (tombstone esclusi,
+  // ogni tx passa da fromSharedTx -> fail-closed su cross-space/tipi/validazione).
+  function liabilityPosition(space, txs, members){
+    if (!Array.isArray(txs)) throw new Error("txs non array");
+    var legs = [];
+    for (var i = 0; i < txs.length; i++){
+      var tx = txs[i];
+      if (tx && tx.deleted === true) continue;                 // tombstone esclusi
+      var res = fromSharedTx(space, tx, members);              // valida fail-closed
+      for (var j = 0; j < res.liabilityLegs.length; j++) legs.push(res.liabilityLegs[j]);
+    }
+    return aggregateLiabilities(legs);
+  }
+
   window.personalProjection = {
     fromSharedTx: fromSharedTx,
+    aggregateLiabilities: aggregateLiabilities,
+    liabilityPosition: liabilityPosition,
     _test: function(){
       var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
       var PJ = window.personalProjection;
@@ -5384,6 +5427,102 @@ if ("serviceWorker" in navigator){
       ok("amount non valido respinto", throws(function(){ return PJ.fromSharedTx(SPACE, exp(0, SELF, [[SELF,0]]), MEM); }));
       ok("payer inesistente respinto", throws(function(){ return PJ.fromSharedTx(SPACE, { id:"T", spaceId:"S", type:"expense", amount:100, paidById:"S:zz", allocations:[{memberId:SELF,amount:100}] }, MEM); }));
       ok("tipo non supportato respinto", throws(function(){ return PJ.fromSharedTx(SPACE, { id:"T", spaceId:"S", type:"income", amount:100 }, MEM); }));
+
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    },
+    // F4/5C — aggregatore: posizioni per controparte + invariante col core reale sharedRuntime._balancesFrom.
+    _testAggregate: function(){
+      var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
+      var PJ = window.personalProjection, SR = window.sharedRuntime;
+      function throws(fn){ try { fn(); return false; } catch(e){ return true; } }
+      function m(id){ return { id: id, spaceId: "S", active: true, deleted: false }; }
+      var SELF = "S:self", A = "S:a", B = "S:b";
+      var MEM = [m(SELF), m(A), m(B)];
+      var SPACE = { id: "S", kind: "ongoing", status: "active", legacyGroupId: null, selfMemberId: SELF };
+      function exp(id, amount, paidById, pairs){ return { id: id, spaceId: "S", type: "expense", amount: amount, paidById: paidById, allocations: pairs.map(function(p){ return { memberId: p[0], amount: p[1] }; }), date: "2026-08-01" }; }
+      function setl(id, from, to, amount){ return { id: id, spaceId: "S", type: "settlement", amount: amount, fromMemberId: from, toMemberId: to, date: "2026-08-01" }; }
+      function cp(agg, id){ return agg.byCounterpart.filter(function(x){ return x.counterpartMemberId === id; })[0] || null; }
+      // core REALE di sharedRuntime: net[self] sulle tx vive
+      function nativeSelf(txs){ return (SR._balancesFrom(MEM, txs.filter(function(t){ return !t.deleted; })))[SELF] || 0; }
+      // esegue liabilityPosition e verifica l'invariante col core nativo, restituendo l'aggregato
+      function run(name, txs){
+        var agg = PJ.liabilityPosition(SPACE, txs, MEM);
+        ok(name + ": total === native self", agg.totalSignedAmount === nativeSelf(txs));
+        return agg;
+      }
+
+      // 1) pago io 420 / quota 126 / A150 / B144 -> A +150, B +144, tot +294
+      var a1 = run("pago io 420", [ exp("T1", 420, SELF, [[SELF,126],[A,150],[B,144]]) ]);
+      ok("1: A +150", cp(a1,A).signedAmount === 150 && cp(a1,A).direction === "receivable");
+      ok("1: B +144", cp(a1,B).signedAmount === 144);
+      ok("1: totale +294", a1.totalSignedAmount === 294);
+
+      // 2) paga A / quota mia 126 -> A -126
+      var a2 = run("paga A 420", [ exp("T1", 420, A, [[SELF,126],[A,150],[B,144]]) ]);
+      ok("2: A -126 payable", cp(a2,A).signedAmount === -126 && cp(a2,A).direction === "payable");
+      ok("2: totale -126", a2.totalSignedAmount === -126);
+      ok("2: nessun B", cp(a2,B) === null);
+
+      // 3) io pago + A mi rimborsa PARZIALMENTE
+      var a3 = run("rimborso parziale", [ exp("T1", 300, SELF, [[SELF,100],[A,200]]), setl("T2", A, SELF, 50) ]);
+      ok("3: A +150", cp(a3,A).signedAmount === 150);
+
+      // 4) io pago + A mi rimborsa TOTALMENTE -> A a zero, escluso; total 0
+      var a4 = run("rimborso totale", [ exp("T1", 300, SELF, [[SELF,100],[A,200]]), setl("T2", A, SELF, 200) ]);
+      ok("4: posizione A a zero -> esclusa dalla lista", cp(a4,A) === null);
+      ok("4: totale 0", a4.totalSignedAmount === 0);
+
+      // 5) io devo A + io pago settlement PARZIALE
+      var a5 = run("debito + settlement parziale", [ exp("T1", 300, A, [[SELF,100],[A,200]]), setl("T2", SELF, A, 40) ]);
+      ok("5: A -60", cp(a5,A).signedAmount === -60 && cp(a5,A).direction === "payable");
+
+      // 6) settlement OLTRE il dovuto -> cambio segno, niente clamp
+      var a6 = run("over-settlement", [ exp("T1", 300, A, [[SELF,100],[A,200]]), setl("T2", SELF, A, 150) ]);
+      ok("6: A cambia segno -> +50 (receivable), no clamp", cp(a6,A).signedAmount === 50 && cp(a6,A).direction === "receivable");
+      ok("6: totale +50", a6.totalSignedAmount === 50);
+
+      // 7) piu' spese e settlement con STESSA controparte
+      var a7 = run("mix stessa controparte", [
+        exp("T1", 200, SELF, [[SELF,100],[A,100]]),   // A +100
+        exp("T2", 200, A,    [[SELF,100],[A,100]]),   // A -100
+        setl("T3", SELF, A, 30),                       // A +30
+        setl("T4", A, SELF, 10) ]);                    // A -10
+      ok("7: A = 100-100+30-10 = +20", cp(a7,A) && cp(a7,A).signedAmount === 20);
+
+      // 8) piu' controparti indipendenti
+      var a8 = run("multi-controparte", [ exp("T1", 300, SELF, [[SELF,100],[A,100],[B,100]]), setl("T2", B, SELF, 50) ]);
+      ok("8: A +100", cp(a8,A).signedAmount === 100);
+      ok("8: B +50", cp(a8,B).signedAmount === 50);
+      ok("8: ordinamento deterministico (A prima di B)", a8.byCounterpart[0].counterpartMemberId === A && a8.byCounterpart[1].counterpartMemberId === B);
+
+      // 9) settlement A->B non coinvolge self -> nessun effetto
+      var a9 = run("settlement A->B", [ exp("T1", 200, SELF, [[SELF,100],[A,100]]), setl("T2", A, B, 40) ]);
+      ok("9: solo A +100, nessuna leg da A->B", a9.byCounterpart.length === 1 && cp(a9,A).signedAmount === 100);
+
+      // determinismo
+      var seq = [ exp("T1", 420, SELF, [[SELF,126],[A,150],[B,144]]), setl("T2", A, SELF, 30) ];
+      ok("determinismo", JSON.stringify(PJ.liabilityPosition(SPACE, seq, MEM)) === JSON.stringify(PJ.liabilityPosition(SPACE, seq, MEM)));
+
+      // tombstone esclusi + coerenza col core
+      var withTomb = [ exp("T1", 420, SELF, [[SELF,126],[A,150],[B,144]]), (function(){ var t = exp("T2", 100, SELF, [[SELF,50],[A,50]]); t.deleted = true; return t; })() ];
+      var aT = run("tombstone esclusi", withTomb);
+      ok("tombstone: A resta 150 (T2 ignorata)", cp(aT,A).signedAmount === 150);
+
+      // input non mutati
+      var spc = { id:"S", kind:"ongoing", status:"active", legacyGroupId:null, selfMemberId:SELF };
+      var txs = [ exp("T1", 420, SELF, [[SELF,126],[A,150],[B,144]]) ];
+      var jS = JSON.stringify(spc), jT = JSON.stringify(txs), jM = JSON.stringify(MEM);
+      PJ.liabilityPosition(spc, txs, MEM);
+      ok("input non mutati (space/txs/members)", JSON.stringify(spc) === jS && JSON.stringify(txs) === jT && JSON.stringify(MEM) === jM);
+
+      // fail-closed
+      ok("aggregate: legs non array respinto", throws(function(){ return PJ.aggregateLiabilities("x"); }));
+      ok("aggregate: signedAmount non intero respinto", throws(function(){ return PJ.aggregateLiabilities([{ counterpartMemberId:A, signedAmount:1.5 }]); }));
+      ok("aggregate: counterpart mancante respinto", throws(function(){ return PJ.aggregateLiabilities([{ signedAmount:100 }]); }));
+      ok("position: txs non array respinto", throws(function(){ return PJ.liabilityPosition(SPACE, "x", MEM); }));
+      ok("position: tx cross-space respinta", throws(function(){ return PJ.liabilityPosition(SPACE, [ { id:"T", spaceId:"OTHER", type:"expense", amount:100, paidById:SELF, allocations:[{memberId:SELF,amount:100}] } ], MEM); }));
+      ok("position: tipo non supportato respinto", throws(function(){ return PJ.liabilityPosition(SPACE, [ { id:"T", spaceId:"S", type:"income", amount:100 } ], MEM); }));
 
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
