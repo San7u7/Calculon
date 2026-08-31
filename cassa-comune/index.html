@@ -4263,6 +4263,142 @@ if ("serviceWorker" in navigator){
     return txId;
   }
 
+  /* F4 · Passo 3B — write-path NATIVO di Spazi e Membri (locale).
+     Crea/gestisce spazi Shared 2.0 nativi (mai legacy) e i loro membri. Nessuna UI, nessun sync,
+     nessun dual-write, nessuna shareRules, nessuna transazione personale derivata, Worker/wire invariati.
+     Identita' "io": UNICA fonte = spaces.selfMemberId (nessun isSelf sui membri). ID nativi non
+     derivati dal legacy (UUID), globalmente univoci, senza collisioni con personal:local o proiezioni. */
+  function nuovoId(){
+    try { if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID().replace(/-/g, ""); } catch(e){}
+    return codice(24);   // fallback robusto (crypto.getRandomValues), mai contatori globali
+  }
+  function nuovoSpaceId(){ return "space:" + nuovoId(); }                 // no collisione con personal:local / GID legacy
+  function nuovoMemberId(spaceId){ return spaceId + ":" + nuovoId(); }    // namespaced nello spazio
+  function trimStr(v){ return (v == null ? "" : String(v)).trim(); }
+
+  // Scrittura ATOMICA multi-store: se una put fallisce, l'intera transazione IndexedDB abortisce
+  // (rollback completo). Usata per creare spazio + primo membro in un colpo solo.
+  async function scriviAtomico(stores, records){
+    var idb = await db().open();
+    return await new Promise(function(res, rej){
+      var tx = idb.transaction(stores, "readwrite"), settled = false;
+      tx.oncomplete = function(){ if (!settled){ settled = true; res(); } };
+      tx.onabort = function(){ if (!settled){ settled = true; rej(tx.error || new Error("transazione annullata")); } };
+      tx.onerror = function(){ /* onabort seguira': rollback */ };
+      try { for (var i = 0; i < records.length; i++) tx.objectStore(stores[i]).put(records[i]); }
+      catch(e){ try { tx.abort(); } catch(_){ } if (!settled){ settled = true; rej(e); } }
+    });
+  }
+
+  // Guardia: spazio NATIVO (mai legacy) di tipo shared. Non impone lo status.
+  async function spazioNativo(spaceId){
+    if (!spaceId) throw new Error("spaceId richiesto");
+    var sp = await db().get("spaces", spaceId);
+    if (!sp || sp.deleted === true) throw new Error("spazio inesistente: " + spaceId);
+    if (sp.legacyGroupId) throw new Error("spazio legacy: non modificabile");
+    if (sp.kind !== "experience" && sp.kind !== "ongoing") throw new Error("spazio non shared: kind " + sp.kind);
+    return sp;
+  }
+  // Coerenza dell'identita' "io" per uno spazio nativo (fail-closed).
+  async function verificaSelf(sp){
+    if (!sp.selfMemberId) throw new Error("selfMemberId assente: spazio nativo incoerente");
+    var self = await db().get("spaceMembers", sp.selfMemberId);
+    if (!self || self.deleted === true || self.spaceId !== sp.id) throw new Error("selfMemberId incoerente");
+    return self;
+  }
+  async function caricaMembro(spaceId, memberId){
+    if (!memberId) throw new Error("memberId richiesto");
+    var mm = await db().get("spaceMembers", memberId);
+    if (!mm || mm.deleted === true) throw new Error("membro inesistente: " + memberId);
+    if (mm.spaceId !== spaceId) throw new Error("membro cross-space: " + memberId);
+    return mm;
+  }
+
+  // 1) Creazione atomica spazio + primo membro (l'utente corrente). Rollback totale se una write fallisce.
+  async function createSpace(input){
+    input = input || {};
+    var kind = input.kind;
+    if (kind !== "experience" && kind !== "ongoing") throw new Error("kind non supportato: " + kind);
+    var name = trimStr(input.name);      if (!name) throw new Error("nome spazio vuoto");
+    var selfName = trimStr(input.selfName); if (!selfName) throw new Error("selfName vuoto");
+    var now = Date.now();
+    var spaceId = nuovoSpaceId(), selfMemberId = nuovoMemberId(spaceId);
+    var space = { id: spaceId, name: name, kind: kind, status: "active", currency: "EUR",
+      legacyGroupId: null, selfMemberId: selfMemberId, createdAt: now, updatedAt: now, deleted: false };
+    var membro = { id: selfMemberId, spaceId: spaceId, name: selfName, active: true,
+      createdAt: now, updatedAt: now, deleted: false };
+    var sv = db().validaSpace(space); if (sv) throw new Error("space non valido: " + sv);   // validatore canonico F4/1
+    await scriviAtomico(["spaces", "spaceMembers"], [space, membro]);
+    return { spaceId: spaceId, selfMemberId: selfMemberId };
+  }
+
+  // 3) Membri
+  async function addMember(spaceId, input){
+    await spazioScrivibile(spaceId);      // nativo + shared + active
+    input = input || {};
+    var name = trimStr(input.name); if (!name) throw new Error("nome membro vuoto");
+    var now = Date.now();
+    var membro = { id: nuovoMemberId(spaceId), spaceId: spaceId, name: name, active: true,
+      createdAt: now, updatedAt: now, deleted: false };
+    await db().put("spaceMembers", membro);
+    return membro.id;
+  }
+  async function updateMember(spaceId, memberId, patch){
+    await spazioScrivibile(spaceId);
+    var cur = await caricaMembro(spaceId, memberId);
+    patch = patch || {};
+    if ("id" in patch && patch.id !== memberId) throw new Error("id immutabile");
+    if ("spaceId" in patch && patch.spaceId !== spaceId) throw new Error("spaceId immutabile");
+    var upd = Object.assign({}, cur);
+    if ("name" in patch){ var nm = trimStr(patch.name); if (!nm) throw new Error("nome membro vuoto"); upd.name = nm; }
+    upd.id = memberId; upd.spaceId = spaceId; upd.deleted = false;   // storico/identita' invariati
+    await db().put("spaceMembers", upd);
+    return memberId;
+  }
+  async function archiveMember(spaceId, memberId){
+    var sp = await spazioScrivibile(spaceId);      // richiede spazio attivo
+    var self = await verificaSelf(sp);             // fail-closed su selfMemberId incoerente
+    if (memberId === self.id) throw new Error("il membro self non puo' essere archiviato mentre lo spazio e' attivo");
+    var cur = await caricaMembro(spaceId, memberId);
+    if (cur.active === false) return memberId;      // idempotente
+    var upd = Object.assign({}, cur, { active: false });   // NON hard delete; lo storico non viene toccato
+    await db().put("spaceMembers", upd);
+    return memberId;
+  }
+  async function restoreMember(spaceId, memberId){
+    await spazioScrivibile(spaceId);
+    var cur = await caricaMembro(spaceId, memberId);
+    if (cur.active === true) return memberId;        // idempotente
+    var upd = Object.assign({}, cur, { active: true });
+    await db().put("spaceMembers", upd);
+    return memberId;
+  }
+
+  // 5) Gestione spazio minima (no settleExperience: sara' uno step dedicato che dipende dai saldi)
+  async function renameSpace(spaceId, name){
+    var sp = await spazioNativo(spaceId);            // qualunque status; mai legacy
+    var nm = trimStr(name); if (!nm) throw new Error("nome spazio vuoto");
+    var upd = Object.assign({}, sp, { name: nm });
+    await db().put("spaces", upd);
+    return spaceId;
+  }
+  async function archiveSpace(spaceId){
+    var sp = await spazioNativo(spaceId);
+    if (sp.status === "archived") return spaceId;    // idempotente
+    if (sp.status !== "active") throw new Error("spazio non active: status " + String(sp.status));
+    var upd = Object.assign({}, sp, { status: "archived" });   // il membro self NON viene archiviato
+    await db().put("spaces", upd);
+    return spaceId;
+  }
+  async function restoreSpace(spaceId){
+    var sp = await spazioNativo(spaceId);
+    if (sp.status === "active") return spaceId;       // idempotente
+    if (sp.status !== "archived") throw new Error("spazio non archived: status " + String(sp.status));
+    var upd = Object.assign({}, sp, { status: "active" });     // experience|ongoing archived -> active
+    await db().put("spaces", upd);
+    return spaceId;
+  }
+
   window.sharedRuntime = {
     listMembers: listMembers,
     listTransactions: listTransactions,
@@ -4275,6 +4411,16 @@ if ("serviceWorker" in navigator){
     updateSettlement: updateSettlement,
     deleteTransaction: deleteTransaction,
     restoreTransaction: restoreTransaction,
+    // F4/3B: write-path spazi nativi + membri
+    createSpace: createSpace,
+    renameSpace: renameSpace,
+    archiveSpace: archiveSpace,
+    restoreSpace: restoreSpace,
+    addMember: addMember,
+    updateMember: updateMember,
+    archiveMember: archiveMember,
+    restoreMember: restoreMember,
+    _scriviAtomico: scriviAtomico,   // esposto solo per il test di rollback atomico
     // helper puri per i test (nessuna persistenza)
     _balancesFrom: balancesFrom,
     _settlementPlanFrom: settlementPlanFrom,
@@ -4565,6 +4711,120 @@ if ("serviceWorker" in navigator){
       var dopoReload = await DB.get("transactions", eqId);
       ok("reload: transazione persistita", dopoReload && dopoReload.id === eqId && dopoReload.deleted === false);
       ok("reload: balances ancora zero-sum", await zeroSum(NAT));
+
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    },
+    // F4/3B: test end-to-end di spazi nativi + membri su IndexedDB reale.
+    _testSpaceMembers: async function(){
+      var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
+      var DB = window.calculonDB, SR = window.sharedRuntime;
+      async function throwsA(fn){ try { await fn(); return false; } catch(e){ return true; } }
+
+      // --- 1) create experience: atomico space + self ---
+      var ex = await SR.createSpace({ kind: "experience", name: "  Viaggio Roma  ", selfName: "  Gio  " });
+      var exSp = await DB.get("spaces", ex.spaceId);
+      var exSelf = await DB.get("spaceMembers", ex.selfMemberId);
+      ok("experience: space creato", !!exSp);
+      ok("experience: self creato (atomico)", !!exSelf);
+      ok("experience: kind/status", exSp.kind === "experience" && exSp.status === "active");
+      ok("experience: nessun legacyGroupId", !exSp.legacyGroupId);
+      ok("experience: nome trimmato", exSp.name === "Viaggio Roma");
+      ok("experience: self name trimmato/active", exSelf.name === "Gio" && exSelf.active === true && exSelf.deleted === false);
+      ok("experience: selfMemberId punta al self", exSp.selfMemberId === ex.selfMemberId && exSelf.spaceId === ex.spaceId);
+      ok("experience: self createdAt/updatedAt", typeof exSelf.createdAt === "number" && typeof exSelf.updatedAt === "number");
+
+      // --- 2) create ongoing ---
+      var og = await SR.createSpace({ kind: "ongoing", name: "Coinquilini", selfName: "Gio" });
+      var ogSp = await DB.get("spaces", og.spaceId);
+      ok("ongoing: kind/status", ogSp.kind === "ongoing" && ogSp.status === "active");
+      ok("ongoing: self coerente", ogSp.selfMemberId === og.selfMemberId);
+
+      var S = ex.spaceId, SELF = ex.selfMemberId;
+
+      // --- 3) add/update/archive/restore membro ---
+      var m2 = await SR.addMember(S, { name: "  Anna  " });
+      var m2rec = await DB.get("spaceMembers", m2);
+      ok("addMember: creato attivo, nome trimmato", m2rec.active === true && m2rec.name === "Anna" && m2rec.spaceId === S);
+      ok("addMember: campi F4.3B", typeof m2rec.createdAt === "number" && m2rec.deleted === false);
+      await SR.updateMember(S, m2, { name: "Anna B." });
+      ok("updateMember: nome aggiornato", (await DB.get("spaceMembers", m2)).name === "Anna B.");
+      await SR.archiveMember(S, m2);
+      var m2arc = await DB.get("spaceMembers", m2);
+      ok("archiveMember: active false, NON hard delete", m2arc.active === false && m2arc.deleted === false);
+      var listaDopoArchivio = await SR.listMembers(S);
+      ok("archiveMember: resta in listMembers (inattivo)", listaDopoArchivio.some(function(x){ return x.id === m2; }));
+      await SR.restoreMember(S, m2);
+      ok("restoreMember: active true", (await DB.get("spaceMembers", m2)).active === true);
+
+      // --- 4) self non archiviabile ---
+      ok("self non archiviabile", await throwsA(function(){ return SR.archiveMember(S, SELF); }));
+
+      // --- 7/8) storico invariato + 3A respinge nuovo riferimento a inattivo ---
+      var spesa = await SR.createExpense(S, { amount: 900, paidById: SELF, allocationMode: "equal", parts: (function(){ var p={}; p[SELF]=1; p[m2]=1; return p; })() });
+      var allocPrima = JSON.stringify((await DB.get("transactions", spesa)).allocations);
+      await SR.archiveMember(S, m2);   // m2 diventa inattivo DOPO la spesa
+      var allocDopo = JSON.stringify((await DB.get("transactions", spesa)).allocations);
+      ok("storico invariato dopo archivio membro", allocPrima === allocDopo);
+      var b = await SR.balances(S); var somma = 0; for (var k in b) somma += b[k];
+      ok("balances ancora zero-sum con membro archiviato", somma === 0);
+      var nuovoRifRespinto = await throwsA(function(){ var p={}; p[SELF]=1; p[m2]=1; return SR.createExpense(S, { amount: 200, paidById: SELF, allocationMode: "equal", parts: p }); });
+      ok("3A respinge nuovo expense verso membro archiviato", nuovoRifRespinto);
+      await SR.restoreMember(S, m2);   // ripristino per i test successivi
+
+      // --- 5) rename / archive / restore spazio ---
+      await SR.renameSpace(S, "  Roma 2026  ");
+      ok("renameSpace: nome trimmato", (await DB.get("spaces", S)).name === "Roma 2026");
+      await SR.archiveSpace(S);
+      ok("archiveSpace: status archived", (await DB.get("spaces", S)).status === "archived");
+      ok("operazione membro su spazio archived respinta", await throwsA(function(){ return SR.addMember(S, { name: "Tardi" }); }));
+      await SR.restoreSpace(S);
+      ok("restoreSpace: torna active", (await DB.get("spaces", S)).status === "active");
+      ok("addMember ok dopo restore spazio", !!(await SR.addMember(S, { name: "Carlo" })));
+
+      // --- validazioni fail-closed ---
+      ok("kind non supportato respinto", await throwsA(function(){ return SR.createSpace({ kind: "weird", name: "X", selfName: "Y" }); }));
+      ok("nome spazio vuoto respinto",   await throwsA(function(){ return SR.createSpace({ kind: "experience", name: "   ", selfName: "Y" }); }));
+      ok("selfName vuoto respinto",      await throwsA(function(){ return SR.createSpace({ kind: "experience", name: "X", selfName: "  " }); }));
+      ok("addMember nome vuoto respinto", await throwsA(function(){ return SR.addMember(S, { name: "  " }); }));
+      ok("updateMember nome vuoto respinto", await throwsA(function(){ return SR.updateMember(S, m2, { name: "" }); }));
+
+      // --- cross-space respinto ---
+      ok("updateMember cross-space respinto", await throwsA(function(){ return SR.updateMember(S, og.selfMemberId, { name: "Z" }); }));
+      ok("archiveMember cross-space respinto", await throwsA(function(){ return SR.archiveMember(S, og.selfMemberId); }));
+
+      // --- legacy space: ogni modifica respinta ---
+      var LEG = "t:leg3b"; await DB.put("spaces", { id: LEG, name: "Legacy", kind: "experience", status: "active", legacyGroupId: "gL", deleted: false });
+      await DB.put("spaceMembers", { id: LEG+":a", spaceId: LEG, name: "A", active: true, deleted: false });
+      ok("legacy: rename respinto",  await throwsA(function(){ return SR.renameSpace(LEG, "X"); }));
+      ok("legacy: archive respinto", await throwsA(function(){ return SR.archiveSpace(LEG); }));
+      ok("legacy: addMember respinto", await throwsA(function(){ return SR.addMember(LEG, { name: "B" }); }));
+
+      // --- selfMemberId incoerente (fail-closed su archiveMember) ---
+      var BAD = "space:badself:" + "x"; await DB.put("spaces", { id: BAD, name: "Bad", kind: "experience", status: "active", legacyGroupId: null, selfMemberId: BAD+":missing", deleted: false });
+      var bm = BAD+":m"; await DB.put("spaceMembers", { id: bm, spaceId: BAD, name: "M", active: true, deleted: false });
+      ok("selfMemberId incoerente respinto", await throwsA(function(){ return SR.archiveMember(BAD, bm); }));
+
+      // --- 6) ID univoci / nessuna collisione ---
+      var s1 = await SR.createSpace({ kind: "experience", name: "U1", selfName: "G" });
+      var s2 = await SR.createSpace({ kind: "experience", name: "U2", selfName: "G" });
+      ok("space id univoci", s1.spaceId !== s2.spaceId);
+      ok("member id univoci", s1.selfMemberId !== s2.selfMemberId);
+      ok("space id != personal:local", s1.spaceId !== "personal:local" && s1.spaceId.indexOf("space:") === 0);
+
+      // --- reload IndexedDB ---
+      await DB.close();
+      var reSp = await DB.get("spaces", S), reSelf = await DB.get("spaceMembers", SELF);
+      ok("reload: spazio persistito", reSp && reSp.id === S && reSp.status === "active");
+      ok("reload: self persistito", reSelf && reSelf.id === SELF && reSelf.deleted === false);
+
+      // --- 14) rollback atomico su create fallita (seconda write invalida) ---
+      var ghostId = "space:rollback:" + "ghost";
+      var ghost = { id: ghostId, name: "Ghost", kind: "experience", status: "active", legacyGroupId: null, selfMemberId: ghostId+":s", deleted: false };
+      var badMember = { spaceId: ghostId, name: "NoId", active: true, deleted: false };   // manca la keyPath "id" -> put fallisce
+      var rolledBack = await throwsA(function(){ return SR._scriviAtomico(["spaces", "spaceMembers"], [ghost, badMember]); });
+      ok("scrittura atomica fallita -> throw", rolledBack);
+      ok("rollback: spazio ghost NON persistito", (await DB.get("spaces", ghostId)) == null);
 
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
