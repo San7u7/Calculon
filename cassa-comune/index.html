@@ -4373,28 +4373,29 @@ if ("serviceWorker" in navigator){
     var spaceId = nuovoSpaceId(), selfMemberId = nuovoMemberId(spaceId);
     var space = { id: spaceId, name: name, kind: kind, status: "active", currency: "EUR",
       legacyGroupId: null, authority: "native",   // F4/6B: nato nativo -> authority native
-      selfMemberId: selfMemberId, version: 1, deviceId: deviceCorrente(),   // F4/7B2: metadata causale shared
+      selfMemberId: selfMemberId, version: 1, deviceId: deviceCorrente(), keyVersion: 1,   // F4/7B2 causale · F4/7D key v1
       createdAt: now, updatedAt: now, deleted: false };
     var membro = { id: selfMemberId, spaceId: spaceId, name: selfName, active: true,
       version: 1, deviceId: deviceCorrente(), createdAt: now, updatedAt: now, deleted: false };
     var sv = db().validaSpace(space); if (sv) throw new Error("space non valido: " + sv);   // validatore canonico F4/1
-    await scriviAtomico(["spaces", "spaceMembers"], [space, membro]);
+    // F4/7D: E2EE dalla nascita — space + self member + AES key v1 + 2 intent, tutto atomico.
+    await window.nativeSync._commitCreateSpace(space, membro);
     return { spaceId: spaceId, selfMemberId: selfMemberId };
   }
 
   // 3) Membri
   async function addMember(spaceId, input){
-    await spazioScrivibile(spaceId);      // nativo + shared + active
+    var sp = await spazioScrivibile(spaceId);      // nativo + shared + active
     input = input || {};
     var name = trimStr(input.name); if (!name) throw new Error("nome membro vuoto");
     var now = Date.now();
     var membro = { id: nuovoMemberId(spaceId), spaceId: spaceId, name: name, active: true,
       version: 1, deviceId: deviceCorrente(), createdAt: now, updatedAt: now, deleted: false };   // F4/7B2
-    await db().put("spaceMembers", membro);
+    await window.nativeSync._commitSharedRecordWithIntent("member", sp, membro);   // F4/7D: member + intent atomici
     return membro.id;
   }
   async function updateMember(spaceId, memberId, patch){
-    await spazioScrivibile(spaceId);
+    var sp = await spazioScrivibile(spaceId);
     var cur = await caricaMembro(spaceId, memberId);
     patch = patch || {};
     if ("id" in patch && patch.id !== memberId) throw new Error("id immutabile");
@@ -4403,7 +4404,7 @@ if ("serviceWorker" in navigator){
     if ("name" in patch){ var nm = trimStr(patch.name); if (!nm) throw new Error("nome membro vuoto"); upd.name = nm; }
     upd.id = memberId; upd.spaceId = spaceId; upd.deleted = false;   // storico/identita' invariati
     upd.version = (cur.version | 0) + 1; upd.deviceId = deviceCorrente();   // F4/7B2: base mancante -> 0 -> v1
-    await db().put("spaceMembers", upd);
+    await window.nativeSync._commitSharedRecordWithIntent("member", sp, upd);
     return memberId;
   }
   async function archiveMember(spaceId, memberId){
@@ -4413,15 +4414,15 @@ if ("serviceWorker" in navigator){
     var cur = await caricaMembro(spaceId, memberId);
     if (cur.active === false) return memberId;      // idempotente
     var upd = Object.assign({}, cur, { active: false, version: (cur.version | 0) + 1, deviceId: deviceCorrente() });   // active:false NON e' tombstone
-    await db().put("spaceMembers", upd);
+    await window.nativeSync._commitSharedRecordWithIntent("member", sp, upd);
     return memberId;
   }
   async function restoreMember(spaceId, memberId){
-    await spazioScrivibile(spaceId);
+    var sp = await spazioScrivibile(spaceId);
     var cur = await caricaMembro(spaceId, memberId);
     if (cur.active === true) return memberId;        // idempotente
     var upd = Object.assign({}, cur, { active: true, version: (cur.version | 0) + 1, deviceId: deviceCorrente() });   // F4/7B2
-    await db().put("spaceMembers", upd);
+    await window.nativeSync._commitSharedRecordWithIntent("member", sp, upd);
     return memberId;
   }
 
@@ -4430,7 +4431,7 @@ if ("serviceWorker" in navigator){
     var sp = await spazioNativo(spaceId);            // qualunque status; mai legacy
     var nm = trimStr(name); if (!nm) throw new Error("nome spazio vuoto");
     var upd = Object.assign({}, sp, { name: nm, version: (sp.version | 0) + 1, deviceId: deviceCorrente() });   // F4/7B2: bump shared (name in SHARED_SPACE_FIELDS)
-    await db().put("spaces", upd);
+    await window.nativeSync._commitSharedRecordWithIntent("space", upd, upd);   // F4/7D: space + intent atomici
     return spaceId;
   }
   async function archiveSpace(spaceId){
@@ -4438,7 +4439,7 @@ if ("serviceWorker" in navigator){
     if (sp.status === "archived") return spaceId;    // idempotente
     if (sp.status !== "active") throw new Error("spazio non active: status " + String(sp.status));
     var upd = Object.assign({}, sp, { status: "archived", version: (sp.version | 0) + 1, deviceId: deviceCorrente() });   // il membro self NON viene archiviato
-    await db().put("spaces", upd);
+    await window.nativeSync._commitSharedRecordWithIntent("space", upd, upd);
     return spaceId;
   }
   async function restoreSpace(spaceId){
@@ -4446,7 +4447,7 @@ if ("serviceWorker" in navigator){
     if (sp.status === "active") return spaceId;       // idempotente
     if (sp.status !== "archived") throw new Error("spazio non archived: status " + String(sp.status));
     var upd = Object.assign({}, sp, { status: "active", version: (sp.version | 0) + 1, deviceId: deviceCorrente() });   // experience|ongoing archived -> active
-    await db().put("spaces", upd);
+    await window.nativeSync._commitSharedRecordWithIntent("space", upd, upd);
     return spaceId;
   }
 
@@ -4484,7 +4485,7 @@ if ("serviceWorker" in navigator){
     return rec;
   }
   async function setShareRule(spaceId, input){
-    await spazioOngoingScrivibile(spaceId);
+    var spRule = await spazioOngoingScrivibile(spaceId);
     input = input || {};
     var mode = input.mode;
     if (mode === "exact") throw new Error("exact non supportato come regola persistente");
@@ -4517,17 +4518,17 @@ if ("serviceWorker" in navigator){
       version: baseV + 1, deviceId: deviceCorrente(),
       createdAt: (existing && existing.createdAt != null ? existing.createdAt : now),
       updatedAt: now, deleted: false };
-    await db().put("shareRules", rec);
+    await window.nativeSync._commitSharedRecordWithIntent("shareRule", spRule, rec);   // F4/7D: shareRule + intent atomici
     return id;
   }
   async function deleteShareRule(spaceId){
-    if (!spaceId) throw new Error("spaceId richiesto");
+    var spRule = await spazioOngoingScrivibile(spaceId);   // F4/7D: serve lo spazio native-born per l'intent cifrato del tombstone
     var id = shareRuleId(spaceId);
     var rec = await db().get("shareRules", id);
     if (!rec || rec.deleted === true) return id;          // idempotente
-    // F4/7B2: tombstone come write causale (+1), non semplice del(): il comparator deve poterlo vincere.
+    // F4/7B2: tombstone come write causale (+1). F4/7D: il tombstone viaggia cifrato come versione corrente.
     var upd = Object.assign({}, rec, { deleted: true, version: (rec.version | 0) + 1, deviceId: deviceCorrente(), updatedAt: Date.now() });
-    await db().put("shareRules", upd);
+    await window.nativeSync._commitSharedRecordWithIntent("shareRule", spRule, upd);
     return id;
   }
   // READ-ONLY: snapshot materializzabile per una spesa di importo `amount`. Nessuna scrittura,
@@ -5351,6 +5352,7 @@ if ("serviceWorker" in navigator){
       ok("pre-7B2 membro: ora sync-ready", NB.isSyncableSharedRecord(preMd) === true);
       var preS = "space:pre7b2"; await DB.put("spaces", { id: preS, name: "PreS", kind: "experience", status: "active", legacyGroupId: null, authority: "native", selfMemberId: preS + ":a" });   // no version
       await DB.put("spaceMembers", { id: preS + ":a", spaceId: preS, name: "A", active: true, deleted: false, version: 1, deviceId: DEVID });
+      await window.spaceKeys.createSpaceKey(preS, 1);   // F4/7D: una write native richiede una key (qui la creiamo esplicitamente)
       await SR.renameSpace(preS, "PreS2");
       ok("pre-7B2 spazio: rename normalizza a v1", (await getS(preS)).version === 1 && (await getS(preS)).deviceId === DEVID);
 
@@ -5621,15 +5623,22 @@ if ("serviceWorker" in navigator){
   }
   // Seam di test: se attivo, inietta un record invalido nel commit -> rollback (source + projections).
   var _testPoison = false;
-  // Wiring atomico: scrive la SOURCE shared + le sue proiezioni in UNA transazione multi-store.
-  async function commitSourceWithProjection(space, sourceRecord){
+  // Wiring atomico: scrive la SOURCE shared + le sue proiezioni Personali + l'intent E2EE (7D) in UNA
+  // transazione multi-store. opts.noIntent = true per il FUTURO apply inbound (source+proiezioni senza
+  // generare un nuovo outbound intent). La crypto avviene PRIMA di aprire la transazione.
+  async function commitSourceWithProjection(space, sourceRecord, opts){
     if (!space || space.legacyGroupId) throw new Error("commit: spazio non valido/legacy");
+    opts = opts || {};
     var members = await window.sharedRuntime.listMembers(space.id);
     var now = Date.now();
     var batch = await projectionBatchForSource(space, members, space.id, sourceRecord.id, (sourceRecord.deleted === true ? null : sourceRecord), now);
     var items = [{ store: "transactions", record: sourceRecord }].concat(batch);
+    if (!opts.noIntent && space.authority === "native"){
+      var intent = await window.nativeSync._buildIntentItem("transaction", sourceRecord);   // encrypt (fail-closed se manca la key)
+      if (intent) items.push(intent);
+    }
     if (_testPoison) items.push({ store: "liabilities", record: { derived: true, sourceSpaceId: space.id } });   // manca id -> put fallisce
-    await scriviProiezioni(items);   // atomico: source + quota + liabilities insieme
+    await scriviProiezioni(items);   // atomico: source + quota/liabilities + intent insieme
   }
 
   window.personalProjection = {
@@ -6306,15 +6315,15 @@ if ("serviceWorker" in navigator){
   function headerSpaceId(recordType, record){ return recordType === "space" ? record.id : record.spaceId; }
   function aadOf(h){ return TE.encode(JSON.stringify([1, h.spaceId, h.recordId, h.recordType, h.version, h.deviceId, h.keyVersion, h.deleted])); }
 
-  async function encryptSharedRecord(recordType, record, keyVersion){
+  // Cifra usando una CryptoKey GIA' in memoria (usata da createSpace: la key non e' ancora persistita).
+  async function encryptWithKey(recordType, record, key, keyVersion){
     if (!VALID_TYPES[recordType]) throw new Error("recordType non ammesso: " + recordType);
     if (!record || typeof record !== "object") throw new Error("record assente");
     var spaceId = headerSpaceId(recordType, record);
     if (!spaceId || spaceId === "personal:local") throw new Error("record non shared/native");
     if (!Number.isInteger(record.version) || record.version < 1) throw new Error("record causalmente incompleto (version)");
     if (typeof record.deviceId !== "string" || record.deviceId === "") throw new Error("record causalmente incompleto (deviceId)");
-    if (keyVersion == null){ var vs = await listSpaceKeyVersions(spaceId); keyVersion = vs.length ? vs[vs.length - 1] : 1; }
-    var key = await getSpaceKey(spaceId, keyVersion); if (!key) throw new Error("missing-space-key");
+    if (!key) throw new Error("missing-space-key");
     var proj = projOf(recordType, record);   // solo campi shared (local-only gia' esclusi dal boundary)
     var payload = {}; for (var k in proj) if (Object.prototype.hasOwnProperty.call(proj, k) && !HEADER_KEYS[k]) payload[k] = proj[k];
     var header = { protocolVersion: 1, spaceId: spaceId, recordId: record.id, recordType: recordType,
@@ -6324,6 +6333,19 @@ if ("serviceWorker" in navigator){
     return { protocolVersion: 1, spaceId: spaceId, recordId: record.id, recordType: recordType,
       version: record.version, deviceId: record.deviceId, keyVersion: keyVersion, deleted: record.deleted === true,
       iv: bufToB64url(iv.buffer), ciphertext: bufToB64url(ct) };
+  }
+  async function encryptSharedRecord(recordType, record, keyVersion){
+    if (!record || typeof record !== "object") throw new Error("record assente");
+    var spaceId = headerSpaceId(recordType, record);
+    if (!spaceId || spaceId === "personal:local") throw new Error("record non shared/native");
+    if (keyVersion == null){
+      // keyVersion attivo = quello DICHIARATO dallo spazio (non il piu' recente in keystore): un rotate
+      // aggiorna spaces.keyVersion; finche' non avviene, ogni record dello spazio cifra sotto la stessa key.
+      if (recordType === "space") keyVersion = Number.isInteger(record.keyVersion) ? record.keyVersion : 1;
+      else { var sp = await DB().get("spaces", spaceId); keyVersion = (sp && Number.isInteger(sp.keyVersion)) ? sp.keyVersion : 1; }
+    }
+    var key = await getSpaceKey(spaceId, keyVersion); if (!key) throw new Error("missing-space-key");
+    return encryptWithKey(recordType, record, key, keyVersion);
   }
   async function decryptSharedEnvelope(env){
     if (!env || typeof env !== "object") throw new Error("envelope assente");
@@ -6338,11 +6360,12 @@ if ("serviceWorker" in navigator){
     var payload = JSON.parse(TD.decode(pt));
     // ricostruzione SOLO da header + payload allowlisted -> mai campi local-only
     var rec = { id: env.recordId, version: env.version, deviceId: env.deviceId, deleted: env.deleted === true };
-    if (env.recordType !== "space") rec.spaceId = env.spaceId;   // keyVersion resta nell'envelope, non nel record
+    if (env.recordType === "space") rec.keyVersion = env.keyVersion;   // keyVersion e' campo shared dello spazio
+    else rec.spaceId = env.spaceId;
     for (var pk in payload) if (Object.prototype.hasOwnProperty.call(payload, pk) && !HEADER_KEYS[pk]) rec[pk] = payload[pk];
     return projOf(env.recordType, rec);   // boundary/allowlist finale
   }
-  window.nativeCrypto = { encryptSharedRecord: encryptSharedRecord, decryptSharedEnvelope: decryptSharedEnvelope };
+  window.nativeCrypto = { encryptSharedRecord: encryptSharedRecord, decryptSharedEnvelope: decryptSharedEnvelope, _encryptWith: encryptWithKey };
 
   // =================== syncOutbox ===================
   function intentId(spaceId, recordType, recordId){ return "sync:" + spaceId + ":" + recordType + ":" + recordId; }
@@ -6497,6 +6520,252 @@ if ("serviceWorker" in navigator){
 /* F4P7C-E2EE-END */
 </script>
 <!-- ==== /MODULE: native-e2ee + sync-outbox ==== -->
+
+<!-- ==== MODULE: native-sync commit layer (F4/7D) ==== -->
+<script>
+"use strict";
+/* F4 · Passo 7D — commit layer atomico con intent E2EE. Ogni write Shared 2.0 nativa produce, nella
+   STESSA transazione IndexedDB, la source + eventuali proiezioni Personali + l'intent cifrato in
+   syncOutbox. La crypto avviene SEMPRE prima di aprire la transazione. Solo spazi native-born
+   (authority native && !legacyGroupId). Nessuna rete, nessun Worker. */
+/* F4P7D-SYNC-START */
+(function(){
+  function DB(){ return window.calculonDB; }
+  function dev(){ return (typeof DEV !== "undefined" && DEV) ? DEV : "local"; }
+  function nativeBorn(sp){ return sp && sp.authority === "native" && !sp.legacyGroupId; }
+  function intentId(env){ return "sync:" + env.spaceId + ":" + env.recordType + ":" + env.recordId; }
+
+  // Costruisce l'item {store:"syncOutbox", record:intent} da un envelope gia' cifrato, applicando il
+  // coalescing 7C (nativeWinner): se un intent piu' nuovo esiste gia', NON lo sovrascrive (ritorna null).
+  async function intentItemFromEnvelope(env){
+    var id = intentId(env);
+    var ex = await DB().get("syncOutbox", id), now = Date.now();
+    var inM = { version: env.version, deviceId: env.deviceId, deleted: env.deleted === true };
+    if (ex){
+      var exM = { version: ex.version, deviceId: ex.deviceId, deleted: ex.deleted === true };
+      if (window.nativeSyncBoundary.nativeWinner(inM, exM) !== inM) return null;   // esistente >= : non sovrascrivere
+    }
+    return { store: "syncOutbox", record: { id: id, spaceId: env.spaceId, recordType: env.recordType, recordId: env.recordId,
+      version: env.version, deviceId: env.deviceId, keyVersion: env.keyVersion, deleted: env.deleted === true, envelope: env,
+      status: "pending", attempts: 0, createdAt: (ex && ex.createdAt != null ? ex.createdAt : now), updatedAt: now } };
+  }
+  // Cifra un record shared native-born (chiave dal keystore) e ritorna l'item outbox coalescato.
+  async function buildIntentItem(recordType, record){
+    var env = await window.nativeCrypto.encryptSharedRecord(recordType, record);   // throws missing-space-key -> fail closed
+    return await intentItemFromEnvelope(env);
+  }
+
+  // Commit atomico di un record shared (member/space/shareRule) + il suo intent cifrato.
+  async function commitSharedRecordWithIntent(recordType, space, record){
+    if (!space || space.legacyGroupId) throw new Error("commit: spazio legacy fuori scope");
+    if (space.authority !== "native") throw new Error("commit: spazio non native");
+    var storeByType = { space: "spaces", member: "spaceMembers", shareRule: "shareRules" };
+    var store = storeByType[recordType]; if (!store) throw new Error("recordType non gestito: " + recordType);
+    var items = [{ store: store, record: record }];
+    var intent = await buildIntentItem(recordType, record);   // crypto PRIMA della transazione
+    if (intent) items.push(intent);
+    await window.personalProjection._scriviProiezioni(items);   // scrittura atomica multi-store
+  }
+
+  // createSpace E2EE dalla nascita: space + self member + AES key v1 + 2 intent, tutto atomico.
+  async function commitCreateSpace(space, member){
+    var key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
+    var envSpace = await window.nativeCrypto._encryptWith("space", space, key, 1);
+    var envMember = await window.nativeCrypto._encryptWith("member", member, key, 1);
+    var now = Date.now();
+    var keyRec = { id: "spaceKey:" + space.id + ":1", spaceId: space.id, keyVersion: 1, cryptoKey: key, createdAt: now };
+    var iS = await intentItemFromEnvelope(envSpace), iM = await intentItemFromEnvelope(envMember);
+    var items = [{ store: "spaces", record: space }, { store: "spaceMembers", record: member }, { store: "spaceKeys", record: keyRec }];
+    if (iS) items.push(iS); if (iM) items.push(iM);
+    if (_poison) items.push({ store: "syncOutbox", record: { status: "pending" } });   // manca id -> put fallisce -> rollback totale
+    await window.personalProjection._scriviProiezioni(items);   // atomico: space+member+key+outbox
+  }
+  var _poison = false;
+
+  // Bootstrap idempotente di uno spazio nativo pre-7D: key v1 + snapshot cifrato di TUTTO lo stato shared.
+  async function bootstrapSpace(spaceId){
+    var sp = await DB().get("spaces", spaceId);
+    if (!sp || sp.deleted === true) throw new Error("spazio inesistente: " + spaceId);
+    if (!nativeBorn(sp)) throw new Error("bootstrap solo su spazi native-born");
+    // 1) key: crea se manca (createSpaceKey la persiste, idempotente); porta space.keyVersion a 1
+    //    come modifica causale shared (version bump) se non lo era gia'.
+    var kv = Number.isInteger(sp.keyVersion) ? sp.keyVersion : 1;
+    var hadKey = !!(await window.spaceKeys.getSpaceKey(spaceId, kv));
+    var spaceUpdated = false;
+    if (!hadKey){
+      await window.spaceKeys.createSpaceKey(spaceId, 1);   // idempotente; extractable
+      if (sp.keyVersion !== 1){ sp = Object.assign({}, sp, { keyVersion: 1, version: (sp.version | 0) + 1, deviceId: dev(), updatedAt: Date.now() }); spaceUpdated = true; }
+    }
+    // 2) snapshot dei record shared (tombstone inclusi), ESCLUSI personal/derived/proj/liabilities.
+    var members = await DB().list("spaceMembers", function(m){ return m && m.spaceId === spaceId; });
+    var txs = await DB().list("transactions", function(t){ return t && t.spaceId === spaceId && t.derived !== true; });
+    var rule = await DB().get("shareRules", "shareRule:" + spaceId + ":default");
+    var records = [{ type: "space", rec: sp }];
+    members.forEach(function(m){ records.push({ type: "member", rec: m }); });
+    txs.forEach(function(t){ records.push({ type: "transaction", rec: t }); });
+    if (rule) records.push({ type: "shareRule", rec: rule });
+    // 3) cifra + coalesca gli intent (solo record causalmente completi/sync-ready; lo space e' sempre incluso).
+    var items = [];
+    if (spaceUpdated) items.push({ store: "spaces", record: sp });   // solo il campo keyVersion (causale) e' shared
+    for (var i = 0; i < records.length; i++){
+      var e = records[i];
+      if (e.type !== "space" && !window.nativeSyncBoundary.isSyncableSharedRecord(e.rec)) continue;   // salta i causalmente incompleti
+      var it = await buildIntentItem(e.type, e.rec);   // crypto prima della tx
+      if (it) items.push(it);
+    }
+    if (items.length) await window.personalProjection._scriviProiezioni(items);
+    return { spaceId: spaceId, snapshot: records.length };
+  }
+
+  window.nativeSync = {
+    bootstrapSpace: bootstrapSpace,
+    _commitCreateSpace: commitCreateSpace,
+    _commitSharedRecordWithIntent: commitSharedRecordWithIntent,
+    _buildIntentItem: buildIntentItem,
+    _intentItemFromEnvelope: intentItemFromEnvelope,
+    _setTestPoison: function(v){ _poison = !!v; },
+    _test: async function(){
+      var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
+      async function throwsA(fn){ try { await fn(); return false; } catch(e){ return true; } }
+      var SR = window.sharedRuntime, C = window.nativeCrypto, NB = window.nativeSyncBoundary, PJ = window.personalProjection, DBx = window.calculonDB, K = window.spaceKeys, OB = window.syncOutbox;
+      var DEVID = (typeof DEV !== "undefined" && DEV) ? DEV : "local";
+      function O(a){ var o = {}; for (var i = 0; i < a.length; i += 2) o[a[i]] = a[i + 1]; return o; }
+      function outId(sp, type, rid){ return "sync:" + sp + ":" + type + ":" + rid; }
+      async function getOut(sp, type, rid){ return await DBx.get("syncOutbox", outId(sp, type, rid)); }
+      async function all(store){ return await DBx.list(store, function(){ return true; }); }
+
+      // ===== CREATE SPACE E2EE ATOMICITY =====
+      var s = await SR.createSpace({ kind: "ongoing", name: "Spazio Segreto", selfName: "Io Utente" });
+      var SP = s.spaceId, SELF = s.selfMemberId;
+      ok("createSpace: space persistito", (await DBx.get("spaces", SP)) != null);
+      ok("createSpace: self member persistito", (await DBx.get("spaceMembers", SELF)) != null);
+      ok("createSpace: key v1 persistita", (await K.getSpaceKey(SP, 1)) != null);
+      var iSpace = await getOut(SP, "space", SP), iMember = await getOut(SP, "member", SELF);
+      ok("createSpace: intent space pending", iSpace && iSpace.status === "pending");
+      ok("createSpace: intent member pending", iMember && iMember.status === "pending");
+      var decSpace = await C.decryptSharedEnvelope(iSpace.envelope);
+      ok("selfMemberId/authority MAI nell'envelope space", !("selfMemberId" in decSpace) && !("authority" in decSpace) && !("legacyGroupId" in decSpace));
+      ok("selfMemberId MAI in chiaro nell'intent space", JSON.stringify(iSpace).indexOf(SELF) < 0);
+      ok("nome spazio MAI in chiaro (space intent)", JSON.stringify(iSpace).indexOf("Spazio Segreto") < 0);
+      // failure injection -> rollback dei 4 store
+      var nSp = (await all("spaces")).length, nKey = (await all("spaceKeys")).length, nMem = (await all("spaceMembers")).length, nOut = (await all("syncOutbox")).length;
+      window.nativeSync._setTestPoison(true);
+      ok("createSpace poison -> throw", await throwsA(function(){ return SR.createSpace({ kind: "ongoing", name: "Ghost", selfName: "G" }); }));
+      window.nativeSync._setTestPoison(false);
+      ok("rollback: spaces invariato", (await all("spaces")).length === nSp);
+      ok("rollback: spaceKeys invariato", (await all("spaceKeys")).length === nKey);
+      ok("rollback: spaceMembers invariato", (await all("spaceMembers")).length === nMem);
+      ok("rollback: syncOutbox invariato", (await all("syncOutbox")).length === nOut);
+
+      // ===== TRANSACTION WIRING =====
+      var m2 = await SR.addMember(SP, { name: "Anna Verdi" });
+      var tE = await SR.createExpense(SP, { amount: 420, paidById: SELF, allocationMode: "exact", parts: O([SELF, 126, m2, 294]), date: "2026-10-01", note: "nota top secret" });
+      var xrec = await DBx.get("transactions", tE), iTx = await getOut(SP, "transaction", tE);
+      ok("expense: source persistita", xrec && xrec.amount === 420);
+      ok("expense: quota proiezione", (await DBx.get("transactions", "proj:" + SP + ":" + tE + ":quota")).amount === 126);
+      ok("expense: intent stessa version/deviceId", iTx && iTx.version === xrec.version && iTx.deviceId === xrec.deviceId);
+      ok("expense: decrypt intent == projection source", JSON.stringify(await C.decryptSharedEnvelope(iTx.envelope)) === JSON.stringify(NB.sharedProjectionOfTransaction(xrec)));
+      var tS = await SR.createSettlement(SP, { amount: 30, fromMemberId: m2, toMemberId: SELF, date: "2026-10-01" });
+      ok("settlement: intent presente e coerente", (await getOut(SP, "transaction", tS)).version === (await DBx.get("transactions", tS)).version);
+      await SR.updateExpense(SP, tE, { note: "nota aggiornata" });
+      ok("update: intent segue version 2", (await getOut(SP, "transaction", tE)).version === 2 && (await DBx.get("transactions", tE)).version === 2);
+      await SR.deleteTransaction(SP, tE);
+      ok("delete: intent tombstone (deleted true) version 3", (await getOut(SP, "transaction", tE)).deleted === true && (await getOut(SP, "transaction", tE)).version === 3);
+      await SR.restoreTransaction(SP, tE);
+      ok("restore: intent vivo version 4", (await getOut(SP, "transaction", tE)).deleted === false && (await getOut(SP, "transaction", tE)).version === 4);
+      // failure outbox -> rollback source + projections
+      window.personalProjection._setTestPoison(true);
+      var beforeN = (await SR.listTransactions(SP)).length;
+      ok("tx poison -> throw", await throwsA(function(){ return SR.createExpense(SP, { amount: 100, paidById: SELF, allocationMode: "exact", parts: O([SELF, 100]), date: "2026-10-01" }); }));
+      window.personalProjection._setTestPoison(false);
+      ok("tx rollback: nessuna source creata", (await SR.listTransactions(SP)).length === beforeN);
+
+      // ===== SPACE / MEMBER / SHARE RULE WIRING + COALESCING =====
+      await SR.renameSpace(SP, "Altro Nome Segreto");
+      var sp1 = await DBx.get("spaces", SP), iSp = await getOut(SP, "space", SP);
+      ok("rename: intent stessa version/deviceId", iSp.version === sp1.version && iSp.deviceId === sp1.deviceId);
+      ok("rename: decrypt == projection space", JSON.stringify(await C.decryptSharedEnvelope(iSp.envelope)) === JSON.stringify(NB.sharedProjectionOfSpace(sp1)));
+      var mm = await SR.addMember(SP, { name: "Bea Bianchi" });
+      ok("member coalescing: v1", (await getOut(SP, "member", mm)).version === 1);
+      await SR.updateMember(SP, mm, { name: "Bea B." });
+      ok("member coalescing: v2 sostituisce v1", (await getOut(SP, "member", mm)).version === 2);
+      await SR.archiveMember(SP, mm);
+      ok("member coalescing: v3", (await getOut(SP, "member", mm)).version === 3);
+      ok("member: un SOLO intent per record", (await DBx.list("syncOutbox", function(x){ return x.recordId === mm; })).length === 1);
+      await SR.setShareRule(SP, { mode: "equal" });
+      var ruleId = "shareRule:" + SP + ":default";
+      ok("shareRule: intent v1", (await getOut(SP, "shareRule", ruleId)).version === 1);
+      await SR.deleteShareRule(SP);
+      var iRule = await getOut(SP, "shareRule", ruleId);
+      ok("shareRule tombstone: intent deleted true, version 2", iRule.deleted === true && iRule.version === 2);
+      ok("shareRule tombstone: decrypt deleted true", (await C.decryptSharedEnvelope(iRule.envelope)).deleted === true);
+      // stale envelope non sostituisce; stale ack non chiude
+      var staleEnv = await C.encryptSharedRecord("member", Object.assign({}, await DBx.get("spaceMembers", mm), { version: 1 }));
+      await OB.enqueueEnvelope(staleEnv);
+      ok("stale envelope (v1) non sostituisce v3 membro", (await getOut(SP, "member", mm)).version === 3);
+      ok("stale ack (v2) non chiude v3", (await OB.markDelivered(outId(SP, "member", mm), 2, DEVID)) === false);
+
+      // ===== PLAINTEXT LEAK CHECK =====
+      var blob = JSON.stringify(await all("syncOutbox"));
+      ok("outbox: nessun nome membro", blob.indexOf("Anna Verdi") < 0 && blob.indexOf("Bea Bianchi") < 0);
+      ok("outbox: nessun nome spazio", blob.indexOf("Segreto") < 0);
+      ok("outbox: nessuna nota", blob.indexOf("nota top secret") < 0 && blob.indexOf("nota aggiornata") < 0);
+      var okStruct = (await all("syncOutbox")).every(function(x){
+        if (!x.envelope) return true;
+        var ek = Object.keys(x.envelope).sort().join(",");
+        return ek === "ciphertext,deleted,deviceId,iv,keyVersion,protocolVersion,recordId,recordType,spaceId,version";
+      });
+      ok("outbox: envelope solo header+iv+ciphertext (nessun campo plaintext)", okStruct);
+
+      // ===== BOOTSTRAP (spazio pre-7D) =====
+      var PB = "space:boot7d";
+      await DBx.put("spaces", { id: PB, name: "Boot Space", kind: "ongoing", status: "active", legacyGroupId: null, authority: "native", selfMemberId: PB + ":a", version: 1, deviceId: DEVID });
+      await DBx.put("spaceMembers", { id: PB + ":a", spaceId: PB, name: "Alfa Uno", active: true, deleted: false, version: 1, deviceId: DEVID });
+      await DBx.put("spaceMembers", { id: PB + ":b", spaceId: PB, name: "Beta Due", active: false, deleted: true, version: 2, deviceId: DEVID });
+      await DBx.put("transactions", { id: PB + ":t1", spaceId: PB, type: "expense", amount: 100, paidById: PB + ":a", allocations: [{ memberId: PB + ":a", amount: 100 }], allocationMode: "exact", date: "2026-10-01", version: 1, deviceId: DEVID, deleted: false });
+      await DBx.put("transactions", { id: PB + ":t2", spaceId: PB, type: "expense", amount: 50, paidById: PB + ":a", allocations: [{ memberId: PB + ":a", amount: 50 }], allocationMode: "exact", date: "2026-10-01", version: 2, deviceId: DEVID, deleted: true });
+      await DBx.put("shareRules", { id: "shareRule:" + PB + ":default", spaceId: PB, mode: "equal", parts: [], version: 1, deviceId: DEVID, deleted: false });
+      await DBx.put("transactions", { id: "proj:" + PB + ":t1:quota", spaceId: "personal:local", type: "expense", amount: 100, derived: true, projectionType: "share-quota", sourceSpaceId: PB, version: 1, deviceId: DEVID, deleted: false });
+      await DBx.put("liabilities", { id: "liab:" + PB + ":t1:x", sourceSpaceId: PB, derived: true, signedAmount: 100, deleted: false });
+      await window.nativeSync.bootstrapSpace(PB);
+      ok("bootstrap: key v1 creata", (await K.getSpaceKey(PB, 1)) != null);
+      ok("bootstrap: space.keyVersion = 1", (await DBx.get("spaces", PB)).keyVersion === 1);
+      ok("bootstrap: intent space", (await getOut(PB, "space", PB)) != null);
+      ok("bootstrap: intent member a", (await getOut(PB, "member", PB + ":a")) != null);
+      ok("bootstrap: intent member b (tombstone)", (await getOut(PB, "member", PB + ":b")).deleted === true);
+      ok("bootstrap: intent tx1", (await getOut(PB, "transaction", PB + ":t1")) != null);
+      ok("bootstrap: intent tx2 (tombstone)", (await getOut(PB, "transaction", PB + ":t2")).deleted === true);
+      ok("bootstrap: intent shareRule", (await getOut(PB, "shareRule", "shareRule:" + PB + ":default")) != null);
+      ok("bootstrap: derived quota ESCLUSA", (await getOut("personal:local", "transaction", "proj:" + PB + ":t1:quota")) == null);
+      var bootOut = await DBx.list("syncOutbox", function(x){ return x.spaceId === PB; });
+      ok("bootstrap: solo 6 intent shared (nessun derived/liability/personal)", bootOut.length === 6);
+      // secondo bootstrap idempotente
+      var keyN = (await K.listSpaceKeyVersions(PB)).length, spV = (await DBx.get("spaces", PB)).version;
+      var outBefore = (await DBx.list("syncOutbox", function(x){ return x.spaceId === PB; })).map(function(x){ return { id: x.id, v: x.version, u: x.updatedAt }; });
+      await window.nativeSync.bootstrapSpace(PB);
+      ok("bootstrap idempotente: nessuna nuova key", (await K.listSpaceKeyVersions(PB)).length === keyN);
+      ok("bootstrap idempotente: space version invariata", (await DBx.get("spaces", PB)).version === spV);
+      var outAfter = await DBx.list("syncOutbox", function(x){ return x.spaceId === PB; });
+      ok("bootstrap idempotente: stesso numero intent", outAfter.length === outBefore.length);
+      ok("bootstrap idempotente: updatedAt invariati (no re-write)", outAfter.every(function(a){ var b = outBefore.filter(function(o){ return o.id === a.id; })[0]; return b && b.v === a.version && b.u === a.updatedAt; }));
+
+      // ===== REGRESSIONE: liability aggregate == self balance; incremental == rebuild =====
+      ok("liability aggregate == native self balance", (await PJ.liabilityBalance(SP)).totalSignedAmount === ((await SR.balances(SP))[SELF] || 0));
+      ok("incremental == rebuildSpace (written 0)", (await PJ.rebuildSpace(SP)).written === 0);
+
+      // ===== RELOAD IndexedDB =====
+      await DBx.close();
+      ok("reload: intent space persistito", (await getOut(SP, "space", SP)) != null);
+      ok("reload: key persistita", (await K.getSpaceKey(SP, 1)) != null);
+
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    }
+  };
+})();
+/* F4P7D-SYNC-END */
+</script>
+<!-- ==== /MODULE: native-sync commit layer ==== -->
 
 <script>
 "use strict";
