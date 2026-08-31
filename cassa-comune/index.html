@@ -4373,9 +4373,10 @@ if ("serviceWorker" in navigator){
     var spaceId = nuovoSpaceId(), selfMemberId = nuovoMemberId(spaceId);
     var space = { id: spaceId, name: name, kind: kind, status: "active", currency: "EUR",
       legacyGroupId: null, authority: "native",   // F4/6B: nato nativo -> authority native
-      selfMemberId: selfMemberId, createdAt: now, updatedAt: now, deleted: false };
-    var membro = { id: selfMemberId, spaceId: spaceId, name: selfName, active: true,
+      selfMemberId: selfMemberId, version: 1, deviceId: deviceCorrente(),   // F4/7B2: metadata causale shared
       createdAt: now, updatedAt: now, deleted: false };
+    var membro = { id: selfMemberId, spaceId: spaceId, name: selfName, active: true,
+      version: 1, deviceId: deviceCorrente(), createdAt: now, updatedAt: now, deleted: false };
     var sv = db().validaSpace(space); if (sv) throw new Error("space non valido: " + sv);   // validatore canonico F4/1
     await scriviAtomico(["spaces", "spaceMembers"], [space, membro]);
     return { spaceId: spaceId, selfMemberId: selfMemberId };
@@ -4388,7 +4389,7 @@ if ("serviceWorker" in navigator){
     var name = trimStr(input.name); if (!name) throw new Error("nome membro vuoto");
     var now = Date.now();
     var membro = { id: nuovoMemberId(spaceId), spaceId: spaceId, name: name, active: true,
-      createdAt: now, updatedAt: now, deleted: false };
+      version: 1, deviceId: deviceCorrente(), createdAt: now, updatedAt: now, deleted: false };   // F4/7B2
     await db().put("spaceMembers", membro);
     return membro.id;
   }
@@ -4401,6 +4402,7 @@ if ("serviceWorker" in navigator){
     var upd = Object.assign({}, cur);
     if ("name" in patch){ var nm = trimStr(patch.name); if (!nm) throw new Error("nome membro vuoto"); upd.name = nm; }
     upd.id = memberId; upd.spaceId = spaceId; upd.deleted = false;   // storico/identita' invariati
+    upd.version = (cur.version | 0) + 1; upd.deviceId = deviceCorrente();   // F4/7B2: base mancante -> 0 -> v1
     await db().put("spaceMembers", upd);
     return memberId;
   }
@@ -4410,7 +4412,7 @@ if ("serviceWorker" in navigator){
     if (memberId === self.id) throw new Error("il membro self non puo' essere archiviato mentre lo spazio e' attivo");
     var cur = await caricaMembro(spaceId, memberId);
     if (cur.active === false) return memberId;      // idempotente
-    var upd = Object.assign({}, cur, { active: false });   // NON hard delete; lo storico non viene toccato
+    var upd = Object.assign({}, cur, { active: false, version: (cur.version | 0) + 1, deviceId: deviceCorrente() });   // active:false NON e' tombstone
     await db().put("spaceMembers", upd);
     return memberId;
   }
@@ -4418,7 +4420,7 @@ if ("serviceWorker" in navigator){
     await spazioScrivibile(spaceId);
     var cur = await caricaMembro(spaceId, memberId);
     if (cur.active === true) return memberId;        // idempotente
-    var upd = Object.assign({}, cur, { active: true });
+    var upd = Object.assign({}, cur, { active: true, version: (cur.version | 0) + 1, deviceId: deviceCorrente() });   // F4/7B2
     await db().put("spaceMembers", upd);
     return memberId;
   }
@@ -4427,7 +4429,7 @@ if ("serviceWorker" in navigator){
   async function renameSpace(spaceId, name){
     var sp = await spazioNativo(spaceId);            // qualunque status; mai legacy
     var nm = trimStr(name); if (!nm) throw new Error("nome spazio vuoto");
-    var upd = Object.assign({}, sp, { name: nm });
+    var upd = Object.assign({}, sp, { name: nm, version: (sp.version | 0) + 1, deviceId: deviceCorrente() });   // F4/7B2: bump shared (name in SHARED_SPACE_FIELDS)
     await db().put("spaces", upd);
     return spaceId;
   }
@@ -4435,7 +4437,7 @@ if ("serviceWorker" in navigator){
     var sp = await spazioNativo(spaceId);
     if (sp.status === "archived") return spaceId;    // idempotente
     if (sp.status !== "active") throw new Error("spazio non active: status " + String(sp.status));
-    var upd = Object.assign({}, sp, { status: "archived" });   // il membro self NON viene archiviato
+    var upd = Object.assign({}, sp, { status: "archived", version: (sp.version | 0) + 1, deviceId: deviceCorrente() });   // il membro self NON viene archiviato
     await db().put("spaces", upd);
     return spaceId;
   }
@@ -4443,7 +4445,7 @@ if ("serviceWorker" in navigator){
     var sp = await spazioNativo(spaceId);
     if (sp.status === "active") return spaceId;       // idempotente
     if (sp.status !== "archived") throw new Error("spazio non archived: status " + String(sp.status));
-    var upd = Object.assign({}, sp, { status: "active" });     // experience|ongoing archived -> active
+    var upd = Object.assign({}, sp, { status: "active", version: (sp.version | 0) + 1, deviceId: deviceCorrente() });   // experience|ongoing archived -> active
     await db().put("spaces", upd);
     return spaceId;
   }
@@ -4509,7 +4511,10 @@ if ("serviceWorker" in navigator){
     }
     var id = shareRuleId(spaceId), now = Date.now();
     var existing = await db().get("shareRules", id);   // preserva createdAt anche se era tombstone
+    // F4/7B2: version lineage continua anche attraverso un tombstone (ricreazione = +1). Base mancante -> 0.
+    var baseV = (existing && Number.isInteger(existing.version)) ? existing.version : 0;
     var rec = { id: id, spaceId: spaceId, mode: mode, parts: parts,
+      version: baseV + 1, deviceId: deviceCorrente(),
       createdAt: (existing && existing.createdAt != null ? existing.createdAt : now),
       updatedAt: now, deleted: false };
     await db().put("shareRules", rec);
@@ -4520,7 +4525,9 @@ if ("serviceWorker" in navigator){
     var id = shareRuleId(spaceId);
     var rec = await db().get("shareRules", id);
     if (!rec || rec.deleted === true) return id;          // idempotente
-    await db().del("shareRules", id);                     // tombstone (reversibile), coerente col modello
+    // F4/7B2: tombstone come write causale (+1), non semplice del(): il comparator deve poterlo vincere.
+    var upd = Object.assign({}, rec, { deleted: true, version: (rec.version | 0) + 1, deviceId: deviceCorrente(), updatedAt: Date.now() });
+    await db().put("shareRules", upd);
     return id;
   }
   // READ-ONLY: snapshot materializzabile per una spesa di importo `amount`. Nessuna scrittura,
@@ -5282,6 +5289,74 @@ if ("serviceWorker" in navigator){
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
     },
+    // F4/7B2 — metadata causale (version/deviceId) su spaces/members/shareRules.
+    _testCausal: async function(){
+      var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
+      var DB = window.calculonDB, SR = window.sharedRuntime, NB = window.nativeSyncBoundary;
+      var DEVID = deviceCorrente();
+      function O1(k, v){ var o = {}; o[k] = v; return o; }
+      async function getS(id){ return await DB.get("spaces", id); }
+      async function getM(id){ return await DB.get("spaceMembers", id); }
+      async function getR(id){ return await DB.get("shareRules", id); }
+
+      // SPACE lineage
+      var og = await SR.createSpace({ kind: "ongoing", name: "Caus", selfName: "Gio" });
+      var OG = og.spaceId, S = og.selfMemberId;
+      var sp0 = await getS(OG);
+      ok("createSpace: space v1 + deviceId", sp0.version === 1 && sp0.deviceId === DEVID);
+      ok("createSpace: self member v1", (await getM(S)).version === 1 && (await getM(S)).deviceId === DEVID);
+      await SR.renameSpace(OG, "Caus2"); ok("rename: space v2", (await getS(OG)).version === 2);
+      await SR.archiveSpace(OG); ok("archive: space v3", (await getS(OG)).version === 3 && (await getS(OG)).status === "archived");
+      await SR.restoreSpace(OG); ok("restore: space v4", (await getS(OG)).version === 4 && (await getS(OG)).status === "active");
+
+      // MEMBER lineage
+      var m2 = await SR.addMember(OG, { name: "Anna" });
+      ok("addMember: v1", (await getM(m2)).version === 1 && (await getM(m2)).deviceId === DEVID);
+      await SR.updateMember(OG, m2, { name: "Anna B" }); ok("updateMember: v2", (await getM(m2)).version === 2);
+      await SR.archiveMember(OG, m2);
+      var m2a = await getM(m2);
+      ok("archiveMember: v3, active false, NON tombstone", m2a.version === 3 && m2a.active === false && m2a.deleted === false);
+      await SR.restoreMember(OG, m2); ok("restoreMember: v4", (await getM(m2)).version === 4);
+      ok("membro sync-ready", NB.isSyncableSharedRecord(await getM(m2)) === true);
+
+      // SHARE RULE lineage
+      var rid = "shareRule:" + OG + ":default";
+      await SR.setShareRule(OG, { mode: "equal" });
+      var rc = await getR(rid), createdAt0 = rc.createdAt;
+      ok("setShareRule: v1 + deviceId", rc.version === 1 && rc.deviceId === DEVID);
+      await SR.setShareRule(OG, { mode: "shares", parts: [{ memberId: S, value: 1 }, { memberId: m2, value: 1 }] });
+      ok("setShareRule update: v2", (await getR(rid)).version === 2);
+      await SR.deleteShareRule(OG);
+      var rd = await getR(rid);
+      ok("deleteShareRule: v3 tombstone", rd.version === 3 && rd.deleted === true);
+      await SR.setShareRule(OG, { mode: "equal" });
+      var rr = await getR(rid);
+      ok("ricreazione dopo tombstone: stesso id, deleted false, v4", rr.id === rid && rr.deleted === false && rr.version === 4);
+      ok("shareRule: createdAt preservato attraverso il ciclo", rr.createdAt === createdAt0);
+      ok("shareRule sync-ready", NB.isSyncableSharedRecord(await getR(rid)) === true);
+
+      // TRANSACTIONS 3A/5E: non regredire
+      var t1 = await SR.createExpense(OG, { amount: 100, paidById: S, allocationMode: "exact", parts: O1(S, 100), date: "2026-08-01" });
+      ok("createExpense: v1", (await DB.get("transactions", t1)).version === 1);
+      await SR.updateExpense(OG, t1, { note: "x" });
+      ok("updateExpense: v2", (await DB.get("transactions", t1)).version === 2);
+      ok("tx sync-ready", NB.isSyncableSharedRecord(await DB.get("transactions", t1)) === true);
+
+      // PRE-7B2: record senza metadata -> prima write normalizza a v1
+      var preM = OG + ":pre"; await DB.put("spaceMembers", { id: preM, spaceId: OG, name: "Pre", active: true, deleted: false });   // no version/deviceId
+      ok("pre-7B2 membro: incompleto NON sync-ready", NB.isSyncableSharedRecord(await getM(preM)) === false);
+      await SR.updateMember(OG, preM, { name: "Pre2" });
+      var preMd = await getM(preM);
+      ok("pre-7B2 membro: prima write -> v1 + deviceId", preMd.version === 1 && preMd.deviceId === DEVID);
+      ok("pre-7B2 membro: ora sync-ready", NB.isSyncableSharedRecord(preMd) === true);
+      var preS = "space:pre7b2"; await DB.put("spaces", { id: preS, name: "PreS", kind: "experience", status: "active", legacyGroupId: null, authority: "native", selfMemberId: preS + ":a" });   // no version
+      await DB.put("spaceMembers", { id: preS + ":a", spaceId: preS, name: "A", active: true, deleted: false, version: 1, deviceId: DEVID });
+      await SR.renameSpace(preS, "PreS2");
+      ok("pre-7B2 spazio: rename normalizza a v1", (await getS(preS)).version === 1 && (await getS(preS)).deviceId === DEVID);
+
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    },
   };
 })();
 /* F4P2-SHARED-END */
@@ -6039,7 +6114,12 @@ if ("serviceWorker" in navigator){
   function sharedProjectionOfTransaction(t){ if (!t || typeof t !== "object") throw new Error("transaction assente"); return pick(t, SHARED_TX_FIELDS); }
   function sharedProjectionOfShareRule(s){ if (!s || typeof s !== "object") throw new Error("shareRule assente"); return pick(s, SHARED_SHARERULE_FIELDS); }
 
-  // GATE fail-closed: true SOLO per record shared noti; qualunque stato locale/derivato/sconosciuto -> false.
+  // 7B2: record causalmente completo (sync-ready) solo con version intero >=1 e deviceId non vuoto.
+  function hasCausalMetadata(record){
+    return Number.isInteger(record.version) && record.version >= 1 && typeof record.deviceId === "string" && record.deviceId !== "";
+  }
+  // GATE fail-closed: true SOLO per record shared noti E causalmente completi; ogni stato
+  // locale/derivato/sconosciuto/senza metadata causale -> false.
   function isSyncableSharedRecord(record){
     if (!record || typeof record !== "object") return false;
     // Esclusioni assolute
@@ -6048,16 +6128,16 @@ if ("serviceWorker" in navigator){
     var id = record.id;
     if (typeof id === "string" && (id.indexOf("proj:") === 0 || id.indexOf("liab:") === 0)) return false;   // quota/liability
     // Ammissione POSITIVA dei soli tipi shared:
+    var tipoOk = false;
     if (typeof id === "string" && id.indexOf("shareRule:") === 0){                    // shareRule
-      return typeof record.spaceId === "string" && record.spaceId !== "" && record.mode != null && Array.isArray(record.parts);
+      tipoOk = typeof record.spaceId === "string" && record.spaceId !== "" && record.mode != null && Array.isArray(record.parts);
+    } else if (record.type === "expense" || record.type === "settlement"){            // transazione shared
+      tipoOk = typeof record.spaceId === "string" && record.spaceId !== "" && record.spaceId !== "personal:local";
+    } else if (typeof record.spaceId === "string" && record.spaceId !== "" && typeof record.name === "string" && ("active" in record) && record.type == null){   // membro
+      tipoOk = true;
     }
-    if (record.type === "expense" || record.type === "settlement"){                   // transazione shared
-      return typeof record.spaceId === "string" && record.spaceId !== "" && record.spaceId !== "personal:local";
-    }
-    if (typeof record.spaceId === "string" && record.spaceId !== "" && typeof record.name === "string" && ("active" in record) && record.type == null){   // membro
-      return true;
-    }
-    return false;   // account/category/budget/recurring/learning/personal-tx/sconosciuto -> fail-closed
+    if (!tipoOk) return false;   // account/category/budget/recurring/learning/personal-tx/sconosciuto
+    return hasCausalMetadata(record);   // 7B2: record causalmente incompleto -> fail-closed
   }
 
   // COMPARATOR nativo (nessun global clock). version maggiore vince; a parita' di version con un
@@ -6114,8 +6194,12 @@ if ("serviceWorker" in navigator){
       ok("liability mai syncabile", NB.isSyncableSharedRecord({ id: "liab:space:X:t1:A", sourceSpaceId: "space:X", counterpartMemberId: "A", signedAmount: 150 }) === false);
       ok("shared expense ammessa", NB.isSyncableSharedRecord({ id: "space:X:t1", spaceId: "space:X", type: "expense", amount: 420, paidById: "space:X:a", allocations: [{ memberId: "space:X:a", amount: 420 }], version: 1, deviceId: "d1" }) === true);
       ok("shared settlement ammesso", NB.isSyncableSharedRecord({ id: "space:X:t2", spaceId: "space:X", type: "settlement", amount: 50, fromMemberId: "space:X:a", toMemberId: "space:X:b", version: 1, deviceId: "d1" }) === true);
-      ok("membro ammesso", NB.isSyncableSharedRecord({ id: "space:X:a", spaceId: "space:X", name: "Anna", active: true, deleted: false }) === true);
-      ok("shareRule ammesso", NB.isSyncableSharedRecord({ id: "shareRule:space:X:default", spaceId: "space:X", mode: "shares", parts: [{ memberId: "space:X:a", value: 1 }] }) === true);
+      ok("membro ammesso", NB.isSyncableSharedRecord({ id: "space:X:a", spaceId: "space:X", name: "Anna", active: true, deleted: false, version: 1, deviceId: "d1" }) === true);
+      ok("shareRule ammesso", NB.isSyncableSharedRecord({ id: "shareRule:space:X:default", spaceId: "space:X", mode: "shares", parts: [{ memberId: "space:X:a", value: 1 }], version: 1, deviceId: "d1" }) === true);
+      ok("membro senza causal metadata respinto", NB.isSyncableSharedRecord({ id: "space:X:a", spaceId: "space:X", name: "Anna", active: true, deleted: false }) === false);
+      ok("shareRule senza causal metadata respinto", NB.isSyncableSharedRecord({ id: "shareRule:space:X:default", spaceId: "space:X", mode: "shares", parts: [] }) === false);
+      ok("version 0 respinta", NB.isSyncableSharedRecord({ id: "space:X:t1", spaceId: "space:X", type: "expense", amount: 1, paidById: "space:X:a", allocations: [], version: 0, deviceId: "d1" }) === false);
+      ok("deviceId vuoto respinto", NB.isSyncableSharedRecord({ id: "space:X:t1", spaceId: "space:X", type: "expense", amount: 1, paidById: "space:X:a", allocations: [], version: 1, deviceId: "" }) === false);
       ok("account respinto", NB.isSyncableSharedRecord({ id: "acc:1", name: "Contante", type: "cash" }) === false);
       ok("category respinta", NB.isSyncableSharedRecord({ id: "cat:1", name: "Cibo", kind: "expense" }) === false);
       ok("budget respinto", NB.isSyncableSharedRecord({ id: "2026-08", total: 100000 }) === false);
