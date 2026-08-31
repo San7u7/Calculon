@@ -4058,11 +4058,223 @@ if ("serviceWorker" in navigator){
     return res;
   }
 
+  /* F4 · Passo 3A — write-path NATIVO Shared 2.0 (solo spazi nativi, LOCALE).
+     Scrittura consentita SOLO in spazi: kind experience|ongoing, status active, SENZA legacyGroupId.
+     Nessuna UI, nessun sync, nessun dual-write legacy, nessuna gestione membri, nessuna shareRules.
+     Autorita' causale: create version:1, ogni mutazione version+1, deviceId corrente; updatedAt
+     lo imposta il layer put (informativo). Delete = tombstone logico (mai hard delete).
+     La fonte canonica dopo il salvataggio e' SEMPRE allocations[{memberId,amount}] con Sigma = amount:
+     modifiche future a membri/regole NON riscrivono lo storico. Fail-closed su ogni incoerenza. */
+  function deviceCorrente(){ return (typeof DEV !== "undefined" && DEV) ? DEV : "local"; }
+  function nuovoTxId(spaceId){ return spaceId + ":" + codice(8); }
+
+  // Guardia di scrivibilita' dello spazio (fail-closed). Ritorna lo space se scrivibile.
+  async function spazioScrivibile(spaceId){
+    if (!spaceId) throw new Error("spaceId richiesto");
+    var sp = await db().get("spaces", spaceId);
+    if (!sp || sp.deleted === true) throw new Error("spazio inesistente: " + spaceId);
+    if (sp.legacyGroupId) throw new Error("spazio legacy: read-only in questo passo");
+    if (sp.kind !== "experience" && sp.kind !== "ongoing") throw new Error("spazio non shared: kind " + sp.kind);
+    if (sp.status !== "active") throw new Error("spazio non active: status " + String(sp.status));
+    return sp;
+  }
+  // Membri: attivi (active!==false) per i NUOVI riferimenti; tutti (attivi+inattivi, no tombstone)
+  // per validare snapshot e riferimenti gia' esistenti.
+  async function membriSpazio(spaceId){
+    var ms = await listMembers(spaceId);   // esclude solo i tombstone (deleted:true)
+    var attivi = {}, tutti = {};
+    for (var i = 0; i < ms.length; i++){ tutti[ms[i].id] = true; if (ms[i].active !== false) attivi[ms[i].id] = true; }
+    return { attivi: attivi, tutti: tutti };
+  }
+  // Materializza lo snapshot allocations da (mode, parts) riusando la primitiva pura shares().
+  // parts: { memberId: peso }. equal: pesi ignorati; shares: pesi interi >0; percent: interi, Sigma=10000
+  // (centesimi di percento, 100.00%); exact: interi >=0, Sigma=amount. Fail-closed sui pesi invalidi.
+  function materializzaAlloc(mode, parts, amount){
+    if (!mode) throw new Error("allocationMode assente");
+    if (!parts || typeof parts !== "object") throw new Error("parts assente");
+    var ids = Object.keys(parts);
+    if (ids.length === 0) throw new Error("parts vuoto");
+    var i, w, somma = 0;
+    for (i = 0; i < ids.length; i++){ w = parts[ids[i]]; if (!centInt(w)) throw new Error("peso non intero: " + ids[i]); }
+    if (mode === "equal"){
+      /* pesi ignorati: shares() assegna peso 1 a ciascun partecipante */
+    } else if (mode === "shares"){
+      for (i = 0; i < ids.length; i++){ if (parts[ids[i]] <= 0) throw new Error("share <=0: " + ids[i]); somma += parts[ids[i]]; }
+      if (somma <= 0) throw new Error("shares: somma pesi <=0");
+    } else if (mode === "percent"){
+      for (i = 0; i < ids.length; i++){ if (parts[ids[i]] < 0) throw new Error("percent <0: " + ids[i]); somma += parts[ids[i]]; }
+      if (somma !== 10000) throw new Error("percent: somma (" + somma + ") != 10000 (100.00%)");
+    } else if (mode === "exact"){
+      for (i = 0; i < ids.length; i++){ if (parts[ids[i]] < 0) throw new Error("exact <0: " + ids[i]); somma += parts[ids[i]]; }
+      if (somma !== amount) throw new Error("exact: somma (" + somma + ") != amount (" + amount + ")");
+    } else {
+      throw new Error("mode sconosciuto: " + mode);
+    }
+    var mp = shares({ kind: "expense", amountCents: amount, split: { mode: mode, parts: parts } });
+    var alloc = [], tot = 0, aids = Object.keys(mp);
+    if (aids.length === 0) throw new Error("materializzazione vuota");
+    for (i = 0; i < aids.length; i++){ alloc.push({ memberId: aids[i], amount: mp[aids[i]] }); tot += mp[aids[i]]; }
+    if (tot !== amount) throw new Error("materializzazione incoerente: " + tot + " != " + amount);   // invariante Sigma = amount
+    return alloc;
+  }
+  // Estrae (mode, parts) da un input/patch, accettando sia forma piatta sia allocation:{mode,parts}.
+  function leggiRipartizione(o){
+    var mode = ("allocationMode" in o) ? o.allocationMode : (o.allocation ? o.allocation.mode : undefined);
+    var parts = ("parts" in o) ? o.parts : (o.allocation ? o.allocation.parts : undefined);
+    return { mode: mode, parts: parts };
+  }
+
+  async function createExpense(spaceId, input){
+    await spazioScrivibile(spaceId);
+    input = input || {};
+    if (!centInt(input.amount) || input.amount <= 0) throw new Error("amount non intero/<=0");
+    var m = await membriSpazio(spaceId);
+    if (!m.attivi[input.paidById]) throw new Error("payer inesistente/non attivo: " + input.paidById);
+    var rip = leggiRipartizione(input);
+    var alloc = materializzaAlloc(rip.mode, rip.parts, input.amount);
+    for (var i = 0; i < alloc.length; i++){ if (!m.attivi[alloc[i].memberId]) throw new Error("allocatee inesistente/non attivo: " + alloc[i].memberId); }
+    var now = Date.now();
+    var tx = { id: nuovoTxId(spaceId), spaceId: spaceId, type: "expense",
+      amount: input.amount, paidById: input.paidById, allocations: alloc, allocationMode: rip.mode,
+      date: (input.date != null ? input.date : null), note: (input.note != null ? input.note : null),
+      version: 1, deviceId: deviceCorrente(), createdAt: now, updatedAt: now, deleted: false };
+    var err = validaTx(tx, function(id){ return !!m.tutti[id]; });
+    if (err) throw new Error("expense invalida: " + err);
+    await db().put("transactions", tx);
+    return tx.id;
+  }
+
+  // Carica una tx viva dello spazio per la modifica; fail-closed se assente/altrove/eliminata/tipo errato.
+  async function txDaModificare(spaceId, txId, tipoAtteso){
+    var cur = await db().get("transactions", txId);
+    if (!cur || cur.spaceId !== spaceId) throw new Error("transazione inesistente nello spazio: " + txId);
+    if (cur.deleted === true) throw new Error("transazione eliminata: usare restore");
+    if (cur.type !== tipoAtteso) throw new Error("type immutabile: atteso " + tipoAtteso + ", trovato " + cur.type);
+    return cur;
+  }
+  // Riferimenti gia' presenti nella tx corrente (payer/allocatee o from/to).
+  function riferimentiCorrenti(cur){
+    var g = {};
+    if (cur.type === "expense"){ g[cur.paidById] = true; (cur.allocations || []).forEach(function(a){ g[a.memberId] = true; }); }
+    else { g[cur.fromMemberId] = true; g[cur.toMemberId] = true; }
+    return g;
+  }
+
+  async function updateExpense(spaceId, txId, patch){
+    await spazioScrivibile(spaceId);
+    var cur = await txDaModificare(spaceId, txId, "expense");
+    patch = patch || {};
+    if ("spaceId" in patch && patch.spaceId !== spaceId) throw new Error("spaceId immutabile");
+    if ("id" in patch && patch.id !== txId) throw new Error("id immutabile");
+    if ("type" in patch && patch.type !== "expense") throw new Error("type immutabile");
+    var amount = ("amount" in patch) ? patch.amount : cur.amount;
+    if (!centInt(amount) || amount <= 0) throw new Error("amount non intero/<=0");
+    var paidById = ("paidById" in patch) ? patch.paidById : cur.paidById;
+    var rip = leggiRipartizione(patch), alloc, allocMode;
+    if (rip.mode || rip.parts){
+      allocMode = rip.mode || cur.allocationMode;
+      alloc = materializzaAlloc(allocMode, rip.parts, amount);
+    } else {
+      if (amount !== cur.amount) throw new Error("amount cambiato senza nuova ripartizione");
+      alloc = (cur.allocations || []).map(function(a){ return { memberId: a.memberId, amount: a.amount }; });
+      allocMode = cur.allocationMode;
+    }
+    var m = await membriSpazio(spaceId), gia = riferimentiCorrenti(cur);
+    // un riferimento gia' presente puo' restare anche se ora inattivo; un NUOVO riferimento deve essere attivo.
+    function ammesso(id){ return !!m.attivi[id] || (!!gia[id] && !!m.tutti[id]); }
+    if (!ammesso(paidById)) throw new Error("payer non ammesso (nuovo riferimento a inattivo?): " + paidById);
+    for (var i = 0; i < alloc.length; i++){ if (!ammesso(alloc[i].memberId)) throw new Error("allocatee non ammesso (nuovo riferimento a inattivo?): " + alloc[i].memberId); }
+    var upd = { id: txId, spaceId: spaceId, type: "expense",
+      amount: amount, paidById: paidById, allocations: alloc, allocationMode: allocMode,
+      date: ("date" in patch ? patch.date : cur.date), note: ("note" in patch ? patch.note : (cur.note != null ? cur.note : null)),
+      version: (cur.version | 0) + 1, deviceId: deviceCorrente(),
+      createdAt: (cur.createdAt != null ? cur.createdAt : null), updatedAt: Date.now(), deleted: false };
+    var err = validaTx(upd, function(id){ return !!m.tutti[id]; });
+    if (err) throw new Error("expense update invalida: " + err);
+    await db().put("transactions", upd);
+    return upd.id;
+  }
+
+  async function createSettlement(spaceId, input){
+    await spazioScrivibile(spaceId);
+    input = input || {};
+    if (!centInt(input.amount) || input.amount <= 0) throw new Error("amount non intero/<=0");
+    if (input.fromMemberId === input.toMemberId) throw new Error("settlement from === to");
+    var m = await membriSpazio(spaceId);
+    if (!m.attivi[input.fromMemberId]) throw new Error("from inesistente/non attivo: " + input.fromMemberId);
+    if (!m.attivi[input.toMemberId]) throw new Error("to inesistente/non attivo: " + input.toMemberId);
+    var now = Date.now();
+    var tx = { id: nuovoTxId(spaceId), spaceId: spaceId, type: "settlement",
+      amount: input.amount, fromMemberId: input.fromMemberId, toMemberId: input.toMemberId,
+      date: (input.date != null ? input.date : null),
+      version: 1, deviceId: deviceCorrente(), createdAt: now, updatedAt: now, deleted: false };
+    var err = validaTx(tx, function(id){ return !!m.tutti[id]; });
+    if (err) throw new Error("settlement invalido: " + err);
+    await db().put("transactions", tx);
+    return tx.id;
+  }
+
+  async function updateSettlement(spaceId, txId, patch){
+    await spazioScrivibile(spaceId);
+    var cur = await txDaModificare(spaceId, txId, "settlement");
+    patch = patch || {};
+    if ("spaceId" in patch && patch.spaceId !== spaceId) throw new Error("spaceId immutabile");
+    if ("id" in patch && patch.id !== txId) throw new Error("id immutabile");
+    if ("type" in patch && patch.type !== "settlement") throw new Error("type immutabile");
+    var amount = ("amount" in patch) ? patch.amount : cur.amount;
+    if (!centInt(amount) || amount <= 0) throw new Error("amount non intero/<=0");
+    var fromId = ("fromMemberId" in patch) ? patch.fromMemberId : cur.fromMemberId;
+    var toId = ("toMemberId" in patch) ? patch.toMemberId : cur.toMemberId;
+    if (fromId === toId) throw new Error("settlement from === to");
+    var m = await membriSpazio(spaceId), gia = riferimentiCorrenti(cur);
+    function ammesso(id){ return !!m.attivi[id] || (!!gia[id] && !!m.tutti[id]); }
+    if (!ammesso(fromId)) throw new Error("from non ammesso (nuovo riferimento a inattivo?): " + fromId);
+    if (!ammesso(toId)) throw new Error("to non ammesso (nuovo riferimento a inattivo?): " + toId);
+    var upd = { id: txId, spaceId: spaceId, type: "settlement",
+      amount: amount, fromMemberId: fromId, toMemberId: toId,
+      date: ("date" in patch ? patch.date : cur.date),
+      version: (cur.version | 0) + 1, deviceId: deviceCorrente(),
+      createdAt: (cur.createdAt != null ? cur.createdAt : null), updatedAt: Date.now(), deleted: false };
+    var err = validaTx(upd, function(id){ return !!m.tutti[id]; });
+    if (err) throw new Error("settlement update invalido: " + err);
+    await db().put("transactions", upd);
+    return upd.id;
+  }
+
+  async function deleteTransaction(spaceId, txId){
+    await spazioScrivibile(spaceId);
+    var cur = await db().get("transactions", txId);
+    if (!cur || cur.spaceId !== spaceId) throw new Error("transazione inesistente nello spazio: " + txId);
+    if (cur.deleted === true) return txId;   // idempotente
+    var upd = Object.assign({}, cur, { deleted: true, version: (cur.version | 0) + 1, deviceId: deviceCorrente() });
+    await db().put("transactions", upd);     // tombstone logico, mai hard delete
+    return txId;
+  }
+  async function restoreTransaction(spaceId, txId){
+    await spazioScrivibile(spaceId);
+    var cur = await db().get("transactions", txId);
+    if (!cur || cur.spaceId !== spaceId) throw new Error("transazione inesistente nello spazio: " + txId);
+    if (cur.deleted !== true) return txId;   // idempotente
+    var m = await membriSpazio(spaceId);
+    var upd = Object.assign({}, cur, { deleted: false, version: (cur.version | 0) + 1, deviceId: deviceCorrente() });
+    var err = validaTx(upd, function(id){ return !!m.tutti[id]; });   // rivalida come tx viva
+    if (err) throw new Error("restore invalido: " + err);
+    await db().put("transactions", upd);
+    return txId;
+  }
+
   window.sharedRuntime = {
     listMembers: listMembers,
     listTransactions: listTransactions,
     balances: balances,
     settlementPlan: settlementPlan,
+    // F4/3A: write-path nativo (solo spazi nativi experience|ongoing active)
+    createExpense: createExpense,
+    updateExpense: updateExpense,
+    createSettlement: createSettlement,
+    updateSettlement: updateSettlement,
+    deleteTransaction: deleteTransaction,
+    restoreTransaction: restoreTransaction,
     // helper puri per i test (nessuna persistenza)
     _balancesFrom: balancesFrom,
     _settlementPlanFrom: settlementPlanFrom,
@@ -4224,6 +4436,136 @@ if ("serviceWorker" in navigator){
       ok("fail: amount non intero",     throws([{ id:"x", type:"expense", amount:10.5, paidById:"s:m1", allocations:[{memberId:"s:m1",amount:10.5}] }]));
       ok("fail: amount <= 0",           throws([{ id:"x", type:"expense", amount:0, paidById:"s:m1", allocations:[{memberId:"s:m1",amount:0}] }]));
       ok("fail: tipo non supportato",   throws([{ id:"x", type:"income", amount:100, paidById:"s:m1", allocations:[{memberId:"s:m1",amount:100}] }]));
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    },
+    // F4/3A: test end-to-end del write-path nativo su IndexedDB reale (semina, scrive, verifica, ricarica).
+    _testWritePath: async function(){
+      var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
+      var DB = window.calculonDB, SR = window.sharedRuntime;
+      async function throwsA(fn){ try { await fn(); return false; } catch(e){ return true; } }
+      async function zeroSum(spId){ var b = await SR.balances(spId); var s = 0; for (var k in b) s += b[k]; return s === 0; }
+      async function net(spId){ return await SR.balances(spId); }
+      function mem(spId, id, active){ return { id: spId + ":" + id, spaceId: spId, name: id, active: active !== false, deleted: false }; }
+      function space(id, kind, status, legacyGroupId){ return { id: id, name: id, kind: kind, status: status, currency: "EUR", legacyGroupId: legacyGroupId || null, deleted: false }; }
+
+      var NAT = "t:nat", NAT2 = "t:nat2", LEG = "t:leg", SET = "t:set", ARC = "t:arc";
+      // semina spazi (nessuna API membri usata: scrittura diretta store, solo per il test)
+      await DB.put("spaces", space(NAT,  "experience", "active"));
+      await DB.put("spaces", space(NAT2, "experience", "active"));
+      await DB.put("spaces", space(LEG,  "experience", "active", "gLeg"));   // legacy -> read-only
+      await DB.put("spaces", space(SET,  "experience", "settled"));
+      await DB.put("spaces", space(ARC,  "ongoing",    "archived"));
+      await DB.put("spaceMembers", mem(NAT, "a")); await DB.put("spaceMembers", mem(NAT, "b")); await DB.put("spaceMembers", mem(NAT, "c")); await DB.put("spaceMembers", mem(NAT, "z", false));
+      await DB.put("spaceMembers", mem(NAT2, "x"));
+      await DB.put("spaceMembers", mem(LEG, "a")); await DB.put("spaceMembers", mem(SET, "a")); await DB.put("spaceMembers", mem(SET, "b")); await DB.put("spaceMembers", mem(ARC, "a")); await DB.put("spaceMembers", mem(ARC, "b"));
+      // reset transazioni vive dei test (idempotenza tra run ripetuti)
+      var live = await SR.listTransactions(NAT); for (var i0 = 0; i0 < live.length; i0++) await DB.del("transactions", live[i0].id);
+
+      var A = NAT+":a", B = NAT+":b", C = NAT+":c", Z = NAT+":z", X2 = NAT2+":x";
+      function amt(alloc, mid){ for (var i=0;i<alloc.length;i++) if (alloc[i].memberId===mid) return alloc[i].amount; return null; }
+      function somma(alloc){ var s=0; for (var i=0;i<alloc.length;i++) s+=alloc[i].amount; return s; }
+
+      // --- create expense: equal / shares / percent / exact + snapshot allocations corretto ---
+      var eqId = await SR.createExpense(NAT, { amount: 900, paidById: A, allocationMode: "equal", parts: { "t:nat:a":1, "t:nat:b":1, "t:nat:c":1 } });
+      var eq = await DB.get("transactions", eqId);
+      ok("equal: type expense", eq.type === "expense");
+      ok("equal: paidById persistito", eq.paidById === A);
+      ok("equal: allocationMode persistito", eq.allocationMode === "equal");
+      ok("equal: Sigma allocations === amount", somma(eq.allocations) === 900);
+      ok("equal: 300/300/300", amt(eq.allocations,A)===300 && amt(eq.allocations,B)===300 && amt(eq.allocations,C)===300);
+      ok("equal: version 1", eq.version === 1);
+      ok("equal: createdAt presente", typeof eq.createdAt === "number");
+      ok("equal: zero-sum dopo create", await zeroSum(NAT));
+
+      var shId = await SR.createExpense(NAT, { amount: 1000, paidById: B, allocation: { mode: "shares", parts: { "t:nat:a":1, "t:nat:b":2, "t:nat:c":1 } } });
+      var sh = await DB.get("transactions", shId);
+      ok("shares: 250/500/250", amt(sh.allocations,A)===250 && amt(sh.allocations,B)===500 && amt(sh.allocations,C)===250);
+      ok("shares: Sigma === amount", somma(sh.allocations) === 1000);
+
+      var pcId = await SR.createExpense(NAT, { amount: 1000, paidById: A, allocationMode: "percent", parts: { "t:nat:a":2500, "t:nat:b":2500, "t:nat:c":5000 } });
+      var pc = await DB.get("transactions", pcId);
+      ok("percent: 250/250/500", amt(pc.allocations,A)===250 && amt(pc.allocations,B)===250 && amt(pc.allocations,C)===500);
+      ok("percent: Sigma === amount", somma(pc.allocations) === 1000);
+
+      var exId = await SR.createExpense(NAT, { amount: 1000, paidById: A, allocationMode: "exact", parts: { "t:nat:a":100, "t:nat:b":200, "t:nat:c":700 } });
+      var ex = await DB.get("transactions", exId);
+      ok("exact: 100/200/700 verbatim", amt(ex.allocations,A)===100 && amt(ex.allocations,B)===200 && amt(ex.allocations,C)===700);
+      ok("zero-sum dopo 4 spese", await zeroSum(NAT));
+
+      // --- create + edit settlement ---
+      var stId = await SR.createSettlement(NAT, { amount: 300, fromMemberId: A, toMemberId: B });
+      var st0 = await DB.get("transactions", stId);
+      ok("settlement: type/importo", st0.type==="settlement" && st0.amount===300 && st0.version===1);
+      await SR.updateSettlement(NAT, stId, { amount: 400 });
+      var st1 = await DB.get("transactions", stId);
+      ok("settlement edit: amount 400", st1.amount === 400);
+      ok("settlement edit: version 2", st1.version === 2);
+      ok("zero-sum dopo settlement", await zeroSum(NAT));
+
+      // --- edit expense (nuova ripartizione) ---
+      await SR.updateExpense(NAT, exId, { amount: 900, allocationMode: "equal", parts: { "t:nat:a":1, "t:nat:b":1, "t:nat:c":1 } });
+      var ex2 = await DB.get("transactions", exId);
+      ok("expense edit: rimaterializzata 300/300/300", amt(ex2.allocations,A)===300 && somma(ex2.allocations)===900);
+      ok("expense edit: version 2", ex2.version === 2);
+      ok("expense edit: allocationMode aggiornato", ex2.allocationMode === "equal");
+
+      // --- membro inattivo storico preservabile / nuovo riferimento inattivo respinto ---
+      await DB.put("spaceMembers", mem(NAT, "c", false));   // c diventa inattivo DOPO essere gia' referenziato
+      var editPreserva = !(await throwsA(function(){ return SR.updateExpense(NAT, eqId, { note: "aggiornata" }); }));
+      ok("update preserva riferimento inattivo gia' presente", editPreserva);
+      var nuovoInattivo = await throwsA(function(){ return SR.updateExpense(NAT, shId, { allocationMode:"equal", parts:{ "t:nat:a":1, "t:nat:b":1, "t:nat:z":1 } }); });
+      ok("nuovo riferimento a inattivo (z) respinto", nuovoInattivo);
+      var createInattivo = await throwsA(function(){ return SR.createExpense(NAT, { amount:300, paidById:A, allocationMode:"equal", parts:{ "t:nat:a":1, "t:nat:z":1 } }); });
+      ok("create con allocatee inattivo (z) respinto", createInattivo);
+      await DB.put("spaceMembers", mem(NAT, "c", true));    // ripristino c attivo
+
+      // --- cross-space respinto ---
+      var cross = await throwsA(function(){ return SR.createExpense(NAT, { amount:200, paidById:A, allocationMode:"equal", parts:{ "t:nat:a":1, "t:nat2:x":1 } }); });
+      ok("allocatee cross-space respinto", cross);
+      var crossPay = await throwsA(function(){ return SR.createExpense(NAT, { amount:200, paidById:X2, allocationMode:"equal", parts:{ "t:nat:a":1 } }); });
+      ok("payer cross-space respinto", crossPay);
+
+      // --- legacy / settled / archived: scrittura respinta ---
+      ok("legacy space: create respinto",   await throwsA(function(){ return SR.createExpense(LEG, { amount:100, paidById:LEG+":a", allocationMode:"equal", parts:{ "t:leg:a":1 } }); }));
+      ok("settled space: create respinto",   await throwsA(function(){ return SR.createExpense(SET, { amount:100, paidById:SET+":a", allocationMode:"equal", parts:{ "t:set:a":1, "t:set:b":1 } }); }));
+      ok("archived space: create respinto",   await throwsA(function(){ return SR.createExpense(ARC, { amount:100, paidById:ARC+":a", allocationMode:"equal", parts:{ "t:arc:a":1, "t:arc:b":1 } }); }));
+
+      // --- validazione importi / ripartizioni ---
+      ok("amount <=0 respinto",        await throwsA(function(){ return SR.createExpense(NAT, { amount:0,   paidById:A, allocationMode:"equal", parts:{ "t:nat:a":1 } }); }));
+      ok("amount non intero respinto", await throwsA(function(){ return SR.createExpense(NAT, { amount:10.5,paidById:A, allocationMode:"equal", parts:{ "t:nat:a":1 } }); }));
+      ok("percent != 100 respinto",    await throwsA(function(){ return SR.createExpense(NAT, { amount:1000,paidById:A, allocationMode:"percent", parts:{ "t:nat:a":3000, "t:nat:b":3000 } }); }));
+      ok("exact != amount respinto",   await throwsA(function(){ return SR.createExpense(NAT, { amount:1000,paidById:A, allocationMode:"exact", parts:{ "t:nat:a":100, "t:nat:b":100 } }); }));
+      ok("shares <=0 respinto",        await throwsA(function(){ return SR.createExpense(NAT, { amount:1000,paidById:A, allocationMode:"shares", parts:{ "t:nat:a":0, "t:nat:b":1 } }); }));
+      ok("mode sconosciuto respinto",  await throwsA(function(){ return SR.createExpense(NAT, { amount:1000,paidById:A, allocationMode:"weird", parts:{ "t:nat:a":1 } }); }));
+      ok("settlement from===to respinto", await throwsA(function(){ return SR.createSettlement(NAT, { amount:100, fromMemberId:A, toMemberId:A }); }));
+
+      // --- spaceId / type immutabili ---
+      ok("cambio spaceId respinto", await throwsA(function(){ return SR.updateExpense(NAT, eqId, { spaceId: NAT2 }); }));
+      ok("cambio type respinto",    await throwsA(function(){ return SR.updateExpense(NAT, eqId, { type: "settlement" }); }));
+      ok("updateSettlement su expense respinto", await throwsA(function(){ return SR.updateSettlement(NAT, eqId, { amount: 500 }); }));
+
+      // --- delete + restore + version increment ---
+      var v0 = (await DB.get("transactions", eqId)).version;
+      await SR.deleteTransaction(NAT, eqId);
+      var dEq = await DB.get("transactions", eqId);
+      ok("delete: tombstone (deleted true, record presente)", dEq.deleted === true && dEq != null);
+      ok("delete: version incrementata", dEq.version === v0 + 1);
+      var vivi = await SR.listTransactions(NAT);
+      ok("delete: escluso da listTransactions", vivi.every(function(t){ return t.id !== eqId; }));
+      ok("zero-sum dopo delete", await zeroSum(NAT));
+      await SR.restoreTransaction(NAT, eqId);
+      var rEq = await DB.get("transactions", eqId);
+      ok("restore: deleted false", rEq.deleted === false);
+      ok("restore: version incrementata", rEq.version === v0 + 2);
+      ok("zero-sum dopo restore", await zeroSum(NAT));
+
+      // --- reload IndexedDB: la scrittura sopravvive alla riapertura ---
+      await DB.close();
+      var dopoReload = await DB.get("transactions", eqId);
+      ok("reload: transazione persistita", dopoReload && dopoReload.id === eqId && dopoReload.deleted === false);
+      ok("reload: balances ancora zero-sum", await zeroSum(NAT));
+
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
     },
