@@ -5997,6 +5997,159 @@ if ("serviceWorker" in navigator){
 </script>
 <!-- ==== /MODULE: personal-projection ==== -->
 
+<!-- ==== MODULE: native-sync-boundary (F4/7B) ==== -->
+<script>
+"use strict";
+/* F4 · Passo 7B — confine PURO tra stato SHARED (syncabile) e stato LOCAL (mai trasportato).
+   Nessuna rete, crypto, DB o outbox. Rende impossibile che il futuro sync porti stato locale:
+   projection allowlist per ogni tipo, merge che preserva sempre i campi locali, gate fail-closed
+   di syncabilita', comparator nativo (version, tombstone-wins, deviceId) senza global clock. */
+/* F4P7B-BOUNDARY-START */
+(function(){
+  // Campi dello spazio: solo questi viaggiano nel protocollo Shared 2.0.
+  var SHARED_SPACE_FIELDS = ["id", "name", "kind", "status", "currency", "version", "deviceId", "keyVersion", "deleted"];
+  // Campi local-only: mai serializzati, mai sovrascrivibili dal remoto. legacyGroupId incluso
+  // (non deve finire automaticamente nel protocollo Shared 2.0, salvo futura decisione di migrazione).
+  var LOCAL_SPACE_FIELDS  = ["selfMemberId", "authority", "cutover", "legacyGroupId"];
+  // Allowlist di projection per gli altri record shared.
+  var SHARED_MEMBER_FIELDS    = ["id", "spaceId", "name", "active", "deleted", "version", "deviceId"];
+  var SHARED_TX_FIELDS        = ["id", "spaceId", "type", "amount", "paidById", "allocations", "allocationMode", "fromMemberId", "toMemberId", "date", "note", "deleted", "version", "deviceId"];
+  var SHARED_SHARERULE_FIELDS = ["id", "spaceId", "mode", "parts", "deleted", "version", "deviceId"];
+
+  function pick(obj, fields){ var out = {}; for (var i = 0; i < fields.length; i++){ var k = fields[i]; if (Object.prototype.hasOwnProperty.call(obj, k)) out[k] = obj[k]; } return out; }
+
+  function sharedProjectionOfSpace(space){
+    if (!space || typeof space !== "object") throw new Error("space assente");
+    return pick(space, SHARED_SPACE_FIELDS);   // SOLO campi syncabili; nessun campo local-only
+  }
+  // Applica solo i campi shared del remoto; preserva SEMPRE i campi local-only del locale;
+  // non permette al remoto di introdurre campi non-allowlisted (allowlist -> nessuna injection).
+  function mergeSharedSpaceIntoLocal(localSpace, remoteShared){
+    if (!localSpace || typeof localSpace !== "object") throw new Error("localSpace assente");
+    if (!remoteShared || typeof remoteShared !== "object") throw new Error("remoteShared assente");
+    var out = {};
+    for (var k in localSpace) if (Object.prototype.hasOwnProperty.call(localSpace, k)) out[k] = localSpace[k];   // base = locale
+    for (var i = 0; i < SHARED_SPACE_FIELDS.length; i++){ var f = SHARED_SPACE_FIELDS[i]; if (Object.prototype.hasOwnProperty.call(remoteShared, f)) out[f] = remoteShared[f]; }   // solo shared dal remoto
+    for (var j = 0; j < LOCAL_SPACE_FIELDS.length; j++){ var lf = LOCAL_SPACE_FIELDS[j];   // ri-preserva i local dal LOCALE (mai dal remoto)
+      if (Object.prototype.hasOwnProperty.call(localSpace, lf)) out[lf] = localSpace[lf]; else delete out[lf]; }
+    return out;
+  }
+
+  function sharedProjectionOfMember(m){ if (!m || typeof m !== "object") throw new Error("member assente"); return pick(m, SHARED_MEMBER_FIELDS); }
+  function sharedProjectionOfTransaction(t){ if (!t || typeof t !== "object") throw new Error("transaction assente"); return pick(t, SHARED_TX_FIELDS); }
+  function sharedProjectionOfShareRule(s){ if (!s || typeof s !== "object") throw new Error("shareRule assente"); return pick(s, SHARED_SHARERULE_FIELDS); }
+
+  // GATE fail-closed: true SOLO per record shared noti; qualunque stato locale/derivato/sconosciuto -> false.
+  function isSyncableSharedRecord(record){
+    if (!record || typeof record !== "object") return false;
+    // Esclusioni assolute
+    if (record.spaceId === "personal:local") return false;      // dominio Personale
+    if (record.derived === true) return false;                  // proiezione derivata
+    var id = record.id;
+    if (typeof id === "string" && (id.indexOf("proj:") === 0 || id.indexOf("liab:") === 0)) return false;   // quota/liability
+    // Ammissione POSITIVA dei soli tipi shared:
+    if (typeof id === "string" && id.indexOf("shareRule:") === 0){                    // shareRule
+      return typeof record.spaceId === "string" && record.spaceId !== "" && record.mode != null && Array.isArray(record.parts);
+    }
+    if (record.type === "expense" || record.type === "settlement"){                   // transazione shared
+      return typeof record.spaceId === "string" && record.spaceId !== "" && record.spaceId !== "personal:local";
+    }
+    if (typeof record.spaceId === "string" && record.spaceId !== "" && typeof record.name === "string" && ("active" in record) && record.type == null){   // membro
+      return true;
+    }
+    return false;   // account/category/budget/recurring/learning/personal-tx/sconosciuto -> fail-closed
+  }
+
+  // COMPARATOR nativo (nessun global clock). version maggiore vince; a parita' di version con un
+  // solo deleted:true vince il tombstone; altrimenti tie-break su deviceId (stringa maggiore).
+  function nativeWinner(a, b){
+    if (!a) return b; if (!b) return a;
+    var va = a.version | 0, vb = b.version | 0;
+    if (va !== vb) return va > vb ? a : b;
+    var da = a.deleted === true, db = b.deleted === true;
+    if (da !== db) return da ? a : b;
+    return String(a.deviceId) > String(b.deviceId) ? a : b;   // uguali -> b (deterministico)
+  }
+
+  window.nativeSyncBoundary = {
+    SHARED_SPACE_FIELDS: SHARED_SPACE_FIELDS.slice(),
+    LOCAL_SPACE_FIELDS: LOCAL_SPACE_FIELDS.slice(),
+    sharedProjectionOfSpace: sharedProjectionOfSpace,
+    mergeSharedSpaceIntoLocal: mergeSharedSpaceIntoLocal,
+    sharedProjectionOfMember: sharedProjectionOfMember,
+    sharedProjectionOfTransaction: sharedProjectionOfTransaction,
+    sharedProjectionOfShareRule: sharedProjectionOfShareRule,
+    isSyncableSharedRecord: isSyncableSharedRecord,
+    nativeWinner: nativeWinner,
+    _test: function(){
+      var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
+      var NB = window.nativeSyncBoundary;
+      function has(o, k){ return Object.prototype.hasOwnProperty.call(o, k); }
+
+      // --- space boundary ---
+      var local = { id: "space:X", name: "Vecchio", kind: "experience", status: "active", currency: "EUR",
+        version: 1, deviceId: "d1", keyVersion: 0, deleted: false, selfMemberId: "space:X:me", authority: "native", legacyGroupId: null };
+      var remote = { id: "space:X", name: "Nuovo", kind: "experience", status: "settled", currency: "EUR",
+        version: 2, deviceId: "d2", keyVersion: 0, deleted: false, selfMemberId: "space:X:HACK", authority: "legacy", cutover: { at: 1 }, evil: 1 };
+      var merged = NB.mergeSharedSpaceIntoLocal(local, remote);
+      ok("remote NON cambia selfMemberId", merged.selfMemberId === "space:X:me");
+      ok("remote NON cambia authority", merged.authority === "native");
+      ok("remote NON introduce cutover (locale non ce l'aveva)", !has(merged, "cutover"));
+      ok("remote NON introduce campi arbitrari (evil)", !has(merged, "evil"));
+      ok("legacyGroupId preservato dal locale", merged.legacyGroupId === null);
+      ok("shared name aggiornato", merged.name === "Nuovo");
+      ok("shared status aggiornato", merged.status === "settled");
+      ok("shared version aggiornata", merged.version === 2);
+
+      // projection dello spazio: solo campi shared
+      var proj = NB.sharedProjectionOfSpace(local);
+      ok("projection: nessun selfMemberId", !has(proj, "selfMemberId"));
+      ok("projection: nessun authority", !has(proj, "authority"));
+      ok("projection: nessun legacyGroupId", !has(proj, "legacyGroupId"));
+      ok("projection: contiene name/status/version", proj.name === "Vecchio" && proj.status === "active" && proj.version === 1);
+
+      // --- syncability gate ---
+      ok("personal transaction respinta", NB.isSyncableSharedRecord({ id: "txn:1", spaceId: "personal:local", type: "expense", amount: 100 }) === false);
+      ok("derived quota respinta", NB.isSyncableSharedRecord({ id: "proj:space:X:t1:quota", spaceId: "personal:local", derived: true, type: "expense", amount: 126 }) === false);
+      ok("liability mai syncabile", NB.isSyncableSharedRecord({ id: "liab:space:X:t1:A", sourceSpaceId: "space:X", counterpartMemberId: "A", signedAmount: 150 }) === false);
+      ok("shared expense ammessa", NB.isSyncableSharedRecord({ id: "space:X:t1", spaceId: "space:X", type: "expense", amount: 420, paidById: "space:X:a", allocations: [{ memberId: "space:X:a", amount: 420 }], version: 1, deviceId: "d1" }) === true);
+      ok("shared settlement ammesso", NB.isSyncableSharedRecord({ id: "space:X:t2", spaceId: "space:X", type: "settlement", amount: 50, fromMemberId: "space:X:a", toMemberId: "space:X:b", version: 1, deviceId: "d1" }) === true);
+      ok("membro ammesso", NB.isSyncableSharedRecord({ id: "space:X:a", spaceId: "space:X", name: "Anna", active: true, deleted: false }) === true);
+      ok("shareRule ammesso", NB.isSyncableSharedRecord({ id: "shareRule:space:X:default", spaceId: "space:X", mode: "shares", parts: [{ memberId: "space:X:a", value: 1 }] }) === true);
+      ok("account respinto", NB.isSyncableSharedRecord({ id: "acc:1", name: "Contante", type: "cash" }) === false);
+      ok("category respinta", NB.isSyncableSharedRecord({ id: "cat:1", name: "Cibo", kind: "expense" }) === false);
+      ok("budget respinto", NB.isSyncableSharedRecord({ id: "2026-08", total: 100000 }) === false);
+      ok("record sconosciuto fail-closed", NB.isSyncableSharedRecord({ foo: 1 }) === false);
+      ok("null fail-closed", NB.isSyncableSharedRecord(null) === false);
+      ok("stringa fail-closed", NB.isSyncableSharedRecord("x") === false);
+
+      // --- projections record ---
+      var mProj = NB.sharedProjectionOfMember({ id: "space:X:a", spaceId: "space:X", name: "Anna", active: true, deleted: false, createdAt: 1, updatedAt: 2 });
+      ok("member projection: niente createdAt/updatedAt", !has(mProj, "createdAt") && !has(mProj, "updatedAt") && mProj.name === "Anna");
+      var tProj = NB.sharedProjectionOfTransaction({ id: "space:X:t1", spaceId: "space:X", type: "expense", amount: 420, paidById: "space:X:a", allocations: [], allocationMode: "exact", date: "2026-08-01", version: 1, deviceId: "d1", createdAt: 9 });
+      ok("tx projection: niente createdAt", !has(tProj, "createdAt") && tProj.amount === 420 && tProj.allocationMode === "exact");
+
+      // --- comparator ---
+      ok("comparator: version maggiore vince", NB.nativeWinner({ version: 1, deviceId: "a" }, { version: 2, deviceId: "a" }).version === 2);
+      ok("comparator: delete-wins a parita' version", NB.nativeWinner({ version: 2, deviceId: "a", deleted: false }, { version: 2, deviceId: "a", deleted: true }).deleted === true);
+      ok("comparator: deviceId tie-break", NB.nativeWinner({ version: 2, deviceId: "a" }, { version: 2, deviceId: "b" }).deviceId === "b");
+      ok("comparator: null a -> b", NB.nativeWinner(null, { version: 1, deviceId: "a" }).version === 1);
+
+      // --- input non mutati ---
+      var jl = JSON.stringify(local), jr = JSON.stringify(remote);
+      NB.mergeSharedSpaceIntoLocal(local, remote); NB.sharedProjectionOfSpace(local);
+      ok("input local non mutato", JSON.stringify(local) === jl);
+      ok("input remote non mutato", JSON.stringify(remote) === jr);
+
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    }
+  };
+})();
+/* F4P7B-BOUNDARY-END */
+</script>
+<!-- ==== /MODULE: native-sync-boundary ==== -->
+
 <script>
 "use strict";
 /* F1 Passo 2 — attivazione IndexedDB al boot SOLO per il dominio Personale.
