@@ -4402,6 +4402,107 @@ if ("serviceWorker" in navigator){
     return spaceId;
   }
 
+  /* F4 · Passo 4A — DATA LAYER delle share rules (quote predefinite persistenti).
+     shareRules e' SOLO un default per le NUOVE spese: una volta creata una transazione,
+     transactions.allocations resta lo snapshot definitivo e immutabile (createExpense NON e'
+     toccato in questo passo). Consentite solo su kind:"ongoing"; gli experience restano equal
+     implicito. Modi: equal|shares|percent (mai exact, dipende dall'importo). Percentuali in
+     basis point (10000 = 100%). Una sola regola default per spazio, id deterministico.
+     Nessuna UI, nessuna integrazione Personale, nessun adapter/dual-write/sync, Worker/wire invariati. */
+  function shareRuleId(spaceId){ return "shareRule:" + spaceId + ":default"; }
+  function normalizzaParts(parts){
+    if (parts == null) return [];
+    if (Array.isArray(parts)) return parts.map(function(p){ return { memberId: p && p.memberId, value: (p && p.value != null ? p.value : 0) }; });
+    if (typeof parts === "object") return Object.keys(parts).map(function(k){ return { memberId: k, value: parts[k] }; });
+    throw new Error("parts non valido");
+  }
+  // Guardia: spazio nativo ONGOING, active, self coerente (fail-closed).
+  async function spazioOngoingScrivibile(spaceId){
+    var sp = await spazioNativo(spaceId);                 // nativo shared, mai legacy
+    if (sp.kind !== "ongoing") throw new Error("share rules consentite solo su spazi ongoing");
+    if (sp.status !== "active") throw new Error("spazio non active: status " + String(sp.status));
+    await verificaSelf(sp);                               // selfMemberId coerente (invariante 3C)
+    return sp;
+  }
+  async function membriAttiviSet(spaceId){
+    var s = {}; (await listMembers(spaceId)).forEach(function(m){ if (m.active !== false) s[m.id] = true; });
+    return s;
+  }
+
+  async function getShareRule(spaceId){
+    if (!spaceId) throw new Error("spaceId richiesto");
+    var rec = await db().get("shareRules", shareRuleId(spaceId));
+    if (!rec || rec.deleted === true) return null;        // NON restituisce i tombstone
+    return rec;
+  }
+  async function setShareRule(spaceId, input){
+    await spazioOngoingScrivibile(spaceId);
+    input = input || {};
+    var mode = input.mode;
+    if (mode === "exact") throw new Error("exact non supportato come regola persistente");
+    if (mode !== "equal" && mode !== "shares" && mode !== "percent") throw new Error("mode non supportato: " + mode);
+    var parts = normalizzaParts(input.parts);
+    var attivi = await membriAttiviSet(spaceId), visti = {};
+    if (mode === "equal"){
+      // parts opzionali (equal si risolve sui membri attivi al momento dell'uso); se presenti, validali.
+      for (var i = 0; i < parts.length; i++){ var id = parts[i].memberId;
+        if (visti[id]) throw new Error("membro duplicato: " + id);
+        if (!attivi[id]) throw new Error("membro inesistente/non attivo/cross-space: " + id);
+        visti[id] = true; }
+    } else {
+      if (parts.length === 0) throw new Error("almeno 1 partecipante");
+      var somma = 0;
+      for (var j = 0; j < parts.length; j++){ var p = parts[j], mid = p.memberId, v = p.value;
+        if (visti[mid]) throw new Error("membro duplicato: " + mid);
+        if (!attivi[mid]) throw new Error("membro inesistente/non attivo/cross-space: " + mid);
+        if (typeof v !== "number" || !isFinite(v) || Math.floor(v) !== v) throw new Error("valore non intero: " + mid);
+        if (mode === "shares" && v <= 0) throw new Error("shares: valore <=0: " + mid);
+        if (mode === "percent" && v < 0) throw new Error("percent: valore <0: " + mid);
+        somma += v; visti[mid] = true; }
+      if (mode === "percent" && somma !== 10000) throw new Error("percent: somma (" + somma + ") != 10000 (100.00%)");
+    }
+    var id = shareRuleId(spaceId), now = Date.now();
+    var existing = await db().get("shareRules", id);   // preserva createdAt anche se era tombstone
+    var rec = { id: id, spaceId: spaceId, mode: mode, parts: parts,
+      createdAt: (existing && existing.createdAt != null ? existing.createdAt : now),
+      updatedAt: now, deleted: false };
+    await db().put("shareRules", rec);
+    return id;
+  }
+  async function deleteShareRule(spaceId){
+    if (!spaceId) throw new Error("spaceId richiesto");
+    var id = shareRuleId(spaceId);
+    var rec = await db().get("shareRules", id);
+    if (!rec || rec.deleted === true) return id;          // idempotente
+    await db().del("shareRules", id);                     // tombstone (reversibile), coerente col modello
+    return id;
+  }
+  // READ-ONLY: snapshot materializzabile per una spesa di importo `amount`. Nessuna scrittura,
+  // nessuna modifica allo storico. Nessun fallback silenzioso: shares/percent stale -> errore esplicito.
+  async function resolveShareRule(spaceId, amount){
+    if (typeof amount !== "number" || !isFinite(amount) || Math.floor(amount) !== amount || amount <= 0) throw new Error("amount non intero/<=0");
+    var rule = await getShareRule(spaceId);
+    var attiviList = (await listMembers(spaceId)).filter(function(m){ return m.active !== false; });
+    var attiviSet = {}; attiviList.forEach(function(m){ attiviSet[m.id] = true; });
+    var mode, partsObj = {};
+    if (!rule || rule.mode === "equal"){
+      // nessuna regola OPPURE regola equal -> equal sui membri attivi al momento dell'uso
+      mode = "equal";
+      if (attiviList.length === 0) throw new Error("nessun membro attivo");
+      attiviList.forEach(function(m){ partsObj[m.id] = 1; });
+    } else {
+      mode = rule.mode;   // shares | percent
+      for (var i = 0; i < rule.parts.length; i++){ var mid = rule.parts[i].memberId;
+        if (!attiviSet[mid]){ var e = new Error("stale-share-rule"); e.code = "stale-share-rule"; e.memberId = mid; throw e; } }
+      rule.parts.forEach(function(p){ partsObj[p.memberId] = p.value; });
+    }
+    var mp = shares({ kind: "expense", amountCents: amount, split: { mode: mode, parts: partsObj } });
+    var allocations = [], tot = 0;
+    Object.keys(mp).forEach(function(id){ allocations.push({ memberId: id, amount: mp[id] }); tot += mp[id]; });
+    if (tot !== amount) throw new Error("risoluzione incoerente: " + tot + " != " + amount);
+    return { mode: mode, allocations: allocations };
+  }
+
   window.sharedRuntime = {
     listMembers: listMembers,
     listTransactions: listTransactions,
@@ -4424,6 +4525,11 @@ if ("serviceWorker" in navigator){
     archiveMember: archiveMember,
     restoreMember: restoreMember,
     _scriviAtomico: scriviAtomico,   // esposto solo per il test di rollback atomico
+    // F4/4A: data layer share rules (default per nuove spese; NON tocca lo storico)
+    getShareRule: getShareRule,
+    setShareRule: setShareRule,
+    deleteShareRule: deleteShareRule,
+    resolveShareRule: resolveShareRule,
     // helper puri per i test (nessuna persistenza)
     _balancesFrom: balancesFrom,
     _settlementPlanFrom: settlementPlanFrom,
@@ -4859,6 +4965,108 @@ if ("serviceWorker" in navigator){
       var rolledBack = await throwsA(function(){ return SR._scriviAtomico(["spaces", "spaceMembers"], [ghost, badMember]); });
       ok("scrittura atomica fallita -> throw", rolledBack);
       ok("rollback: spazio ghost NON persistito", (await DB.get("spaces", ghostId)) == null);
+
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    },
+    // F4/4A: test end-to-end del data layer share rules su IndexedDB reale.
+    _testShareRules: async function(){
+      var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
+      var DB = window.calculonDB, SR = window.sharedRuntime;
+      async function throwsA(fn){ try { await fn(); return false; } catch(e){ return true; } }
+      async function errCode(fn){ try { await fn(); return null; } catch(e){ return e && (e.code || e.message); } }
+      function amt(alloc, mid){ for (var i=0;i<alloc.length;i++) if (alloc[i].memberId===mid) return alloc[i].amount; return null; }
+      function somma(alloc){ var s=0; for (var i=0;i<alloc.length;i++) s+=alloc[i].amount; return s; }
+      function P(o){ return Object.keys(o).map(function(k){ return { memberId:k, value:o[k] }; }); }
+
+      var og = await SR.createSpace({ kind: "ongoing", name: "Casa", selfName: "Gio" });
+      var OG = og.spaceId, S = og.selfMemberId;
+      var m2 = await SR.addMember(OG, { name: "Anna" });
+
+      // --- ongoing senza regola -> resolve equal sui membri attivi ---
+      ok("no rule: getShareRule null", (await SR.getShareRule(OG)) === null);
+      var re0 = await SR.resolveShareRule(OG, 1000);
+      ok("no rule: mode equal", re0.mode === "equal");
+      ok("no rule: 2 membri attivi (self+m2)", re0.allocations.length === 2);
+      ok("no rule: Sigma === amount", somma(re0.allocations) === 1000);
+
+      // --- history immutability: una spesa creata ora NON cambia al cambiare della regola ---
+      var pE = {}; pE[S] = 1; pE[m2] = 1;
+      var spesa = await SR.createExpense(OG, { amount: 900, paidById: S, allocationMode: "equal", parts: pE });
+      var allocPrima = JSON.stringify((await DB.get("transactions", spesa)).allocations);
+
+      // --- set equal ---
+      await SR.setShareRule(OG, { mode: "equal" });
+      var g1 = await SR.getShareRule(OG);
+      ok("set equal: get mode equal", g1 && g1.mode === "equal" && g1.deleted === false);
+      ok("set equal: id deterministico", g1.id === "shareRule:" + OG + ":default");
+
+      // --- set shares + resolve ---
+      await SR.setShareRule(OG, { mode: "shares", parts: P((function(){var o={};o[S]=1;o[m2]=2;return o;})()) });
+      var reSh = await SR.resolveShareRule(OG, 900);
+      ok("shares: self 300 / m2 600", amt(reSh.allocations,S)===300 && amt(reSh.allocations,m2)===600);
+      ok("shares: Sigma === amount", somma(reSh.allocations) === 900);
+
+      // --- set percent + resolve ---
+      await SR.setShareRule(OG, { mode: "percent", parts: P((function(){var o={};o[S]=2500;o[m2]=7500;return o;})()) });
+      var rePc = await SR.resolveShareRule(OG, 1000);
+      ok("percent: self 250 / m2 750", amt(rePc.allocations,S)===250 && amt(rePc.allocations,m2)===750);
+      ok("percent: Sigma === amount", somma(rePc.allocations) === 1000);
+
+      // --- history immutability check: la spesa creata prima e' invariata ---
+      ok("storico invariato dopo cambi regola", JSON.stringify((await DB.get("transactions", spesa)).allocations) === allocPrima);
+
+      // --- exact respinto ---
+      ok("exact respinto", await throwsA(function(){ return SR.setShareRule(OG, { mode: "exact", parts: P((function(){var o={};o[S]=100;o[m2]=800;return o;})()) }); }));
+      // --- percent != 10000 respinto ---
+      ok("percent != 10000 respinto", await throwsA(function(){ return SR.setShareRule(OG, { mode: "percent", parts: P((function(){var o={};o[S]=3000;o[m2]=3000;return o;})()) }); }));
+      // --- shares valore <=0 respinto ---
+      ok("shares <=0 respinto", await throwsA(function(){ return SR.setShareRule(OG, { mode: "shares", parts: P((function(){var o={};o[S]=0;o[m2]=1;return o;})()) }); }));
+      // --- duplicati respinti ---
+      ok("duplicati respinti", await throwsA(function(){ return SR.setShareRule(OG, { mode: "shares", parts: [{memberId:S,value:1},{memberId:S,value:2}] }); }));
+
+      // --- experience respinto ---
+      var ex = await SR.createSpace({ kind: "experience", name: "Trip", selfName: "Gio" });
+      ok("experience respinto", await throwsA(function(){ return SR.setShareRule(ex.spaceId, { mode: "equal" }); }));
+
+      // --- legacy respinto ---
+      var LG = "t:lg4a"; await DB.put("spaces", { id: LG, name: "Leg", kind: "ongoing", status: "active", legacyGroupId: "gX", selfMemberId: LG+":a", deleted: false });
+      await DB.put("spaceMembers", { id: LG+":a", spaceId: LG, name: "A", active: true, deleted: false });
+      ok("legacy respinto", await throwsA(function(){ return SR.setShareRule(LG, { mode: "equal" }); }));
+
+      // --- membro cross-space respinto ---
+      ok("cross-space respinto", await throwsA(function(){ return SR.setShareRule(OG, { mode: "shares", parts: P((function(){var o={};o[S]=1;o[ex.selfMemberId]=1;return o;})()) }); }));
+
+      // --- membro inattivo respinto in set ---
+      var m3 = await SR.addMember(OG, { name: "Bea" });
+      await SR.archiveMember(OG, m3);
+      ok("membro inattivo respinto in set", await throwsA(function(){ return SR.setShareRule(OG, { mode: "shares", parts: P((function(){var o={};o[S]=1;o[m3]=1;return o;})()) }); }));
+
+      // --- membro archiviato DOPO set -> stale-share-rule, nessun fallback silenzioso ---
+      await SR.setShareRule(OG, { mode: "shares", parts: P((function(){var o={};o[S]=1;o[m2]=1;return o;})()) });
+      ok("pre-stale: resolve ok", (await SR.resolveShareRule(OG, 1000)).mode === "shares");
+      await SR.archiveMember(OG, m2);
+      ok("getShareRule continua a restituire la regola stale", (await SR.getShareRule(OG)) !== null);
+      var code = await errCode(function(){ return SR.resolveShareRule(OG, 1000); });
+      ok("resolve stale -> errore esplicito stale-share-rule", code === "stale-share-rule");
+      ok("nessun fallback silenzioso a equal", await throwsA(function(){ return SR.resolveShareRule(OG, 1000); }));
+      await SR.restoreMember(OG, m2);
+      ok("dopo restore m2: resolve torna valido", (await SR.resolveShareRule(OG, 1000)).mode === "shares");
+
+      // --- delete regola -> ritorno al default equal ---
+      await SR.deleteShareRule(OG);
+      ok("delete: getShareRule null", (await SR.getShareRule(OG)) === null);
+      var reDel = await SR.resolveShareRule(OG, 1000);
+      ok("delete: resolve torna equal", reDel.mode === "equal");
+      ok("delete: idempotente", (await SR.deleteShareRule(OG)) === "shareRule:" + OG + ":default");
+
+      // --- reload IndexedDB ---
+      await SR.setShareRule(OG, { mode: "percent", parts: P((function(){var o={};o[S]=4000;o[m2]=6000;return o;})()) });
+      await DB.close();
+      var reload = await SR.getShareRule(OG);
+      ok("reload: regola persistita", reload && reload.mode === "percent");
+      var reReload = await SR.resolveShareRule(OG, 1000);
+      ok("reload: resolve coerente (400/600)", amt(reReload.allocations,S)===400 && amt(reReload.allocations,m2)===600);
 
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
