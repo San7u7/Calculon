@@ -3413,13 +3413,13 @@ if ("serviceWorker" in navigator){
 /* F0P3-DB-START */
 (function(){
   var DB_NAME     = "calculon";
-  var DB_VERSION  = 2;   // struttura IndexedDB (F2.2: +store "budgets", migrazione additiva 1->2)
+  var DB_VERSION  = 3;   // struttura IndexedDB (F2.2: +"budgets" 1->2; F4/7C: +"syncOutbox"+"spaceKeys" 2->3, additivo)
   var SCHEMA_TARGET = 1; // modello dati che la migrazione M1 introdurra' (Passo 4); NON applicata in F0
   // Store previsti da spec v1.1 §3 per F0. spaceMembers e shareRules sono separati
   // apposta (membership e quote non devono fondersi come array atomici).
   // F2.2: "budgets" aggiunto in coda. onupgradeneeded crea SOLO gli store mancanti
   // (create-if-absent), quindi l'upgrade 1->2 aggiunge budgets senza toccare gli altri.
-  var STORES = ["spaces","spaceMembers","shareRules","transactions","accounts","categories","liabilities","recurring","budgets","meta"];
+  var STORES = ["spaces","spaceMembers","shareRules","transactions","accounts","categories","liabilities","recurring","budgets","meta","syncOutbox","spaceKeys"];
 
   function reqP(req){ return new Promise(function(res, rej){ req.onsuccess = function(){ res(req.result); }; req.onerror = function(){ rej(req.error); }; }); }
   function txDone(tx){ return new Promise(function(res, rej){ tx.oncomplete = function(){ res(); }; tx.onerror = function(){ rej(tx.error); }; tx.onabort = function(){ rej(tx.error || new Error("transazione annullata")); }; }); }
@@ -6233,6 +6233,270 @@ if ("serviceWorker" in navigator){
 /* F4P7B-BOUNDARY-END */
 </script>
 <!-- ==== /MODULE: native-sync-boundary ==== -->
+
+<!-- ==== MODULE: native-e2ee + sync-outbox (F4/7C) ==== -->
+<script>
+"use strict";
+/* F4 · Passo 7C — fondamenta E2EE LOCALI + store di sync. Nessuna rete, nessun Worker, nessun
+   delivery pump. spaceKeys (AES-256-GCM per spazio, exportable), nativeCrypto (envelope AAD-autenticato),
+   syncOutbox (intent corrente per record, coalescing via nativeWinner). Store creati dall'upgrade
+   additivo IndexedDB 2->3. La chiave resta SOLO locale e non entra mai nel payload di sync. */
+/* F4P7C-E2EE-START */
+(function(){
+  function DB(){ return window.calculonDB; }
+  function NB(){ return window.nativeSyncBoundary; }
+  var TE = new TextEncoder(), TD = new TextDecoder();
+  function bufToB64url(buf){ var b = new Uint8Array(buf), s = ""; for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); }
+  function b64urlToBuf(str){ str = String(str).replace(/-/g, "+").replace(/_/g, "/"); while (str.length % 4) str += "="; var s = atob(str), b = new Uint8Array(s.length); for (var i = 0; i < s.length; i++) b[i] = s.charCodeAt(i); return b.buffer; }
+
+  // =================== spaceKeys ===================
+  function keyRecId(spaceId, kv){ return "spaceKey:" + spaceId + ":" + kv; }
+  async function requireNativeShared(spaceId){
+    if (!spaceId || spaceId === "personal:local") throw new Error("spazio non valido per chiavi (personal escluso)");
+    var sp = await DB().get("spaces", spaceId);
+    if (!sp || sp.deleted === true) throw new Error("spazio inesistente: " + spaceId);
+    if (window.sharedRuntime._effectiveAuthority(sp) !== "native") throw new Error("chiavi solo su spazi shared authority native");
+    return sp;
+  }
+  async function rejectPersonal(spaceId){   // per import (lo spazio puo' non essere ancora scaricato al join)
+    if (!spaceId || spaceId === "personal:local") throw new Error("personal:local non ammesso");
+    var sp = await DB().get("spaces", spaceId);
+    if (sp && window.sharedRuntime._effectiveAuthority(sp) !== "native") throw new Error("solo spazi native");
+  }
+  async function createSpaceKey(spaceId, keyVersion){
+    keyVersion = (keyVersion == null) ? 1 : keyVersion;
+    if (!Number.isInteger(keyVersion) || keyVersion < 1) throw new Error("keyVersion non valido");
+    await requireNativeShared(spaceId);
+    var id = keyRecId(spaceId, keyVersion);
+    if (await DB().get("spaceKeys", id)) return id;   // idempotente: non sovrascrivere
+    var key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);   // exportable per invite/backup
+    await DB().put("spaceKeys", { id: id, spaceId: spaceId, keyVersion: keyVersion, cryptoKey: key, createdAt: Date.now() });
+    return id;
+  }
+  async function getSpaceKey(spaceId, keyVersion){ var rec = await DB().get("spaceKeys", keyRecId(spaceId, keyVersion)); return rec ? rec.cryptoKey : null; }
+  async function exportSpaceKey(spaceId, keyVersion){
+    var k = await getSpaceKey(spaceId, keyVersion); if (!k) throw new Error("missing-space-key");
+    return bufToB64url(await crypto.subtle.exportKey("raw", k));   // base64url, pronto per fragment/backup
+  }
+  async function importSpaceKey(spaceId, keyVersion, exportedKey){
+    if (!Number.isInteger(keyVersion) || keyVersion < 1) throw new Error("keyVersion non valido");
+    await rejectPersonal(spaceId);
+    var key = await crypto.subtle.importKey("raw", b64urlToBuf(exportedKey), { name: "AES-GCM" }, true, ["encrypt", "decrypt"]);
+    var id = keyRecId(spaceId, keyVersion);
+    await DB().put("spaceKeys", { id: id, spaceId: spaceId, keyVersion: keyVersion, cryptoKey: key, createdAt: Date.now() });
+    return id;
+  }
+  async function listSpaceKeyVersions(spaceId){
+    var rows = await DB().list("spaceKeys", function(k){ return k && k.spaceId === spaceId; });
+    return rows.map(function(k){ return k.keyVersion; }).sort(function(a, b){ return a - b; });
+  }
+  window.spaceKeys = { createSpaceKey: createSpaceKey, getSpaceKey: getSpaceKey, exportSpaceKey: exportSpaceKey, importSpaceKey: importSpaceKey, listSpaceKeyVersions: listSpaceKeyVersions };
+
+  // =================== nativeCrypto ===================
+  var VALID_TYPES = { space: 1, member: 1, transaction: 1, shareRule: 1 };
+  var HEADER_KEYS = { id: 1, spaceId: 1, version: 1, deviceId: 1, deleted: 1, keyVersion: 1 };   // mai nel payload cifrato
+  function projOf(recordType, record){
+    var B = NB();
+    if (recordType === "space") return B.sharedProjectionOfSpace(record);
+    if (recordType === "member") return B.sharedProjectionOfMember(record);
+    if (recordType === "transaction") return B.sharedProjectionOfTransaction(record);
+    if (recordType === "shareRule") return B.sharedProjectionOfShareRule(record);
+    throw new Error("recordType non ammesso: " + recordType);
+  }
+  function headerSpaceId(recordType, record){ return recordType === "space" ? record.id : record.spaceId; }
+  function aadOf(h){ return TE.encode(JSON.stringify([1, h.spaceId, h.recordId, h.recordType, h.version, h.deviceId, h.keyVersion, h.deleted])); }
+
+  async function encryptSharedRecord(recordType, record, keyVersion){
+    if (!VALID_TYPES[recordType]) throw new Error("recordType non ammesso: " + recordType);
+    if (!record || typeof record !== "object") throw new Error("record assente");
+    var spaceId = headerSpaceId(recordType, record);
+    if (!spaceId || spaceId === "personal:local") throw new Error("record non shared/native");
+    if (!Number.isInteger(record.version) || record.version < 1) throw new Error("record causalmente incompleto (version)");
+    if (typeof record.deviceId !== "string" || record.deviceId === "") throw new Error("record causalmente incompleto (deviceId)");
+    if (keyVersion == null){ var vs = await listSpaceKeyVersions(spaceId); keyVersion = vs.length ? vs[vs.length - 1] : 1; }
+    var key = await getSpaceKey(spaceId, keyVersion); if (!key) throw new Error("missing-space-key");
+    var proj = projOf(recordType, record);   // solo campi shared (local-only gia' esclusi dal boundary)
+    var payload = {}; for (var k in proj) if (Object.prototype.hasOwnProperty.call(proj, k) && !HEADER_KEYS[k]) payload[k] = proj[k];
+    var header = { protocolVersion: 1, spaceId: spaceId, recordId: record.id, recordType: recordType,
+      version: record.version, deviceId: record.deviceId, keyVersion: keyVersion, deleted: record.deleted === true };
+    var iv = crypto.getRandomValues(new Uint8Array(12));
+    var ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv, additionalData: aadOf(header) }, key, TE.encode(JSON.stringify(payload)));
+    return { protocolVersion: 1, spaceId: spaceId, recordId: record.id, recordType: recordType,
+      version: record.version, deviceId: record.deviceId, keyVersion: keyVersion, deleted: record.deleted === true,
+      iv: bufToB64url(iv.buffer), ciphertext: bufToB64url(ct) };
+  }
+  async function decryptSharedEnvelope(env){
+    if (!env || typeof env !== "object") throw new Error("envelope assente");
+    if (env.protocolVersion !== 1) throw new Error("protocolVersion non supportata");
+    if (!VALID_TYPES[env.recordType]) throw new Error("recordType non ammesso");
+    var key = await getSpaceKey(env.spaceId, env.keyVersion); if (!key) throw new Error("missing-space-key");
+    var header = { protocolVersion: 1, spaceId: env.spaceId, recordId: env.recordId, recordType: env.recordType,
+      version: env.version, deviceId: env.deviceId, keyVersion: env.keyVersion, deleted: env.deleted === true };
+    var pt;
+    try { pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: new Uint8Array(b64urlToBuf(env.iv)), additionalData: aadOf(header) }, key, b64urlToBuf(env.ciphertext)); }
+    catch(e){ throw new Error("decrypt-failed"); }   // tamper / wrong-key -> fail-closed, mai plaintext parziale
+    var payload = JSON.parse(TD.decode(pt));
+    // ricostruzione SOLO da header + payload allowlisted -> mai campi local-only
+    var rec = { id: env.recordId, version: env.version, deviceId: env.deviceId, deleted: env.deleted === true };
+    if (env.recordType !== "space") rec.spaceId = env.spaceId;   // keyVersion resta nell'envelope, non nel record
+    for (var pk in payload) if (Object.prototype.hasOwnProperty.call(payload, pk) && !HEADER_KEYS[pk]) rec[pk] = payload[pk];
+    return projOf(env.recordType, rec);   // boundary/allowlist finale
+  }
+  window.nativeCrypto = { encryptSharedRecord: encryptSharedRecord, decryptSharedEnvelope: decryptSharedEnvelope };
+
+  // =================== syncOutbox ===================
+  function intentId(spaceId, recordType, recordId){ return "sync:" + spaceId + ":" + recordType + ":" + recordId; }
+  function metaOf(o){ return { version: o.version, deviceId: o.deviceId, deleted: o.deleted === true }; }
+  async function enqueueEnvelope(env){
+    if (!env || typeof env !== "object") throw new Error("envelope assente");
+    if (env.protocolVersion !== 1) throw new Error("protocolVersion non supportata");
+    var id = intentId(env.spaceId, env.recordType, env.recordId);
+    var ex = await DB().get("syncOutbox", id), now = Date.now();
+    if (ex){
+      var inM = metaOf(env), exM = metaOf(ex);
+      if (NB().nativeWinner(inM, exM) !== inM) return id;   // esistente vince o pari -> idempotente, nessuna riscrittura (no re-encrypt)
+    }
+    await DB().put("syncOutbox", { id: id, spaceId: env.spaceId, recordType: env.recordType, recordId: env.recordId,
+      version: env.version, deviceId: env.deviceId, keyVersion: env.keyVersion, deleted: env.deleted === true, envelope: env,
+      status: "pending", attempts: 0, createdAt: (ex && ex.createdAt != null ? ex.createdAt : now), updatedAt: now });
+    return id;
+  }
+  async function listPending(spaceId){ return await DB().list("syncOutbox", function(x){ return x && x.status === "pending" && (spaceId == null || x.spaceId === spaceId); }); }
+  async function getIntent(id){ return await DB().get("syncOutbox", id); }
+  async function markDelivered(id, expectedVersion, expectedDeviceId){
+    var rec = await DB().get("syncOutbox", id);
+    if (!rec) return false;
+    if (rec.version !== expectedVersion || String(rec.deviceId) !== String(expectedDeviceId)) return false;   // ack stantio -> non marcare
+    if (rec.status === "delivered") return true;
+    rec.status = "delivered"; rec.updatedAt = Date.now();
+    await DB().put("syncOutbox", rec);
+    return true;
+  }
+  window.syncOutbox = { enqueueEnvelope: enqueueEnvelope, listPending: listPending, getIntent: getIntent, markDelivered: markDelivered };
+
+  // =================== TEST ===================
+  window.nativeCrypto._test = async function(){
+    var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
+    async function throwsA(fn){ try { await fn(); return false; } catch(e){ return true; } }
+    async function errOf(fn){ try { await fn(); return null; } catch(e){ return e && e.message; } }
+    var SR = window.sharedRuntime, K = window.spaceKeys, C = window.nativeCrypto, OB = window.syncOutbox, DBx = window.calculonDB;
+    function O1(k, v){ var o = {}; o[k] = v; return o; }
+
+    // ---------- DB upgrade (v2 popolato -> v3), su un DB usa-e-getta ----------
+    async function del(name){ return new Promise(function(res){ var d = indexedDB.deleteDatabase(name); d.onsuccess = d.onerror = d.onblocked = function(){ res(); }; }); }
+    function openRaw(name, ver, stores){ return new Promise(function(res, rej){ var req = indexedDB.open(name, ver);
+      req.onupgradeneeded = function(){ var db = req.result; for (var i = 0; i < stores.length; i++) if (!db.objectStoreNames.contains(stores[i])) db.createObjectStore(stores[i], { keyPath: stores[i] === "meta" ? "key" : "id" }); };
+      req.onsuccess = function(){ res(req.result); }; req.onerror = function(){ rej(req.error); }; }); }
+    var UNAME = "calculon-7c-upgrade";
+    await del(UNAME);
+    var db2 = await openRaw(UNAME, 2, ["spaces", "transactions", "meta"]);
+    await new Promise(function(res, rej){ var tx = db2.transaction("spaces", "readwrite"); tx.objectStore("spaces").put({ id: "space:keep", name: "Keep" }); tx.oncomplete = function(){ res(); }; tx.onerror = function(){ rej(tx.error); }; });
+    db2.close();
+    var db3 = await openRaw(UNAME, 3, ["spaces", "transactions", "meta", "syncOutbox", "spaceKeys"]);
+    ok("upgrade v2->v3: dato preesistente conservato", await new Promise(function(res){ var g = db3.transaction("spaces").objectStore("spaces").get("space:keep"); g.onsuccess = function(){ res(g.result && g.result.name === "Keep"); }; g.onerror = function(){ res(false); }; }));
+    ok("upgrade: store syncOutbox presente", db3.objectStoreNames.contains("syncOutbox"));
+    ok("upgrade: store spaceKeys presente", db3.objectStoreNames.contains("spaceKeys"));
+    db3.close(); await del(UNAME);
+    // il DB reale dell'app e' a v3 con i nuovi store
+    ok("app DB_VERSION 3", DBx.DB_VERSION === 3);
+    ok("app: syncOutbox scrivibile", (await DBx.put("syncOutbox", { id: "sync:probe", status: "delivered" })) === "sync:probe");
+    ok("app: spaceKeys leggibile (vuoto)", Array.isArray(await DBx.list("spaceKeys", function(){ return false; })));
+
+    // ---------- keys ----------
+    var og = await SR.createSpace({ kind: "ongoing", name: "Cripto", selfName: "Gio" });
+    var OG = og.spaceId, S = og.selfMemberId;
+    await K.createSpaceKey(OG, 1);
+    ok("createSpaceKey: presente", (await K.getSpaceKey(OG, 1)) != null);
+    await K.createSpaceKey(OG, 2);
+    ok("keyVersion multipli [1,2]", JSON.stringify(await K.listSpaceKeyVersions(OG)) === "[1,2]");
+    ok("key assente -> get null", (await K.getSpaceKey(OG, 99)) === null);
+    ok("key assente -> export missing-space-key", (await errOf(function(){ return K.exportSpaceKey(OG, 99); })) === "missing-space-key");
+    ok("personal -> createSpaceKey respinto", await throwsA(function(){ return K.createSpaceKey("personal:local", 1); }));
+    ok("personal -> importSpaceKey respinto", await throwsA(function(){ return K.importSpaceKey("personal:local", 1, "AAAA"); }));
+    // export/import su secondo spazio (fixture)
+    var og2 = await SR.createSpace({ kind: "experience", name: "Cripto2", selfName: "Gio" });
+    var OG2 = og2.spaceId;
+    var exp = await K.exportSpaceKey(OG, 1);
+    await K.importSpaceKey(OG2, 1, exp);
+    ok("import: key presente su secondo spazio", (await K.getSpaceKey(OG2, 1)) != null);
+
+    // ---------- crypto round-trip ----------
+    var m2 = await SR.addMember(OG, { name: "Anna" });
+    var tE = await SR.createExpense(OG, { amount: 420, paidById: S, allocationMode: "exact", parts: (function(){ var o = {}; o[S] = 126; o[m2] = 294; return o; })(), date: "2026-08-01", note: "cena segreta" });
+    var tSet = await SR.createSettlement(OG, { amount: 30, fromMemberId: m2, toMemberId: S, date: "2026-08-01" });
+    await SR.setShareRule(OG, { mode: "shares", parts: [{ memberId: S, value: 1 }, { memberId: m2, value: 2 }] });
+    var spaceRec = await DBx.get("spaces", OG), memberRec = await DBx.get("spaceMembers", m2),
+        expRec = await DBx.get("transactions", tE), setRec = await DBx.get("transactions", tSet), ruleRec = await DBx.get("shareRules", "shareRule:" + OG + ":default");
+    async function roundTrip(type, rec){ var e = await C.encryptSharedRecord(type, rec); var d = await C.decryptSharedEnvelope(e); return { e: e, d: d }; }
+    var NBm = window.nativeSyncBoundary;
+    var rtS = await roundTrip("space", spaceRec);
+    ok("round-trip space", JSON.stringify(rtS.d) === JSON.stringify(NBm.sharedProjectionOfSpace(spaceRec)));
+    ok("round-trip member", JSON.stringify((await roundTrip("member", memberRec)).d) === JSON.stringify(NBm.sharedProjectionOfMember(memberRec)));
+    ok("round-trip expense", JSON.stringify((await roundTrip("transaction", expRec)).d) === JSON.stringify(NBm.sharedProjectionOfTransaction(expRec)));
+    ok("round-trip settlement", JSON.stringify((await roundTrip("transaction", setRec)).d) === JSON.stringify(NBm.sharedProjectionOfTransaction(setRec)));
+    ok("round-trip shareRule", JSON.stringify((await roundTrip("shareRule", ruleRec)).d) === JSON.stringify(NBm.sharedProjectionOfShareRule(ruleRec)));
+
+    // kind/status/name non in chiaro; local fields mai nel payload/decifrato
+    var envS = rtS.e, sEnvJson = JSON.stringify(envS);
+    ok("envelope: niente name/kind/status in header", !("name" in envS) && !("kind" in envS) && !("status" in envS));
+    ok("envelope: name non appare in chiaro", sEnvJson.indexOf("Cripto") < 0);
+    ok("envelope: kind non appare in chiaro", sEnvJson.indexOf("ongoing") < 0);
+    ok("decifrato space: nessun campo local-only", !("selfMemberId" in rtS.d) && !("authority" in rtS.d) && !("legacyGroupId" in rtS.d));
+    ok("envelope: note segreta non in chiaro", JSON.stringify((await roundTrip("transaction", expRec)).e).indexOf("cena segreta") < 0);
+
+    // IV diversi
+    var e1 = await C.encryptSharedRecord("member", memberRec), e2 = await C.encryptSharedRecord("member", memberRec);
+    ok("IV diversi su due encrypt", e1.iv !== e2.iv);
+
+    // tamper -> decrypt fallisce (fail-closed)
+    function clone(o){ return JSON.parse(JSON.stringify(o)); }
+    var base = await C.encryptSharedRecord("transaction", expRec);
+    async function tamperFails(mut){ var e = clone(base); mut(e); return (await errOf(function(){ return C.decryptSharedEnvelope(e); })) != null; }
+    ok("tamper ciphertext -> fallisce", await tamperFails(function(e){ var b = b64urlToBuf(e.ciphertext); new Uint8Array(b)[0] ^= 0xff; e.ciphertext = bufToB64url(b); }));
+    ok("tamper spaceId -> fallisce", await tamperFails(function(e){ e.spaceId = OG2; }));
+    ok("tamper recordId -> fallisce", await tamperFails(function(e){ e.recordId = "space:X:zz"; }));
+    ok("tamper version -> fallisce", await tamperFails(function(e){ e.version = e.version + 1; }));
+    ok("tamper deviceId -> fallisce", await tamperFails(function(e){ e.deviceId = "altro"; }));
+    ok("tamper keyVersion -> fallisce", await tamperFails(function(e){ e.keyVersion = (e.keyVersion === 1 ? 2 : 1); }));   // altra key esiste su OG -> fallisce per AAD
+    ok("tamper deleted -> fallisce", await tamperFails(function(e){ e.deleted = !e.deleted; }));
+    ok("chiave assente -> missing-space-key", (await errOf(function(){ var e = clone(base); e.spaceId = "space:senza-chiave"; e.recordId = "space:senza-chiave:t"; return C.decryptSharedEnvelope(e); })) === "missing-space-key");
+    // wrong key: sovrascrivo la chiave v1 di uno spazio dedicato con una diversa, poi decifro
+    var ogw = await SR.createSpace({ kind: "ongoing", name: "WrongKey", selfName: "Gio" });
+    var OW = ogw.spaceId; await K.createSpaceKey(OW, 1);
+    var mw = await SR.addMember(OW, { name: "Z" });
+    var envW = await C.encryptSharedRecord("member", await DBx.get("spaceMembers", mw));
+    await K.importSpaceKey(OW, 1, exp);   // rimpiazza con una chiave diversa (quella di OG)
+    ok("wrong key -> decrypt-failed", (await errOf(function(){ return C.decryptSharedEnvelope(envW); })) === "decrypt-failed");
+
+    // ---------- outbox ----------
+    function env(v, deleted){ return { protocolVersion: 1, spaceId: "space:OB", recordType: "transaction", recordId: "space:OB:t1", version: v, deviceId: "d1", keyVersion: 1, deleted: !!deleted, iv: "iv" + v, ciphertext: "ct" + v }; }
+    var oid = "sync:space:OB:transaction:space:OB:t1";
+    await OB.enqueueEnvelope(env(1));
+    ok("enqueue: intent pending", (await OB.getIntent(oid)).status === "pending" && (await OB.getIntent(oid)).version === 1);
+    await DBx.close();
+    ok("reload: intent persistito", (await OB.getIntent(oid)) != null && (await OB.getIntent(oid)).version === 1);
+    await OB.enqueueEnvelope(env(2));
+    ok("v2 sostituisce v1", (await OB.getIntent(oid)).version === 2 && (await OB.getIntent(oid)).envelope.iv === "iv2");
+    await OB.enqueueEnvelope(env(1));
+    ok("v1 NON sostituisce v2", (await OB.getIntent(oid)).version === 2);
+    await OB.enqueueEnvelope(env(3, false));
+    await OB.enqueueEnvelope(env(3, true));
+    ok("tombstone tie (delete-wins) sostituisce", (await OB.getIntent(oid)).version === 3 && (await OB.getIntent(oid)).deleted === true);
+    await OB.enqueueEnvelope(env(3, true));
+    var allForRec = await DBx.list("syncOutbox", function(x){ return x.id === oid; });
+    ok("retry stessa envelope: nessun duplicato", allForRec.length === 1);
+    ok("listPending include l'intent", (await OB.listPending("space:OB")).some(function(x){ return x.id === oid; }));
+    ok("stale ack (v2) non marca delivered una v3", (await OB.markDelivered(oid, 2, "d1")) === false && (await OB.getIntent(oid)).status === "pending");
+    ok("markDelivered (v3) ok", (await OB.markDelivered(oid, 3, "d1")) === true && (await OB.getIntent(oid)).status === "delivered");
+    ok("dopo delivered: fuori da listPending", !(await OB.listPending("space:OB")).some(function(x){ return x.id === oid; }));
+
+    var fails = r.filter(function(x){ return !x.pass; });
+    return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+  };
+})();
+/* F4P7C-E2EE-END */
+</script>
+<!-- ==== /MODULE: native-e2ee + sync-outbox ==== -->
 
 <script>
 "use strict";
