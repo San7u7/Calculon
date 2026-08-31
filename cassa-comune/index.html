@@ -5667,6 +5667,7 @@ if ("serviceWorker" in navigator){
     if (opts.expectAbsent) pcs.push({ store: "transactions", id: sourceRecord.id, mustBeAbsent: true });
     else if (opts.expect) pcs.push({ store: "transactions", id: sourceRecord.id, expect: opts.expect });
     await scriviProiezioni(items, pcs);   // atomico: source + quota/liabilities + intent, con CAS
+    if (window.nativeSync && window.nativeSync._poke) window.nativeSync._poke(space.id);   // F4/7E2: trigger prudente
   }
 
   window.personalProjection = {
@@ -6598,6 +6599,7 @@ if ("serviceWorker" in navigator){
     if (opts.expectAbsent) pcs.push({ store: store, id: record.id, mustBeAbsent: true });
     else if (opts.expect) pcs.push({ store: store, id: record.id, expect: opts.expect });
     await window.personalProjection._scriviProiezioni(items, pcs);   // atomico + CAS
+    poke(space.id);   // F4/7E2: trigger prudente (gated su _autoDeliver)
   }
 
   // createSpace E2EE dalla nascita: space + self member + AES key v1 + 2 intent, tutto atomico.
@@ -6614,6 +6616,8 @@ if ("serviceWorker" in navigator){
     // F4/7D2: create-guard — space id e self member id non devono gia' esistere.
     var pcs = [{ store: "spaces", id: space.id, mustBeAbsent: true }, { store: "spaceMembers", id: member.id, mustBeAbsent: true }];
     await window.personalProjection._scriviProiezioni(items, pcs);   // atomico: space+member+key+outbox
+    await ensureSpaceCapability(space.id);   // F4/7E2: capability random 32B generata insieme alla key E2EE
+    poke(space.id);
   }
   var _poison = false;
 
@@ -6622,6 +6626,7 @@ if ("serviceWorker" in navigator){
     var sp = await DB().get("spaces", spaceId);
     if (!sp || sp.deleted === true) throw new Error("spazio inesistente: " + spaceId);
     if (!nativeBorn(sp)) throw new Error("bootstrap solo su spazi native-born");
+    await ensureSpaceCapability(spaceId);   // F4/7E2: capability locale creata se assente (idempotente)
     // 1) key: crea se manca (createSpaceKey la persiste, idempotente); porta space.keyVersion a 1
     //    come modifica causale shared (version bump) se non lo era gia'.
     var kv = Number.isInteger(sp.keyVersion) ? sp.keyVersion : 1;
@@ -6652,8 +6657,76 @@ if ("serviceWorker" in navigator){
     return { spaceId: spaceId, snapshot: records.length };
   }
 
+  /* F4 · Passo 7E2 — capability locale + delivery pump (outbound only, syncOutbox -> /api/space/*).
+     La spaceCap NON entra MAI in envelope/record shared/syncOutbox/Worker storage: vive solo in meta. */
+  var _apiBase = (typeof API !== "undefined" && API) ? API : "";   // stesso Worker del legacy
+  var _autoDeliver = false;                                          // default OFF: nessun hit di rete nei test
+  function b64urlBytes(bytes){ var s = ""; for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); }
+  function nuovaCapability(){ return b64urlBytes(crypto.getRandomValues(new Uint8Array(32))); }   // 32B -> 43 char base64url
+  async function getSpaceCapability(spaceId){ return (await DB().meta.get("spaceCap:" + spaceId)) || null; }
+  async function setSpaceCapability(spaceId, cap){
+    if (!spaceId || spaceId === "personal:local") throw new Error("spaceId non valido");
+    if (typeof cap !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(cap)) throw new Error("capability non valida (32B base64url)");
+    await DB().meta.set("spaceCap:" + spaceId, cap);
+    return cap;
+  }
+  async function ensureSpaceCapability(spaceId){ var ex = await getSpaceCapability(spaceId); return ex ? ex : await setSpaceCapability(spaceId, nuovaCapability()); }
+
+  // Aggiorna un intent SOLO se rappresenta ancora la versione che stavamo consegnando (protezione concorrenza).
+  async function updateIntentGuarded(id, expVer, expDev, mutate){
+    var rec = await DB().get("syncOutbox", id);
+    if (!rec || rec.status === "delivered") return false;
+    if (rec.version !== expVer || String(rec.deviceId) !== String(expDev)) return false;   // una versione piu' nuova ha preso il posto
+    mutate(rec); rec.updatedAt = Date.now();
+    await DB().put("syncOutbox", rec);
+    return true;
+  }
+
+  // DELIVERY PUMP: consegna gli intent pending al Worker. NON ricifra (usa l'envelope gia' persistito).
+  async function deliverPending(spaceId){
+    var pend = await window.syncOutbox.listPending(spaceId);
+    var rep = { total: pend.length, delivered: 0, superseded: 0, pending: 0, authError: 0, quarantined: 0 };
+    for (var i = 0; i < pend.length; i++){
+      var it = pend[i];
+      var cap = await getSpaceCapability(it.spaceId);
+      if (!cap){ rep.authError++; continue; }
+      var url = _apiBase + "/api/space/" + encodeURIComponent(it.spaceId) + "/" + encodeURIComponent(it.recordType) + "/" + encodeURIComponent(it.recordId);
+      var res;
+      try { res = await fetch(url, { method: "PUT", headers: { "Authorization": "Bearer " + cap, "Content-Type": "application/json" }, body: JSON.stringify(it.envelope) }); }
+      catch(e){ rep.pending++; continue; }                                   // offline/fetch fail -> resta pending
+      if (res.status === 401 || res.status === 403){ rep.authError++; continue; }   // auth: niente markDelivered, resta pending
+      if (res.status === 400 || res.status === 413){ await updateIntentGuarded(it.id, it.version, it.deviceId, function(r){ r.status = "error"; }); rep.quarantined++; continue; }   // errore permanente
+      if (res.status !== 200){ await updateIntentGuarded(it.id, it.version, it.deviceId, function(r){ r.attempts = (r.attempts | 0) + 1; }); rep.pending++; continue; }   // 5xx/altro -> pending+attempts
+      var body = null; try { body = await res.json(); } catch(e){}
+      var w = body && body.winner;
+      if (w && w.version === it.version && String(w.deviceId) === String(it.deviceId) && (w.deleted === true) === (it.envelope.deleted === true)){
+        var done = await window.syncOutbox.markDelivered(it.id, it.version, it.deviceId);   // guarded: se v(n+1) ha rimpiazzato, false -> resta pending
+        if (done) rep.delivered++; else rep.pending++;
+      } else if (w){
+        // winner remoto diverso/piu' nuovo: NON applicare (inbound = passo successivo). Stop retry di questa versione.
+        await updateIntentGuarded(it.id, it.version, it.deviceId, function(r){ r.status = "superseded-remote"; r.remoteWinner = { version: w.version, deviceId: w.deviceId, deleted: w.deleted === true }; r.lastSeq = body.seq; });
+        rep.superseded++;
+      } else { await updateIntentGuarded(it.id, it.version, it.deviceId, function(r){ r.attempts = (r.attempts | 0) + 1; }); rep.pending++; }
+    }
+    return rep;
+  }
+  // Trigger prudente fire-and-forget: una failure di rete non tocca la write gia' committata.
+  function poke(spaceId){ if (_autoDeliver){ try { deliverPending(spaceId).catch(function(){}); } catch(e){} } }
+  if (typeof window !== "undefined" && window.addEventListener){
+    window.addEventListener("online", function(){ if (_autoDeliver) deliverPending().catch(function(){}); });
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", function(){ if (_autoDeliver && !document.hidden) deliverPending().catch(function(){}); });
+  }
+
   window.nativeSync = {
     bootstrapSpace: bootstrapSpace,
+    setSpaceCapability: setSpaceCapability,
+    getSpaceCapability: getSpaceCapability,
+    ensureSpaceCapability: ensureSpaceCapability,
+    deliverPending: deliverPending,
+    enableAutoDelivery: function(baseUrl){ if (baseUrl) _apiBase = baseUrl; _autoDeliver = true; },
+    _setApiBase: function(u){ _apiBase = u; },
+    _setAutoDeliver: function(v){ _autoDeliver = !!v; },
+    _poke: poke,
     _commitCreateSpace: commitCreateSpace,
     _commitSharedRecordWithIntent: commitSharedRecordWithIntent,
     _buildIntentItem: buildIntentItem,

@@ -145,11 +145,12 @@ async function leggiTutto(env, gid){
 
 export default {
   async fetch(req, env){
+    // F4/7E1 — native E2EE sync -> Durable Object (gestisce anche il preflight OPTIONS con CORS+Authorization).
+    // Posto PRIMA dell'OPTIONS legacy cosi' il preflight /api/space usa i CORS corretti; il legacy resta invariato.
+    if (new URL(req.url).pathname.startsWith("/api/space")) return handleSpaceRequest(req, env);
     if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
 
     const url = new URL(req.url);
-    // F4/7E1 — nuovo protocollo native E2EE: instradato al Durable Object. Legacy /api/group/* invariato sotto.
-    if (url.pathname === "/api/space" || url.pathname.startsWith("/api/space/")) return handleSpaceRequest(req, env);
     const p = url.pathname.replace(/\/+$/, "").split("/").filter(Boolean);  // ["api","group",...]
     if (p[0] !== "api" || p[1] !== "group") return json({ error: "non trovato" }, 404);
 
