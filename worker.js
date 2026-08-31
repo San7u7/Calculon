@@ -2,6 +2,10 @@
    Binding KV richiesto:  CC
    Un record per chiave KV: grp:<GID>:rec:<RID>   /   grp:<GID>:meta          */
 
+// F4/7E1 — Native E2EE sync (additivo, /api/space/* + Durable Object). Il legacy sotto e' invariato.
+import { SpaceSyncDO, handleSpaceRequest } from "./space_sync.js";
+export { SpaceSyncDO };
+
 const ALFA = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";   // senza I O 0 1
 
 const CORS = {
@@ -144,6 +148,8 @@ export default {
     if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
 
     const url = new URL(req.url);
+    // F4/7E1 — nuovo protocollo native E2EE: instradato al Durable Object. Legacy /api/group/* invariato sotto.
+    if (url.pathname === "/api/space" || url.pathname.startsWith("/api/space/")) return handleSpaceRequest(req, env);
     const p = url.pathname.replace(/\/+$/, "").split("/").filter(Boolean);  // ["api","group",...]
     if (p[0] !== "api" || p[1] !== "group") return json({ error: "non trovato" }, 404);
 

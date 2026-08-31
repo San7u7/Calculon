@@ -5,3 +5,13 @@ compatibility_date = "2026-01-01"
 [[kv_namespaces]]
 binding = "CC"
 id = "25cd17aa0f2644798b40ca07433b4306"
+
+# F4/7E1 — Durable Object per il sync native E2EE (/api/space/*). Binding e migration additivi;
+# il binding KV legacy "CC" sopra e' invariato.
+[[durable_objects.bindings]]
+name = "SPACE_SYNC"
+class_name = "SpaceSyncDO"
+
+[[migrations]]
+tag = "v1-space-sync"
+new_sqlite_classes = ["SpaceSyncDO"]
