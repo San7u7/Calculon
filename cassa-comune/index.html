@@ -4128,17 +4128,31 @@ if ("serviceWorker" in navigator){
   }
 
   async function createExpense(spaceId, input){
-    await spazioScrivibile(spaceId);
+    var sp = await spazioScrivibile(spaceId);
     input = input || {};
     if (!centInt(input.amount) || input.amount <= 0) throw new Error("amount non intero/<=0");
     var m = await membriSpazio(spaceId);
     if (!m.attivi[input.paidById]) throw new Error("payer inesistente/non attivo: " + input.paidById);
-    var rip = leggiRipartizione(input);
-    var alloc = materializzaAlloc(rip.mode, rip.parts, input.amount);
+    // F4/4B — precedenza ripartizione: esplicita > shareRule (ongoing) > equal implicito.
+    var rip = leggiRipartizione(input), alloc, allocMode;
+    if (rip.mode != null || rip.parts != null){
+      // 1) Ripartizione ESPLICITA (anche parziale -> validata/fail-closed): la shareRule non interviene.
+      allocMode = rip.mode; alloc = materializzaAlloc(rip.mode, rip.parts, input.amount);
+    } else if (sp.kind === "ongoing"){
+      // 2a) Nessuna ripartizione: usa il default dello spazio ongoing. stale-share-rule -> create FALLISCE (nessun fallback).
+      var res = await resolveShareRule(spaceId, input.amount);
+      allocMode = res.mode; alloc = res.allocations.map(function(a){ return { memberId: a.memberId, amount: a.amount }; });
+    } else {
+      // 2b) experience: equal implicito sui membri attivi al momento della creazione, senza consultare shareRules.
+      var att = Object.keys(m.attivi); if (att.length === 0) throw new Error("nessun membro attivo");
+      var partsEq = {}; att.forEach(function(id){ partsEq[id] = 1; });
+      allocMode = "equal"; alloc = materializzaAlloc("equal", partsEq, input.amount);
+    }
     for (var i = 0; i < alloc.length; i++){ if (!m.attivi[alloc[i].memberId]) throw new Error("allocatee inesistente/non attivo: " + alloc[i].memberId); }
     var now = Date.now();
+    // Snapshot: persistono SOLO allocationMode + allocations. Nessun riferimento vivo alla shareRule.
     var tx = { id: nuovoTxId(spaceId), spaceId: spaceId, type: "expense",
-      amount: input.amount, paidById: input.paidById, allocations: alloc, allocationMode: rip.mode,
+      amount: input.amount, paidById: input.paidById, allocations: alloc, allocationMode: allocMode,
       date: (input.date != null ? input.date : null), note: (input.note != null ? input.note : null),
       version: 1, deviceId: deviceCorrente(), createdAt: now, updatedAt: now, deleted: false };
     var err = validaTx(tx, function(id){ return !!m.tutti[id]; });
@@ -5067,6 +5081,105 @@ if ("serviceWorker" in navigator){
       ok("reload: regola persistita", reload && reload.mode === "percent");
       var reReload = await SR.resolveShareRule(OG, 1000);
       ok("reload: resolve coerente (400/600)", amt(reReload.allocations,S)===400 && amt(reReload.allocations,m2)===600);
+
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    },
+    // F4/4B: test createExpense che usa il default dello spazio (share rule / equal implicito).
+    _testExpenseDefault: async function(){
+      var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
+      var DB = window.calculonDB, SR = window.sharedRuntime;
+      async function throwsA(fn){ try { await fn(); return false; } catch(e){ return true; } }
+      function amt(alloc, mid){ for (var i=0;i<alloc.length;i++) if (alloc[i].memberId===mid) return alloc[i].amount; return null; }
+      function somma(alloc){ var s=0; for (var i=0;i<alloc.length;i++) s+=alloc[i].amount; return s; }
+      function O2(k1,v1,k2,v2){ var o={}; o[k1]=v1; o[k2]=v2; return o; }
+      function P(o){ return Object.keys(o).map(function(k){ return { memberId:k, value:o[k] }; }); }
+      async function zs(spId){ var b=await SR.balances(spId); var s=0; for (var k in b) s+=b[k]; return s===0; }
+      async function alloc(txId){ return (await DB.get("transactions", txId)).allocations; }
+
+      var og = await SR.createSpace({ kind: "ongoing", name: "Casa4B", selfName: "Gio" });
+      var OG = og.spaceId, S = og.selfMemberId; var m2 = await SR.addMember(OG, { name: "Anna" });
+      var ex = await SR.createSpace({ kind: "experience", name: "Trip4B", selfName: "Gio" });
+      var EX = ex.spaceId, ES = ex.selfMemberId; var em2 = await SR.addMember(EX, { name: "Bea" });
+
+      // 1) ongoing senza rule + niente allocation -> equal sui membri attivi
+      var t1 = await SR.createExpense(OG, { amount: 1000, paidById: S });
+      var a1 = await alloc(t1);
+      ok("ongoing no rule -> mode equal", (await DB.get("transactions", t1)).allocationMode === "equal");
+      ok("ongoing no rule -> 500/500", amt(a1,S)===500 && amt(a1,m2)===500);
+      ok("ongoing no rule -> Sigma === amount", somma(a1) === 1000);
+      ok("ongoing no rule -> zero-sum", await zs(OG));
+
+      // 2) ongoing equal rule -> equal
+      await SR.setShareRule(OG, { mode: "equal" });
+      var t2 = await SR.createExpense(OG, { amount: 1000, paidById: S });
+      ok("ongoing equal rule -> 500/500", (function(a){return amt(a,S)===500 && amt(a,m2)===500;})(await alloc(t2)));
+
+      // 3) ongoing shares rule -> snapshot corretto
+      await SR.setShareRule(OG, { mode: "shares", parts: P(O2(S,1,m2,3)) });
+      var t3 = await SR.createExpense(OG, { amount: 1000, paidById: S });
+      var x3 = await DB.get("transactions", t3);
+      ok("ongoing shares -> mode shares", x3.allocationMode === "shares");
+      ok("ongoing shares -> 250/750", amt(x3.allocations,S)===250 && amt(x3.allocations,m2)===750);
+
+      // 4) ongoing percent rule -> snapshot corretto
+      await SR.setShareRule(OG, { mode: "percent", parts: P(O2(S,2000,m2,8000)) });
+      var t4 = await SR.createExpense(OG, { amount: 1000, paidById: S });
+      var x4 = await DB.get("transactions", t4);
+      ok("ongoing percent -> mode percent", x4.allocationMode === "percent");
+      ok("ongoing percent -> 200/800", amt(x4.allocations,S)===200 && amt(x4.allocations,m2)===800);
+
+      // 5+6) allocation esplicita prevale sulla shareRule (rule=percent)
+      var t6 = await SR.createExpense(OG, { amount: 1000, paidById: S, allocationMode: "equal", parts: O2(S,1,m2,1) });
+      var x6 = await DB.get("transactions", t6);
+      ok("explicit prevale -> mode equal", x6.allocationMode === "equal");
+      ok("explicit prevale -> 500/500", amt(x6.allocations,S)===500 && amt(x6.allocations,m2)===500);
+
+      // 9+10) modifica/delete rule dopo create -> tx invariata (snapshot immutabile)
+      await SR.setShareRule(OG, { mode: "shares", parts: P(O2(S,1,m2,1)) });
+      var tc = await SR.createExpense(OG, { amount: 1000, paidById: S });   // 500/500 shares
+      var allocC = JSON.stringify(await alloc(tc));
+      await SR.setShareRule(OG, { mode: "percent", parts: P(O2(S,9000,m2,1000)) });
+      ok("modifica rule dopo create -> tx invariata", JSON.stringify(await alloc(tc)) === allocC);
+      await SR.deleteShareRule(OG);
+      ok("delete rule dopo create -> tx invariata", JSON.stringify(await alloc(tc)) === allocC);
+
+      // 11) nuova spesa dopo cambio rule -> usa la nuova rule
+      await SR.setShareRule(OG, { mode: "shares", parts: P(O2(S,3,m2,1)) });
+      var tn = await SR.createExpense(OG, { amount: 1000, paidById: S });
+      var xn = await alloc(tn);
+      ok("nuova spesa usa la nuova rule (750/250)", amt(xn,S)===750 && amt(xn,m2)===250);
+
+      // 12) updateExpense NON adotta la rule corrente
+      var tu = await SR.createExpense(OG, { amount: 1000, paidById: S, allocationMode: "equal", parts: O2(S,1,m2,1) });  // 500/500 esplicito
+      await SR.setShareRule(OG, { mode: "shares", parts: P(O2(S,9,m2,1)) });   // rule corrente 900/100
+      await SR.updateExpense(OG, tu, { note: "x" });                          // update senza ripartizione
+      var xu = await DB.get("transactions", tu);
+      ok("update senza ripartizione preserva snapshot (500/500)", amt(xu.allocations,S)===500 && amt(xu.allocations,m2)===500);
+      ok("update NON adotta la rule corrente (mode resta equal)", xu.allocationMode === "equal");
+
+      // 5) rule stale -> create respinto, nessun fallback silenzioso
+      await SR.setShareRule(OG, { mode: "shares", parts: P(O2(S,1,m2,1)) });
+      await SR.archiveMember(OG, m2);
+      var before = (await SR.listTransactions(OG)).length;
+      ok("stale rule -> create respinto", await throwsA(function(){ return SR.createExpense(OG, { amount: 1000, paidById: S }); }));
+      ok("stale -> nessuna tx creata (no fallback)", (await SR.listTransactions(OG)).length === before);
+      await SR.restoreMember(OG, m2);
+
+      // 7) experience senza allocation -> equal sui membri attivi
+      var te = await SR.createExpense(EX, { amount: 900, paidById: ES });
+      var xe = await DB.get("transactions", te);
+      ok("experience no allocation -> mode equal", xe.allocationMode === "equal");
+      ok("experience -> 450/450", amt(xe.allocations,ES)===450 && amt(xe.allocations,em2)===450);
+
+      // 8) experience NON consulta shareRules (record seminato direttamente, deve essere ignorato)
+      await DB.put("shareRules", { id: "shareRule:" + EX + ":default", spaceId: EX, mode: "shares", parts: [{memberId:ES,value:1},{memberId:em2,value:9}], createdAt: 0, updatedAt: 0, deleted: false });
+      var te2 = await SR.createExpense(EX, { amount: 1000, paidById: ES });
+      var xe2 = await DB.get("transactions", te2);
+      ok("experience ignora shareRules -> equal 500/500", xe2.allocationMode === "equal" && amt(xe2.allocations,ES)===500 && amt(xe2.allocations,em2)===500);
+
+      ok("OG zero-sum finale", await zs(OG));
+      ok("EX zero-sum finale", await zs(EX));
 
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
