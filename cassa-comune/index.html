@@ -3939,11 +3939,13 @@ if ("serviceWorker" in navigator){
   }
   // F4/5E — wiring atomico: scrive la SOURCE shared + le sue proiezioni Personali in un'unica
   // transazione IndexedDB (delegato a personalProjection). Un errore su qualunque write -> rollback totale.
-  async function wireCommit(sp, record){
+  async function wireCommit(sp, record, opts){
     var PP = window.personalProjection;
     if (!PP || typeof PP._commitSourceWithProjection !== "function") throw new Error("personalProjection non disponibile");
-    await PP._commitSourceWithProjection(sp, record);
+    await PP._commitSourceWithProjection(sp, record, opts);
   }
+  // F4/7D2 — base attesa (CAS) da un record letto: version/deviceId/deleted (mai updatedAt).
+  function baseAttesa(cur){ return { version: cur.version, deviceId: cur.deviceId, deleted: cur.deleted === true }; }
 
   // Membri dello spazio: attivi E inattivi (active:false) restano validi per storico e
   // risoluzione identita'. Esclusi solo i tombstone (deleted:true) del record membro.
@@ -4184,7 +4186,7 @@ if ("serviceWorker" in navigator){
       version: 1, deviceId: deviceCorrente(), createdAt: now, updatedAt: now, deleted: false };
     var err = validaTx(tx, function(id){ return !!m.tutti[id]; });
     if (err) throw new Error("expense invalida: " + err);
-    await wireCommit(sp, tx);   // source + proiezioni, atomico
+    await wireCommit(sp, tx, { expectAbsent: true });   // source + proiezioni, atomico + create-guard
     return tx.id;
   }
 
@@ -4236,7 +4238,7 @@ if ("serviceWorker" in navigator){
       createdAt: (cur.createdAt != null ? cur.createdAt : null), updatedAt: Date.now(), deleted: false };
     var err = validaTx(upd, function(id){ return !!m.tutti[id]; });
     if (err) throw new Error("expense update invalida: " + err);
-    await wireCommit(sp, upd);   // source + proiezioni riconciliate, atomico
+    await wireCommit(sp, upd, { expect: baseAttesa(cur) });   // source + proiezioni, atomico + CAS
     return upd.id;
   }
 
@@ -4256,7 +4258,7 @@ if ("serviceWorker" in navigator){
       version: 1, deviceId: deviceCorrente(), createdAt: now, updatedAt: now, deleted: false };
     var err = validaTx(tx, function(id){ return !!m.tutti[id]; });
     if (err) throw new Error("settlement invalido: " + err);
-    await wireCommit(sp, tx);   // solo liabilities (nessuna quota), atomico
+    await wireCommit(sp, tx, { expectAbsent: true });   // solo liabilities (nessuna quota), atomico + create-guard
     return tx.id;
   }
 
@@ -4284,7 +4286,7 @@ if ("serviceWorker" in navigator){
       createdAt: (cur.createdAt != null ? cur.createdAt : null), updatedAt: Date.now(), deleted: false };
     var err = validaTx(upd, function(id){ return !!m.tutti[id]; });
     if (err) throw new Error("settlement update invalido: " + err);
-    await wireCommit(sp, upd);   // source + liabilities riconciliate, atomico
+    await wireCommit(sp, upd, { expect: baseAttesa(cur) });   // source + liabilities, atomico + CAS
     return upd.id;
   }
 
@@ -4294,7 +4296,7 @@ if ("serviceWorker" in navigator){
     if (!cur || cur.spaceId !== spaceId) throw new Error("transazione inesistente nello spazio: " + txId);
     if (cur.deleted === true) return txId;   // idempotente
     var upd = Object.assign({}, cur, { deleted: true, version: (cur.version | 0) + 1, deviceId: deviceCorrente(), updatedAt: Date.now() });
-    await wireCommit(sp, upd);   // source tombstone + proiezioni tombstone, stesso ciclo atomico
+    await wireCommit(sp, upd, { expect: baseAttesa(cur) });   // source tombstone + proiezioni tombstone, atomico + CAS
     return txId;
   }
   async function restoreTransaction(spaceId, txId){
@@ -4306,7 +4308,7 @@ if ("serviceWorker" in navigator){
     var upd = Object.assign({}, cur, { deleted: false, version: (cur.version | 0) + 1, deviceId: deviceCorrente(), updatedAt: Date.now() });
     var err = validaTx(upd, function(id){ return !!m.tutti[id]; });   // rivalida come tx viva
     if (err) throw new Error("restore invalido: " + err);
-    await wireCommit(sp, upd);   // source viva + proiezioni ricalcolate, atomico
+    await wireCommit(sp, upd, { expect: baseAttesa(cur) });   // source viva + proiezioni ricalcolate, atomico + CAS
     return txId;
   }
 
@@ -4391,7 +4393,7 @@ if ("serviceWorker" in navigator){
     var now = Date.now();
     var membro = { id: nuovoMemberId(spaceId), spaceId: spaceId, name: name, active: true,
       version: 1, deviceId: deviceCorrente(), createdAt: now, updatedAt: now, deleted: false };   // F4/7B2
-    await window.nativeSync._commitSharedRecordWithIntent("member", sp, membro);   // F4/7D: member + intent atomici
+    await window.nativeSync._commitSharedRecordWithIntent("member", sp, membro, { expectAbsent: true });   // F4/7D member+intent · 7D2 create-guard
     return membro.id;
   }
   async function updateMember(spaceId, memberId, patch){
@@ -4404,7 +4406,7 @@ if ("serviceWorker" in navigator){
     if ("name" in patch){ var nm = trimStr(patch.name); if (!nm) throw new Error("nome membro vuoto"); upd.name = nm; }
     upd.id = memberId; upd.spaceId = spaceId; upd.deleted = false;   // storico/identita' invariati
     upd.version = (cur.version | 0) + 1; upd.deviceId = deviceCorrente();   // F4/7B2: base mancante -> 0 -> v1
-    await window.nativeSync._commitSharedRecordWithIntent("member", sp, upd);
+    await window.nativeSync._commitSharedRecordWithIntent("member", sp, upd, { expect: baseAttesa(cur) });
     return memberId;
   }
   async function archiveMember(spaceId, memberId){
@@ -4414,7 +4416,7 @@ if ("serviceWorker" in navigator){
     var cur = await caricaMembro(spaceId, memberId);
     if (cur.active === false) return memberId;      // idempotente
     var upd = Object.assign({}, cur, { active: false, version: (cur.version | 0) + 1, deviceId: deviceCorrente() });   // active:false NON e' tombstone
-    await window.nativeSync._commitSharedRecordWithIntent("member", sp, upd);
+    await window.nativeSync._commitSharedRecordWithIntent("member", sp, upd, { expect: baseAttesa(cur) });
     return memberId;
   }
   async function restoreMember(spaceId, memberId){
@@ -4422,7 +4424,7 @@ if ("serviceWorker" in navigator){
     var cur = await caricaMembro(spaceId, memberId);
     if (cur.active === true) return memberId;        // idempotente
     var upd = Object.assign({}, cur, { active: true, version: (cur.version | 0) + 1, deviceId: deviceCorrente() });   // F4/7B2
-    await window.nativeSync._commitSharedRecordWithIntent("member", sp, upd);
+    await window.nativeSync._commitSharedRecordWithIntent("member", sp, upd, { expect: baseAttesa(cur) });
     return memberId;
   }
 
@@ -4431,7 +4433,7 @@ if ("serviceWorker" in navigator){
     var sp = await spazioNativo(spaceId);            // qualunque status; mai legacy
     var nm = trimStr(name); if (!nm) throw new Error("nome spazio vuoto");
     var upd = Object.assign({}, sp, { name: nm, version: (sp.version | 0) + 1, deviceId: deviceCorrente() });   // F4/7B2: bump shared (name in SHARED_SPACE_FIELDS)
-    await window.nativeSync._commitSharedRecordWithIntent("space", upd, upd);   // F4/7D: space + intent atomici
+    await window.nativeSync._commitSharedRecordWithIntent("space", upd, upd, { expect: baseAttesa(sp) });   // F4/7D: space + intent atomici
     return spaceId;
   }
   async function archiveSpace(spaceId){
@@ -4439,7 +4441,7 @@ if ("serviceWorker" in navigator){
     if (sp.status === "archived") return spaceId;    // idempotente
     if (sp.status !== "active") throw new Error("spazio non active: status " + String(sp.status));
     var upd = Object.assign({}, sp, { status: "archived", version: (sp.version | 0) + 1, deviceId: deviceCorrente() });   // il membro self NON viene archiviato
-    await window.nativeSync._commitSharedRecordWithIntent("space", upd, upd);
+    await window.nativeSync._commitSharedRecordWithIntent("space", upd, upd, { expect: baseAttesa(sp) });
     return spaceId;
   }
   async function restoreSpace(spaceId){
@@ -4447,7 +4449,7 @@ if ("serviceWorker" in navigator){
     if (sp.status === "active") return spaceId;       // idempotente
     if (sp.status !== "archived") throw new Error("spazio non archived: status " + String(sp.status));
     var upd = Object.assign({}, sp, { status: "active", version: (sp.version | 0) + 1, deviceId: deviceCorrente() });   // experience|ongoing archived -> active
-    await window.nativeSync._commitSharedRecordWithIntent("space", upd, upd);
+    await window.nativeSync._commitSharedRecordWithIntent("space", upd, upd, { expect: baseAttesa(sp) });
     return spaceId;
   }
 
@@ -4518,7 +4520,7 @@ if ("serviceWorker" in navigator){
       version: baseV + 1, deviceId: deviceCorrente(),
       createdAt: (existing && existing.createdAt != null ? existing.createdAt : now),
       updatedAt: now, deleted: false };
-    await window.nativeSync._commitSharedRecordWithIntent("shareRule", spRule, rec);   // F4/7D: shareRule + intent atomici
+    await window.nativeSync._commitSharedRecordWithIntent("shareRule", spRule, rec, existing ? { expect: baseAttesa(existing) } : { expectAbsent: true });   // F4/7D shareRule+intent · 7D2 CAS su create/update
     return id;
   }
   async function deleteShareRule(spaceId){
@@ -4528,7 +4530,7 @@ if ("serviceWorker" in navigator){
     if (!rec || rec.deleted === true) return id;          // idempotente
     // F4/7B2: tombstone come write causale (+1). F4/7D: il tombstone viaggia cifrato come versione corrente.
     var upd = Object.assign({}, rec, { deleted: true, version: (rec.version | 0) + 1, deviceId: deviceCorrente(), updatedAt: Date.now() });
-    await window.nativeSync._commitSharedRecordWithIntent("shareRule", spRule, upd);
+    await window.nativeSync._commitSharedRecordWithIntent("shareRule", spRule, upd, { expect: baseAttesa(rec) });
     return id;
   }
   // READ-ONLY: snapshot materializzabile per una spesa di importo `amount`. Nessuna scrittura,
@@ -5540,18 +5542,41 @@ if ("serviceWorker" in navigator){
       batch.push({ store: store, record: Object.assign({}, e, { deleted: true, updatedAt: now }) });   // orphan -> tombstone
     });
   }
-  // Scrittura ATOMICA multi-store. Rollback totale se una put fallisce (mai quota nuova con liab vecchie).
-  async function scriviProiezioni(items){
-    if (!items || items.length === 0) return 0;   // niente da scrivere: nessuna transazione, updatedAt invariato
+  // Scrittura ATOMICA multi-store con CAS (F4/7D2). preconditions = [{store, id, expect:{version,deviceId,
+  // deleted}} | {store, id, mustBeAbsent:true}]: DENTRO la transazione rilegge ogni id e verifica la base
+  // attesa; solo se TUTTE combaciano scrive gli items. Base cambiata -> local-write-conflict; id gia'
+  // presente su create -> local-create-conflict. Nessuna write parziale. Non usa updatedAt.
+  async function scriviProiezioni(items, preconditions){
+    items = items || []; var pcs = preconditions || [];
+    if (items.length === 0 && pcs.length === 0) return 0;
     var idb = await window.calculonDB.open();
     await new Promise(function(res, rej){
-      var storeSet = {}; items.forEach(function(it){ storeSet[it.store] = true; });
-      var tx = idb.transaction(Object.keys(storeSet), "readwrite"), settled = false;
-      tx.oncomplete = function(){ if (!settled){ settled = true; res(); } };
-      tx.onabort = function(){ if (!settled){ settled = true; rej(tx.error || new Error("transazione annullata")); } };
+      var storeSet = {}; items.forEach(function(it){ storeSet[it.store] = true; }); pcs.forEach(function(p){ storeSet[p.store] = true; });
+      var tx = idb.transaction(Object.keys(storeSet), "readwrite"), settled = false, failErr = null;
+      function finish(err){ if (settled) return; settled = true; err ? rej(err) : res(); }
+      tx.oncomplete = function(){ finish(); };
+      tx.onabort = function(){ finish(failErr || tx.error || new Error("transazione annullata")); };
       tx.onerror = function(){};
-      try { items.forEach(function(it){ tx.objectStore(it.store).put(it.record); }); }
-      catch(e){ try { tx.abort(); } catch(_){ } if (!settled){ settled = true; rej(e); } }
+      function doPuts(){ try { items.forEach(function(it){ tx.objectStore(it.store).put(it.record); }); }
+        catch(e){ failErr = failErr || e; try { tx.abort(); } catch(_){ } } }
+      try {
+        if (pcs.length === 0){ doPuts(); return; }
+        var remaining = pcs.length;
+        pcs.forEach(function(p){
+          var g = tx.objectStore(p.store).get(p.id);
+          g.onsuccess = function(){
+            if (failErr) return;
+            var cur = g.result, bad = false, code = null;
+            if (p.mustBeAbsent){ if (cur){ bad = true; code = "local-create-conflict"; } }
+            else { var e = p.expect || {};
+              if (!cur || (cur.version | 0) !== (e.version | 0) || String(cur.deviceId) !== String(e.deviceId) || (cur.deleted === true) !== (e.deleted === true)){ bad = true; code = "local-write-conflict"; } }
+            if (bad){ failErr = new Error(code); try { tx.abort(); } catch(_){ } return; }
+            remaining--;
+            if (remaining === 0){ doPuts(); }   // scrive solo dopo che TUTTE le precondizioni combaciano
+          };
+          g.onerror = function(){ if (!failErr){ failErr = g.error || new Error("read fallita"); try { tx.abort(); } catch(_){ } } };
+        });
+      } catch(e){ failErr = e; try { tx.abort(); } catch(_){ } finish(e); }
     });
     return items.length;
   }
@@ -5638,7 +5663,10 @@ if ("serviceWorker" in navigator){
       if (intent) items.push(intent);
     }
     if (_testPoison) items.push({ store: "liabilities", record: { derived: true, sourceSpaceId: space.id } });   // manca id -> put fallisce
-    await scriviProiezioni(items);   // atomico: source + quota/liabilities + intent insieme
+    var pcs = [];   // F4/7D2 CAS sulla source
+    if (opts.expectAbsent) pcs.push({ store: "transactions", id: sourceRecord.id, mustBeAbsent: true });
+    else if (opts.expect) pcs.push({ store: "transactions", id: sourceRecord.id, expect: opts.expect });
+    await scriviProiezioni(items, pcs);   // atomico: source + quota/liabilities + intent, con CAS
   }
 
   window.personalProjection = {
@@ -6555,16 +6583,21 @@ if ("serviceWorker" in navigator){
     return await intentItemFromEnvelope(env);
   }
 
-  // Commit atomico di un record shared (member/space/shareRule) + il suo intent cifrato.
-  async function commitSharedRecordWithIntent(recordType, space, record){
+  // Commit atomico di un record shared (member/space/shareRule) + il suo intent cifrato, con CAS (7D2).
+  // opts.expect = {version,deviceId,deleted} per update/delete/restore; opts.expectAbsent per i create.
+  async function commitSharedRecordWithIntent(recordType, space, record, opts){
     if (!space || space.legacyGroupId) throw new Error("commit: spazio legacy fuori scope");
     if (space.authority !== "native") throw new Error("commit: spazio non native");
+    opts = opts || {};
     var storeByType = { space: "spaces", member: "spaceMembers", shareRule: "shareRules" };
     var store = storeByType[recordType]; if (!store) throw new Error("recordType non gestito: " + recordType);
     var items = [{ store: store, record: record }];
     var intent = await buildIntentItem(recordType, record);   // crypto PRIMA della transazione
     if (intent) items.push(intent);
-    await window.personalProjection._scriviProiezioni(items);   // scrittura atomica multi-store
+    var pcs = [];
+    if (opts.expectAbsent) pcs.push({ store: store, id: record.id, mustBeAbsent: true });
+    else if (opts.expect) pcs.push({ store: store, id: record.id, expect: opts.expect });
+    await window.personalProjection._scriviProiezioni(items, pcs);   // atomico + CAS
   }
 
   // createSpace E2EE dalla nascita: space + self member + AES key v1 + 2 intent, tutto atomico.
@@ -6578,7 +6611,9 @@ if ("serviceWorker" in navigator){
     var items = [{ store: "spaces", record: space }, { store: "spaceMembers", record: member }, { store: "spaceKeys", record: keyRec }];
     if (iS) items.push(iS); if (iM) items.push(iM);
     if (_poison) items.push({ store: "syncOutbox", record: { status: "pending" } });   // manca id -> put fallisce -> rollback totale
-    await window.personalProjection._scriviProiezioni(items);   // atomico: space+member+key+outbox
+    // F4/7D2: create-guard — space id e self member id non devono gia' esistere.
+    var pcs = [{ store: "spaces", id: space.id, mustBeAbsent: true }, { store: "spaceMembers", id: member.id, mustBeAbsent: true }];
+    await window.personalProjection._scriviProiezioni(items, pcs);   // atomico: space+member+key+outbox
   }
   var _poison = false;
 
@@ -6757,6 +6792,98 @@ if ("serviceWorker" in navigator){
       await DBx.close();
       ok("reload: intent space persistito", (await getOut(SP, "space", SP)) != null);
       ok("reload: key persistita", (await K.getSpaceKey(SP, 1)) != null);
+
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    },
+    // F4/7D2 — CAS expected-version: conflitto locale prima del commit.
+    _testCAS: async function(){
+      var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
+      async function errOf(fn){ try { await fn(); return null; } catch(e){ return e && e.message; } }
+      var SR = window.sharedRuntime, PJ = window.personalProjection, NS = window.nativeSync, DBx = window.calculonDB, K = window.spaceKeys;
+      function O(a){ var o = {}; for (var i = 0; i < a.length; i += 2) o[a[i]] = a[i + 1]; return o; }
+      function base(rec){ return { version: rec.version, deviceId: rec.deviceId, deleted: rec.deleted === true }; }
+      async function getOut(sp, type, rid){ return await DBx.get("syncOutbox", "sync:" + sp + ":" + type + ":" + rid); }
+
+      var s = await SR.createSpace({ kind: "ongoing", name: "CAS Space", selfName: "Io" });
+      var SP = s.spaceId, SELF = s.selfMemberId, spRec = await DBx.get("spaces", SP);
+      var m2 = await SR.addMember(SP, { name: "Anna" });
+
+      // ===== TRANSACTION conflict =====
+      var tE = await SR.createExpense(SP, { amount: 300, paidById: SELF, allocationMode: "exact", parts: O([SELF, 150, m2, 150]), date: "2026-10-01" });
+      var v1 = await DBx.get("transactions", tE);
+      await SR.updateExpense(SP, tE, { note: "vincente" });   // concorrente -> v2
+      var staleA = Object.assign({}, v1, { note: "A", version: 2 });
+      var cTx = await errOf(function(){ return PJ._commitSourceWithProjection(spRec, staleA, { expect: base(v1) }); });
+      ok("tx: commit stale -> local-write-conflict", cTx === "local-write-conflict");
+      var tAfter = await DBx.get("transactions", tE);
+      ok("tx: source vincente intatta (v2, note vincente)", tAfter.version === 2 && tAfter.note === "vincente");
+      ok("tx: quota projection == winner", (await DBx.get("transactions", "proj:" + SP + ":" + tE + ":quota")) != null);
+      ok("tx: liability aggregate == self balance (invariata)", (await PJ.liabilityBalance(SP)).totalSignedAmount === ((await SR.balances(SP))[SELF] || 0));
+      ok("tx: outbox solo versione vincente (v2)", (await getOut(SP, "transaction", tE)).version === 2);
+
+      // ===== MEMBER conflict =====
+      var mm = await SR.addMember(SP, { name: "Bea" });
+      var mv1 = await DBx.get("spaceMembers", mm);
+      await SR.updateMember(SP, mm, { name: "Bea Vince" });   // -> v2
+      var staleM = Object.assign({}, mv1, { name: "Bea A", version: 2 });
+      var cM = await errOf(function(){ return NS._commitSharedRecordWithIntent("member", spRec, staleM, { expect: base(mv1) }); });
+      ok("member: commit stale -> conflict", cM === "local-write-conflict");
+      ok("member: vincente intatta (Bea Vince, v2)", (await DBx.get("spaceMembers", mm)).name === "Bea Vince" && (await DBx.get("spaceMembers", mm)).version === 2);
+      ok("member: outbox v2", (await getOut(SP, "member", mm)).version === 2);
+
+      // ===== SPACE conflict =====
+      await SR.renameSpace(SP, "CAS A0");
+      var spv = await DBx.get("spaces", SP);
+      await SR.renameSpace(SP, "CAS Vince");   // concorrente
+      var staleSp = Object.assign({}, spv, { name: "CAS A2", version: spv.version + 1 });
+      var cS = await errOf(function(){ return NS._commitSharedRecordWithIntent("space", staleSp, staleSp, { expect: base(spv) }); });
+      ok("space: commit stale -> conflict", cS === "local-write-conflict");
+      ok("space: vincente (CAS Vince)", (await DBx.get("spaces", SP)).name === "CAS Vince");
+
+      // ===== SHARE RULE conflict =====
+      await SR.setShareRule(SP, { mode: "equal" });
+      var rv1 = await DBx.get("shareRules", "shareRule:" + SP + ":default");
+      await SR.setShareRule(SP, { mode: "shares", parts: [{ memberId: SELF, value: 1 }, { memberId: m2, value: 1 }] });   // -> v2
+      var staleR = Object.assign({}, rv1, { mode: "equal", version: 2 });
+      var cR = await errOf(function(){ return NS._commitSharedRecordWithIntent("shareRule", spRec, staleR, { expect: base(rv1) }); });
+      ok("shareRule: commit stale -> conflict", cR === "local-write-conflict");
+      ok("shareRule: vincente (mode shares, v2)", (await DBx.get("shareRules", "shareRule:" + SP + ":default")).mode === "shares" && (await DBx.get("shareRules", "shareRule:" + SP + ":default")).version === 2);
+
+      // ===== CREATE ID collision =====
+      ok("tx create collision -> local-create-conflict", (await errOf(function(){ return PJ._commitSourceWithProjection(spRec, tAfter, { expectAbsent: true }); })) === "local-create-conflict");
+      ok("member create collision", (await errOf(function(){ return NS._commitSharedRecordWithIntent("member", spRec, mv1, { expectAbsent: true }); })) === "local-create-conflict");
+      var selfRec = await DBx.get("spaceMembers", SELF);
+      ok("createSpace collision -> local-create-conflict", (await errOf(function(){ return NS._commitCreateSpace(spRec, selfRec); })) === "local-create-conflict");
+
+      // ===== DELETE vs concurrent update =====
+      var td = await SR.createExpense(SP, { amount: 100, paidById: SELF, allocationMode: "exact", parts: O([SELF, 100]), date: "2026-10-01" });
+      var tdv1 = await DBx.get("transactions", td);
+      await SR.updateExpense(SP, td, { note: "upd" });   // concorrente -> v2
+      var staleDel = Object.assign({}, tdv1, { deleted: true, version: 2 });
+      ok("delete vs concurrent update -> conflict", (await errOf(function(){ return PJ._commitSourceWithProjection(spRec, staleDel, { expect: base(tdv1) }); })) === "local-write-conflict");
+      ok("delete conflict: source resta viva v2", (await DBx.get("transactions", td)).deleted === false && (await DBx.get("transactions", td)).version === 2);
+
+      // ===== RESTORE vs concurrent update =====
+      await SR.deleteTransaction(SP, td);   // -> v3 deleted
+      var tdv3 = await DBx.get("transactions", td);
+      await SR.restoreTransaction(SP, td);  // concorrente -> v4 viva
+      var staleRes = Object.assign({}, tdv3, { deleted: false, version: 4 });
+      ok("restore vs concurrent update -> conflict", (await errOf(function(){ return PJ._commitSourceWithProjection(spRec, staleRes, { expect: base(tdv3) }); })) === "local-write-conflict");
+      ok("restore conflict: source vincente v4 viva", (await DBx.get("transactions", td)).version === 4 && (await DBx.get("transactions", td)).deleted === false);
+
+      // ===== CAS success normale =====
+      var tOK = await SR.createExpense(SP, { amount: 60, paidById: SELF, allocationMode: "exact", parts: O([SELF, 60]), date: "2026-10-01" });
+      await SR.updateExpense(SP, tOK, { note: "ok" });
+      ok("CAS success: update normale v2", (await DBx.get("transactions", tOK)).version === 2 && (await DBx.get("transactions", tOK)).note === "ok");
+      var mOK = await SR.addMember(SP, { name: "Carlo" });
+      await SR.updateMember(SP, mOK, { name: "Carlo B" });
+      ok("CAS success: member update v2", (await DBx.get("spaceMembers", mOK)).version === 2);
+
+      // ===== RELOAD =====
+      await DBx.close();
+      ok("reload: tx vincente persistita", (await DBx.get("transactions", tE)).note === "vincente");
+      ok("reload: space vincente persistito", (await DBx.get("spaces", SP)).name === "CAS Vince");
 
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
