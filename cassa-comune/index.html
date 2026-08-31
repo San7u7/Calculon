@@ -5190,6 +5190,210 @@ if ("serviceWorker" in navigator){
 </script>
 <!-- ==== /MODULE: shared-runtime ==== -->
 
+<!-- ==== MODULE: personal-projection (F4/5B) ==== -->
+<script>
+"use strict";
+/* F4 · Passo 5B — projector PURO Shared 2.0 -> Personale. NESSUNA persistenza, nessuna UI,
+   nessun IndexedDB/localStorage, nessuna mutazione degli input: stesso input -> stesso output.
+   Usa la semantica CANONICA del nuovo runtime (allocations = snapshot; payer +amount, allocatee
+   -quota), MAI quella legacy. Invariante di prodotto: la spesa reale nel Personale e' SEMPRE la
+   mia quota, indipendente da chi ha pagato; il resto e' credito/debito (liability), non spesa. */
+/* F4P5B-PROJ-START */
+(function(){
+  var PID = "personal:local";
+  function centInt(n){ return typeof n === "number" && isFinite(n) && Math.floor(n) === n; }
+
+  // fromSharedTx(space, tx, members) -> { quotaExpense: {...}|null, liabilityLegs: [...] }
+  function fromSharedTx(space, tx, members){
+    // --- validazione fail-closed ---
+    if (!space || typeof space !== "object") throw new Error("space assente");
+    if (space.legacyGroupId) throw new Error("spazio legacy: fuori scope");
+    if (space.kind !== "experience" && space.kind !== "ongoing") throw new Error("spazio non nativo shared: kind " + space.kind);
+    if (!Array.isArray(members)) throw new Error("members assente");
+    if (!tx || typeof tx !== "object") throw new Error("tx assente");
+    if (tx.spaceId !== space.id) throw new Error("source tx cross-space");
+    var self = space.selfMemberId;
+    if (!self) throw new Error("selfMemberId assente");
+    var byId = {};
+    for (var i = 0; i < members.length; i++){ var mm = members[i]; if (mm && mm.deleted !== true) byId[mm.id] = mm; }
+    var selfRec = byId[self];
+    if (!selfRec || selfRec.spaceId !== space.id) throw new Error("selfMemberId incoerente");
+    function esiste(id){ return Object.prototype.hasOwnProperty.call(byId, id); }
+
+    // leg per controparte: signedAmount e' l'UNICA verita' per l'aggregatore (+ = mi devono, - = devo).
+    function mkLeg(counterpart, amount, direction, effect, projectionType){
+      var signed = (direction === "receivable") ? amount : -amount;
+      var o = { id: "liab:" + space.id + ":" + tx.id + ":" + counterpart,
+        counterpartMemberId: counterpart, amount: amount, direction: direction, signedAmount: signed,
+        sourceSpaceId: space.id, sourceTransactionId: tx.id, sourceMemberId: self, projectionType: projectionType };
+      if (effect) o.effect = effect;
+      return o;
+    }
+
+    if (tx.type === "expense"){
+      if (!centInt(tx.amount) || tx.amount <= 0) throw new Error("amount non valido");
+      if (!esiste(tx.paidById)) throw new Error("payer inesistente: " + tx.paidById);
+      var alloc = tx.allocations;
+      if (!Array.isArray(alloc) || alloc.length === 0) throw new Error("allocations vuoto");
+      var somma = 0, myQuota = 0;
+      for (var j = 0; j < alloc.length; j++){ var a = alloc[j];
+        if (!a || !esiste(a.memberId)) throw new Error("allocatee inesistente: " + (a && a.memberId));
+        if (!centInt(a.amount) || a.amount < 0) throw new Error("allocation non intera/<0");
+        somma += a.amount;
+        if (a.memberId === self) myQuota += a.amount;
+      }
+      if (somma !== tx.amount) throw new Error("allocation incoerente: " + somma + " != " + tx.amount);
+
+      // QUOTA EXPENSE: solo se la mia quota > 0; nessuna dipendenza da chi ha pagato.
+      var quotaExpense = null;
+      if (myQuota > 0){
+        quotaExpense = { id: "proj:" + space.id + ":" + tx.id + ":quota", spaceId: PID, type: "expense",
+          amount: myQuota, date: (tx.date != null ? tx.date : null), accountId: null, categoryId: null,
+          capitalMovement: false, sourceSpaceId: space.id, sourceTransactionId: tx.id, sourceMemberId: self,
+          projectionType: "share-quota" };
+      }
+
+      // LIABILITY LEGS per controparte.
+      var legs = [];
+      if (tx.paidById === self){
+        // pago io: receivable verso ogni ALTRO allocatee (>0). La mia quota NON e' un credito.
+        for (var k = 0; k < alloc.length; k++){ var b = alloc[k];
+          if (b.memberId === self) continue;
+          if (b.amount > 0) legs.push(mkLeg(b.memberId, b.amount, "receivable", null, "share-liability"));
+        }
+      } else if (myQuota > 0){
+        // paga un altro: UNA sola leg payable verso il payer = myQuota. Nessuna leg verso gli altri.
+        legs.push(mkLeg(tx.paidById, myQuota, "payable", null, "share-liability"));
+      }
+      return { quotaExpense: quotaExpense, liabilityLegs: legs };
+    }
+
+    if (tx.type === "settlement"){
+      if (!centInt(tx.amount) || tx.amount <= 0) throw new Error("amount non valido");
+      if (!esiste(tx.fromMemberId) || !esiste(tx.toMemberId)) throw new Error("settlement from/to inesistente");
+      if (tx.fromMemberId === tx.toMemberId) throw new Error("settlement from === to");
+      // Nessuna quota expense per il settlement. Solo posizione netta verso la controparte.
+      var legsS = [];
+      if (tx.fromMemberId === self){
+        // pago io la controparte toMember: la mia posizione netta verso di lui AUMENTA.
+        legsS.push(mkLeg(tx.toMemberId, tx.amount, "receivable", "increase-net", "settlement-liability"));
+      } else if (tx.toMemberId === self){
+        // la controparte fromMember paga me: la mia posizione netta verso di lei DIMINUISCE.
+        legsS.push(mkLeg(tx.fromMemberId, tx.amount, "payable", "decrease-net", "settlement-liability"));
+      } // altrimenti: settlement che non coinvolge self -> nessuna leg
+      return { quotaExpense: null, liabilityLegs: legsS };
+    }
+
+    throw new Error("tipo non supportato: " + tx.type);
+  }
+
+  window.personalProjection = {
+    fromSharedTx: fromSharedTx,
+    _test: function(){
+      var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
+      var PJ = window.personalProjection;
+      function throws(fn){ try { fn(); return false; } catch(e){ return true; } }
+      function sp(id, selfId){ return { id: id, kind: "ongoing", status: "active", legacyGroupId: null, selfMemberId: selfId }; }
+      function m(id){ return { id: id, spaceId: "S", active: true, deleted: false }; }
+      function exp(amount, paidById, allocPairs){ var al = allocPairs.map(function(p){ return { memberId: p[0], amount: p[1] }; }); return { id: "T1", spaceId: "S", type: "expense", amount: amount, paidById: paidById, allocations: al, date: "2026-08-01" }; }
+      function setl(from, to, amount){ return { id: "T2", spaceId: "S", type: "settlement", amount: amount, fromMemberId: from, toMemberId: to, date: "2026-08-01" }; }
+      var SELF = "S:self", A = "S:a", B = "S:b";
+      var MEM = [m(SELF), m(A), m(B)];
+      var SPACE = sp("S", SELF);
+      function leg(res, counterpart){ return res.liabilityLegs.filter(function(l){ return l.counterpartMemberId === counterpart; })[0] || null; }
+
+      // 1) pago io 420 / quota 126 / A 150 / B 144
+      var r1 = PJ.fromSharedTx(SPACE, exp(420, SELF, [[SELF,126],[A,150],[B,144]]), MEM);
+      ok("pago io: quota expense 126", r1.quotaExpense && r1.quotaExpense.amount === 126 && r1.quotaExpense.type === "expense" && r1.quotaExpense.capitalMovement === false);
+      ok("pago io: quota spaceId personal", r1.quotaExpense.spaceId === "personal:local");
+      ok("pago io: quota projectionType/source", r1.quotaExpense.projectionType === "share-quota" && r1.quotaExpense.sourceTransactionId === "T1" && r1.quotaExpense.sourceMemberId === SELF);
+      ok("pago io: 2 legs", r1.liabilityLegs.length === 2);
+      ok("pago io: receivable A 150 (+)", leg(r1,A).direction === "receivable" && leg(r1,A).amount === 150 && leg(r1,A).signedAmount === 150);
+      ok("pago io: receivable B 144 (+)", leg(r1,B).direction === "receivable" && leg(r1,B).signedAmount === 144);
+      ok("pago io: nessuna leg verso self", leg(r1,SELF) === null);
+
+      // 2) paga A / quota mia 126
+      var r2 = PJ.fromSharedTx(SPACE, exp(420, A, [[SELF,126],[A,150],[B,144]]), MEM);
+      ok("paga A: quota expense 126", r2.quotaExpense.amount === 126);
+      ok("paga A: 1 sola leg payable verso A = 126 (-)", r2.liabilityLegs.length === 1 && leg(r2,A).direction === "payable" && leg(r2,A).amount === 126 && leg(r2,A).signedAmount === -126);
+      ok("paga A: nessuna leg verso B", leg(r2,B) === null);
+
+      // 3) quota mia 0 (paga A, io non allocatee)
+      var r3 = PJ.fromSharedTx(SPACE, exp(420, A, [[A,210],[B,210]]), MEM);
+      ok("quota 0: quotaExpense null", r3.quotaExpense === null);
+      ok("quota 0: nessuna leg", r3.liabilityLegs.length === 0);
+
+      // 3b) pago io ma quota 0 (pago per gli altri): receivable pieno, nessuna quota expense
+      var r3b = PJ.fromSharedTx(SPACE, exp(420, SELF, [[A,210],[B,210]]), MEM);
+      ok("pago io quota 0: quotaExpense null", r3b.quotaExpense === null);
+      ok("pago io quota 0: receivable A 210 + B 210", leg(r3b,A).signedAmount === 210 && leg(r3b,B).signedAmount === 210);
+
+      // 4) self unico partecipante
+      var r4 = PJ.fromSharedTx(sp("S", SELF), exp(100, SELF, [[SELF,100]]), [m(SELF)]);
+      ok("self unico: quota 100", r4.quotaExpense.amount === 100);
+      ok("self unico: nessuna leg", r4.liabilityLegs.length === 0);
+
+      // 6) settlement self -> A (pago io A)
+      var r6 = PJ.fromSharedTx(SPACE, setl(SELF, A, 50), MEM);
+      ok("settlement self->A: nessuna quota", r6.quotaExpense === null);
+      ok("settlement self->A: increase-net verso A (+50)", r6.liabilityLegs.length === 1 && leg(r6,A).effect === "increase-net" && leg(r6,A).signedAmount === 50 && leg(r6,A).direction === "receivable");
+
+      // 7) settlement A -> self (A paga me)
+      var r7 = PJ.fromSharedTx(SPACE, setl(A, SELF, 50), MEM);
+      ok("settlement A->self: decrease-net verso A (-50)", r7.liabilityLegs.length === 1 && leg(r7,A).effect === "decrease-net" && leg(r7,A).signedAmount === -50 && leg(r7,A).direction === "payable");
+
+      // 8) settlement A -> B (non coinvolge self)
+      var r8 = PJ.fromSharedTx(SPACE, setl(A, B, 50), MEM);
+      ok("settlement A->B: nessuna leg", r8.liabilityLegs.length === 0 && r8.quotaExpense === null);
+
+      // 9) cambio my allocation
+      var r9 = PJ.fromSharedTx(SPACE, exp(420, A, [[SELF,200],[A,220]]), MEM);
+      ok("cambio allocation: quota 200", r9.quotaExpense.amount === 200);
+      ok("cambio allocation: payable A 200", leg(r9,A).signedAmount === -200);
+
+      // 10) cambio paidById (stesse allocations)
+      var base = [[SELF,126],[A,150],[B,144]];
+      var rP = PJ.fromSharedTx(SPACE, exp(420, SELF, base), MEM);
+      var rO = PJ.fromSharedTx(SPACE, exp(420, A, base), MEM);
+      ok("cambio paidById: pago io -> receivable", leg(rP,A).direction === "receivable" && rP.liabilityLegs.length === 2);
+      ok("cambio paidById: paga A -> payable singola", leg(rO,A).direction === "payable" && rO.liabilityLegs.length === 1);
+      ok("cambio paidById: quota invariata (126)", rP.quotaExpense.amount === 126 && rO.quotaExpense.amount === 126);
+
+      // 11) deterministic IDs
+      var d1 = PJ.fromSharedTx(SPACE, exp(420, SELF, base), MEM);
+      var d2 = PJ.fromSharedTx(SPACE, exp(420, SELF, base), MEM);
+      ok("quota id deterministico", d1.quotaExpense.id === "proj:S:T1:quota" && d1.quotaExpense.id === d2.quotaExpense.id);
+      ok("liab id deterministico", leg(d1,A).id === "liab:S:T1:" + A && leg(d1,A).id === leg(d2,A).id);
+
+      // 12) input non mutati
+      var spc = sp("S", SELF), txc = exp(420, SELF, base), memc = MEM.map(function(x){ return x; });
+      var jSp = JSON.stringify(spc), jTx = JSON.stringify(txc), jMem = JSON.stringify(memc);
+      PJ.fromSharedTx(spc, txc, memc);
+      ok("input space non mutato", JSON.stringify(spc) === jSp);
+      ok("input tx non mutato", JSON.stringify(txc) === jTx);
+      ok("input members non mutato", JSON.stringify(memc) === jMem);
+
+      // 13) fail-closed
+      ok("legacy respinto", throws(function(){ return PJ.fromSharedTx({ id:"S", kind:"ongoing", legacyGroupId:"g", selfMemberId:SELF }, exp(100,SELF,[[SELF,100]]), MEM); }));
+      ok("kind non shared respinto", throws(function(){ return PJ.fromSharedTx({ id:"S", kind:"personal", selfMemberId:SELF }, exp(100,SELF,[[SELF,100]]), MEM); }));
+      ok("tx cross-space respinto", throws(function(){ return PJ.fromSharedTx(SPACE, { id:"T", spaceId:"OTHER", type:"expense", amount:100, paidById:SELF, allocations:[{memberId:SELF,amount:100}] }, MEM); }));
+      ok("selfMemberId assente respinto", throws(function(){ return PJ.fromSharedTx(sp("S", null), exp(100,SELF,[[SELF,100]]), MEM); }));
+      ok("self incoerente (non nei membri) respinto", throws(function(){ return PJ.fromSharedTx(sp("S","S:ghost"), exp(100,SELF,[[SELF,100]]), MEM); }));
+      ok("allocatee inesistente respinto", throws(function(){ return PJ.fromSharedTx(SPACE, exp(100, SELF, [[SELF,50],["S:zz",50]]), MEM); }));
+      ok("allocation incoerente respinta", throws(function(){ return PJ.fromSharedTx(SPACE, exp(100, SELF, [[SELF,40],[A,50]]), MEM); }));
+      ok("amount non valido respinto", throws(function(){ return PJ.fromSharedTx(SPACE, exp(0, SELF, [[SELF,0]]), MEM); }));
+      ok("payer inesistente respinto", throws(function(){ return PJ.fromSharedTx(SPACE, { id:"T", spaceId:"S", type:"expense", amount:100, paidById:"S:zz", allocations:[{memberId:SELF,amount:100}] }, MEM); }));
+      ok("tipo non supportato respinto", throws(function(){ return PJ.fromSharedTx(SPACE, { id:"T", spaceId:"S", type:"income", amount:100 }, MEM); }));
+
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    }
+  };
+})();
+/* F4P5B-PROJ-END */
+</script>
+<!-- ==== /MODULE: personal-projection ==== -->
+
 <script>
 "use strict";
 /* F1 Passo 2 — attivazione IndexedDB al boot SOLO per il dominio Personale.
