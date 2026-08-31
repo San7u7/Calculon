@@ -3920,6 +3920,19 @@ if ("serviceWorker" in navigator){
 (function(){
   function db(){ return window.calculonDB; }
   function centInt(n){ return typeof n === "number" && isFinite(n) && Math.floor(n) === n; }
+  // F4/5E — date canonica YYYY-MM-DD (fail-closed): nessun default silenzioso a oggi nel data layer.
+  function validDateStr(d){
+    if (typeof d !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(d)) return false;
+    var p = d.split("-"), y = +p[0], mo = +p[1], day = +p[2];
+    return mo >= 1 && mo <= 12 && day >= 1 && day <= 31;
+  }
+  // F4/5E — wiring atomico: scrive la SOURCE shared + le sue proiezioni Personali in un'unica
+  // transazione IndexedDB (delegato a personalProjection). Un errore su qualunque write -> rollback totale.
+  async function wireCommit(sp, record){
+    var PP = window.personalProjection;
+    if (!PP || typeof PP._commitSourceWithProjection !== "function") throw new Error("personalProjection non disponibile");
+    await PP._commitSourceWithProjection(sp, record);
+  }
 
   // Membri dello spazio: attivi E inattivi (active:false) restano validi per storico e
   // risoluzione identita'. Esclusi solo i tombstone (deleted:true) del record membro.
@@ -4131,6 +4144,7 @@ if ("serviceWorker" in navigator){
     var sp = await spazioScrivibile(spaceId);
     input = input || {};
     if (!centInt(input.amount) || input.amount <= 0) throw new Error("amount non intero/<=0");
+    if (!validDateStr(input.date)) throw new Error("date deve essere YYYY-MM-DD valida");
     var m = await membriSpazio(spaceId);
     if (!m.attivi[input.paidById]) throw new Error("payer inesistente/non attivo: " + input.paidById);
     // F4/4B — precedenza ripartizione: esplicita > shareRule (ongoing) > equal implicito.
@@ -4153,11 +4167,11 @@ if ("serviceWorker" in navigator){
     // Snapshot: persistono SOLO allocationMode + allocations. Nessun riferimento vivo alla shareRule.
     var tx = { id: nuovoTxId(spaceId), spaceId: spaceId, type: "expense",
       amount: input.amount, paidById: input.paidById, allocations: alloc, allocationMode: allocMode,
-      date: (input.date != null ? input.date : null), note: (input.note != null ? input.note : null),
+      date: input.date, note: (input.note != null ? input.note : null),
       version: 1, deviceId: deviceCorrente(), createdAt: now, updatedAt: now, deleted: false };
     var err = validaTx(tx, function(id){ return !!m.tutti[id]; });
     if (err) throw new Error("expense invalida: " + err);
-    await db().put("transactions", tx);
+    await wireCommit(sp, tx);   // source + proiezioni, atomico
     return tx.id;
   }
 
@@ -4178,12 +4192,13 @@ if ("serviceWorker" in navigator){
   }
 
   async function updateExpense(spaceId, txId, patch){
-    await spazioScrivibile(spaceId);
+    var sp = await spazioScrivibile(spaceId);
     var cur = await txDaModificare(spaceId, txId, "expense");
     patch = patch || {};
     if ("spaceId" in patch && patch.spaceId !== spaceId) throw new Error("spaceId immutabile");
     if ("id" in patch && patch.id !== txId) throw new Error("id immutabile");
     if ("type" in patch && patch.type !== "expense") throw new Error("type immutabile");
+    if ("date" in patch && !validDateStr(patch.date)) throw new Error("date deve essere YYYY-MM-DD valida");
     var amount = ("amount" in patch) ? patch.amount : cur.amount;
     if (!centInt(amount) || amount <= 0) throw new Error("amount non intero/<=0");
     var paidById = ("paidById" in patch) ? patch.paidById : cur.paidById;
@@ -4208,14 +4223,15 @@ if ("serviceWorker" in navigator){
       createdAt: (cur.createdAt != null ? cur.createdAt : null), updatedAt: Date.now(), deleted: false };
     var err = validaTx(upd, function(id){ return !!m.tutti[id]; });
     if (err) throw new Error("expense update invalida: " + err);
-    await db().put("transactions", upd);
+    await wireCommit(sp, upd);   // source + proiezioni riconciliate, atomico
     return upd.id;
   }
 
   async function createSettlement(spaceId, input){
-    await spazioScrivibile(spaceId);
+    var sp = await spazioScrivibile(spaceId);
     input = input || {};
     if (!centInt(input.amount) || input.amount <= 0) throw new Error("amount non intero/<=0");
+    if (!validDateStr(input.date)) throw new Error("date deve essere YYYY-MM-DD valida");
     if (input.fromMemberId === input.toMemberId) throw new Error("settlement from === to");
     var m = await membriSpazio(spaceId);
     if (!m.attivi[input.fromMemberId]) throw new Error("from inesistente/non attivo: " + input.fromMemberId);
@@ -4223,21 +4239,22 @@ if ("serviceWorker" in navigator){
     var now = Date.now();
     var tx = { id: nuovoTxId(spaceId), spaceId: spaceId, type: "settlement",
       amount: input.amount, fromMemberId: input.fromMemberId, toMemberId: input.toMemberId,
-      date: (input.date != null ? input.date : null),
+      date: input.date,
       version: 1, deviceId: deviceCorrente(), createdAt: now, updatedAt: now, deleted: false };
     var err = validaTx(tx, function(id){ return !!m.tutti[id]; });
     if (err) throw new Error("settlement invalido: " + err);
-    await db().put("transactions", tx);
+    await wireCommit(sp, tx);   // solo liabilities (nessuna quota), atomico
     return tx.id;
   }
 
   async function updateSettlement(spaceId, txId, patch){
-    await spazioScrivibile(spaceId);
+    var sp = await spazioScrivibile(spaceId);
     var cur = await txDaModificare(spaceId, txId, "settlement");
     patch = patch || {};
     if ("spaceId" in patch && patch.spaceId !== spaceId) throw new Error("spaceId immutabile");
     if ("id" in patch && patch.id !== txId) throw new Error("id immutabile");
     if ("type" in patch && patch.type !== "settlement") throw new Error("type immutabile");
+    if ("date" in patch && !validDateStr(patch.date)) throw new Error("date deve essere YYYY-MM-DD valida");
     var amount = ("amount" in patch) ? patch.amount : cur.amount;
     if (!centInt(amount) || amount <= 0) throw new Error("amount non intero/<=0");
     var fromId = ("fromMemberId" in patch) ? patch.fromMemberId : cur.fromMemberId;
@@ -4254,29 +4271,29 @@ if ("serviceWorker" in navigator){
       createdAt: (cur.createdAt != null ? cur.createdAt : null), updatedAt: Date.now(), deleted: false };
     var err = validaTx(upd, function(id){ return !!m.tutti[id]; });
     if (err) throw new Error("settlement update invalido: " + err);
-    await db().put("transactions", upd);
+    await wireCommit(sp, upd);   // source + liabilities riconciliate, atomico
     return upd.id;
   }
 
   async function deleteTransaction(spaceId, txId){
-    await spazioScrivibile(spaceId);
+    var sp = await spazioScrivibile(spaceId);
     var cur = await db().get("transactions", txId);
     if (!cur || cur.spaceId !== spaceId) throw new Error("transazione inesistente nello spazio: " + txId);
     if (cur.deleted === true) return txId;   // idempotente
-    var upd = Object.assign({}, cur, { deleted: true, version: (cur.version | 0) + 1, deviceId: deviceCorrente() });
-    await db().put("transactions", upd);     // tombstone logico, mai hard delete
+    var upd = Object.assign({}, cur, { deleted: true, version: (cur.version | 0) + 1, deviceId: deviceCorrente(), updatedAt: Date.now() });
+    await wireCommit(sp, upd);   // source tombstone + proiezioni tombstone, stesso ciclo atomico
     return txId;
   }
   async function restoreTransaction(spaceId, txId){
-    await spazioScrivibile(spaceId);
+    var sp = await spazioScrivibile(spaceId);
     var cur = await db().get("transactions", txId);
     if (!cur || cur.spaceId !== spaceId) throw new Error("transazione inesistente nello spazio: " + txId);
     if (cur.deleted !== true) return txId;   // idempotente
     var m = await membriSpazio(spaceId);
-    var upd = Object.assign({}, cur, { deleted: false, version: (cur.version | 0) + 1, deviceId: deviceCorrente() });
+    var upd = Object.assign({}, cur, { deleted: false, version: (cur.version | 0) + 1, deviceId: deviceCorrente(), updatedAt: Date.now() });
     var err = validaTx(upd, function(id){ return !!m.tutti[id]; });   // rivalida come tx viva
     if (err) throw new Error("restore invalido: " + err);
-    await db().put("transactions", upd);
+    await wireCommit(sp, upd);   // source viva + proiezioni ricalcolate, atomico
     return txId;
   }
 
@@ -4737,7 +4754,7 @@ if ("serviceWorker" in navigator){
       function somma(alloc){ var s=0; for (var i=0;i<alloc.length;i++) s+=alloc[i].amount; return s; }
 
       // --- create expense: equal / shares / percent / exact + snapshot allocations corretto ---
-      var eqId = await SR.createExpense(NAT, { amount: 900, paidById: A, allocationMode: "equal", parts: { "t:nat:a":1, "t:nat:b":1, "t:nat:c":1 } });
+      var eqId = await SR.createExpense(NAT, { date: "2026-08-01", amount: 900, paidById: A, allocationMode: "equal", parts: { "t:nat:a":1, "t:nat:b":1, "t:nat:c":1 } });
       var eq = await DB.get("transactions", eqId);
       ok("equal: type expense", eq.type === "expense");
       ok("equal: paidById persistito", eq.paidById === A);
@@ -4748,23 +4765,23 @@ if ("serviceWorker" in navigator){
       ok("equal: createdAt presente", typeof eq.createdAt === "number");
       ok("equal: zero-sum dopo create", await zeroSum(NAT));
 
-      var shId = await SR.createExpense(NAT, { amount: 1000, paidById: B, allocation: { mode: "shares", parts: { "t:nat:a":1, "t:nat:b":2, "t:nat:c":1 } } });
+      var shId = await SR.createExpense(NAT, { date: "2026-08-01", amount: 1000, paidById: B, allocation: { mode: "shares", parts: { "t:nat:a":1, "t:nat:b":2, "t:nat:c":1 } } });
       var sh = await DB.get("transactions", shId);
       ok("shares: 250/500/250", amt(sh.allocations,A)===250 && amt(sh.allocations,B)===500 && amt(sh.allocations,C)===250);
       ok("shares: Sigma === amount", somma(sh.allocations) === 1000);
 
-      var pcId = await SR.createExpense(NAT, { amount: 1000, paidById: A, allocationMode: "percent", parts: { "t:nat:a":2500, "t:nat:b":2500, "t:nat:c":5000 } });
+      var pcId = await SR.createExpense(NAT, { date: "2026-08-01", amount: 1000, paidById: A, allocationMode: "percent", parts: { "t:nat:a":2500, "t:nat:b":2500, "t:nat:c":5000 } });
       var pc = await DB.get("transactions", pcId);
       ok("percent: 250/250/500", amt(pc.allocations,A)===250 && amt(pc.allocations,B)===250 && amt(pc.allocations,C)===500);
       ok("percent: Sigma === amount", somma(pc.allocations) === 1000);
 
-      var exId = await SR.createExpense(NAT, { amount: 1000, paidById: A, allocationMode: "exact", parts: { "t:nat:a":100, "t:nat:b":200, "t:nat:c":700 } });
+      var exId = await SR.createExpense(NAT, { date: "2026-08-01", amount: 1000, paidById: A, allocationMode: "exact", parts: { "t:nat:a":100, "t:nat:b":200, "t:nat:c":700 } });
       var ex = await DB.get("transactions", exId);
       ok("exact: 100/200/700 verbatim", amt(ex.allocations,A)===100 && amt(ex.allocations,B)===200 && amt(ex.allocations,C)===700);
       ok("zero-sum dopo 4 spese", await zeroSum(NAT));
 
       // --- create + edit settlement ---
-      var stId = await SR.createSettlement(NAT, { amount: 300, fromMemberId: A, toMemberId: B });
+      var stId = await SR.createSettlement(NAT, { date: "2026-08-01", amount: 300, fromMemberId: A, toMemberId: B });
       var st0 = await DB.get("transactions", stId);
       ok("settlement: type/importo", st0.type==="settlement" && st0.amount===300 && st0.version===1);
       await SR.updateSettlement(NAT, stId, { amount: 400 });
@@ -4786,29 +4803,29 @@ if ("serviceWorker" in navigator){
       ok("update preserva riferimento inattivo gia' presente", editPreserva);
       var nuovoInattivo = await throwsA(function(){ return SR.updateExpense(NAT, shId, { allocationMode:"equal", parts:{ "t:nat:a":1, "t:nat:b":1, "t:nat:z":1 } }); });
       ok("nuovo riferimento a inattivo (z) respinto", nuovoInattivo);
-      var createInattivo = await throwsA(function(){ return SR.createExpense(NAT, { amount:300, paidById:A, allocationMode:"equal", parts:{ "t:nat:a":1, "t:nat:z":1 } }); });
+      var createInattivo = await throwsA(function(){ return SR.createExpense(NAT, { date: "2026-08-01", amount:300, paidById:A, allocationMode:"equal", parts:{ "t:nat:a":1, "t:nat:z":1 } }); });
       ok("create con allocatee inattivo (z) respinto", createInattivo);
       await DB.put("spaceMembers", mem(NAT, "c", true));    // ripristino c attivo
 
       // --- cross-space respinto ---
-      var cross = await throwsA(function(){ return SR.createExpense(NAT, { amount:200, paidById:A, allocationMode:"equal", parts:{ "t:nat:a":1, "t:nat2:x":1 } }); });
+      var cross = await throwsA(function(){ return SR.createExpense(NAT, { date: "2026-08-01", amount:200, paidById:A, allocationMode:"equal", parts:{ "t:nat:a":1, "t:nat2:x":1 } }); });
       ok("allocatee cross-space respinto", cross);
-      var crossPay = await throwsA(function(){ return SR.createExpense(NAT, { amount:200, paidById:X2, allocationMode:"equal", parts:{ "t:nat:a":1 } }); });
+      var crossPay = await throwsA(function(){ return SR.createExpense(NAT, { date: "2026-08-01", amount:200, paidById:X2, allocationMode:"equal", parts:{ "t:nat:a":1 } }); });
       ok("payer cross-space respinto", crossPay);
 
       // --- legacy / settled / archived: scrittura respinta ---
-      ok("legacy space: create respinto",   await throwsA(function(){ return SR.createExpense(LEG, { amount:100, paidById:LEG+":a", allocationMode:"equal", parts:{ "t:leg:a":1 } }); }));
-      ok("settled space: create respinto",   await throwsA(function(){ return SR.createExpense(SET, { amount:100, paidById:SET+":a", allocationMode:"equal", parts:{ "t:set:a":1, "t:set:b":1 } }); }));
-      ok("archived space: create respinto",   await throwsA(function(){ return SR.createExpense(ARC, { amount:100, paidById:ARC+":a", allocationMode:"equal", parts:{ "t:arc:a":1, "t:arc:b":1 } }); }));
+      ok("legacy space: create respinto",   await throwsA(function(){ return SR.createExpense(LEG, { date: "2026-08-01", amount:100, paidById:LEG+":a", allocationMode:"equal", parts:{ "t:leg:a":1 } }); }));
+      ok("settled space: create respinto",   await throwsA(function(){ return SR.createExpense(SET, { date: "2026-08-01", amount:100, paidById:SET+":a", allocationMode:"equal", parts:{ "t:set:a":1, "t:set:b":1 } }); }));
+      ok("archived space: create respinto",   await throwsA(function(){ return SR.createExpense(ARC, { date: "2026-08-01", amount:100, paidById:ARC+":a", allocationMode:"equal", parts:{ "t:arc:a":1, "t:arc:b":1 } }); }));
 
       // --- validazione importi / ripartizioni ---
-      ok("amount <=0 respinto",        await throwsA(function(){ return SR.createExpense(NAT, { amount:0,   paidById:A, allocationMode:"equal", parts:{ "t:nat:a":1 } }); }));
-      ok("amount non intero respinto", await throwsA(function(){ return SR.createExpense(NAT, { amount:10.5,paidById:A, allocationMode:"equal", parts:{ "t:nat:a":1 } }); }));
-      ok("percent != 100 respinto",    await throwsA(function(){ return SR.createExpense(NAT, { amount:1000,paidById:A, allocationMode:"percent", parts:{ "t:nat:a":3000, "t:nat:b":3000 } }); }));
-      ok("exact != amount respinto",   await throwsA(function(){ return SR.createExpense(NAT, { amount:1000,paidById:A, allocationMode:"exact", parts:{ "t:nat:a":100, "t:nat:b":100 } }); }));
-      ok("shares <=0 respinto",        await throwsA(function(){ return SR.createExpense(NAT, { amount:1000,paidById:A, allocationMode:"shares", parts:{ "t:nat:a":0, "t:nat:b":1 } }); }));
-      ok("mode sconosciuto respinto",  await throwsA(function(){ return SR.createExpense(NAT, { amount:1000,paidById:A, allocationMode:"weird", parts:{ "t:nat:a":1 } }); }));
-      ok("settlement from===to respinto", await throwsA(function(){ return SR.createSettlement(NAT, { amount:100, fromMemberId:A, toMemberId:A }); }));
+      ok("amount <=0 respinto",        await throwsA(function(){ return SR.createExpense(NAT, { date: "2026-08-01", amount:0,   paidById:A, allocationMode:"equal", parts:{ "t:nat:a":1 } }); }));
+      ok("amount non intero respinto", await throwsA(function(){ return SR.createExpense(NAT, { date: "2026-08-01", amount:10.5,paidById:A, allocationMode:"equal", parts:{ "t:nat:a":1 } }); }));
+      ok("percent != 100 respinto",    await throwsA(function(){ return SR.createExpense(NAT, { date: "2026-08-01", amount:1000,paidById:A, allocationMode:"percent", parts:{ "t:nat:a":3000, "t:nat:b":3000 } }); }));
+      ok("exact != amount respinto",   await throwsA(function(){ return SR.createExpense(NAT, { date: "2026-08-01", amount:1000,paidById:A, allocationMode:"exact", parts:{ "t:nat:a":100, "t:nat:b":100 } }); }));
+      ok("shares <=0 respinto",        await throwsA(function(){ return SR.createExpense(NAT, { date: "2026-08-01", amount:1000,paidById:A, allocationMode:"shares", parts:{ "t:nat:a":0, "t:nat:b":1 } }); }));
+      ok("mode sconosciuto respinto",  await throwsA(function(){ return SR.createExpense(NAT, { date: "2026-08-01", amount:1000,paidById:A, allocationMode:"weird", parts:{ "t:nat:a":1 } }); }));
+      ok("settlement from===to respinto", await throwsA(function(){ return SR.createSettlement(NAT, { date: "2026-08-01", amount:100, fromMemberId:A, toMemberId:A }); }));
 
       // --- spaceId / type immutabili ---
       ok("cambio spaceId respinto", await throwsA(function(){ return SR.updateExpense(NAT, eqId, { spaceId: NAT2 }); }));
@@ -4841,30 +4858,30 @@ if ("serviceWorker" in navigator){
       // self assente
       var SA = "t:selfabsent"; await DB.put("spaces", space(SA, "experience", "active"));   // selfMemberId null
       await DB.put("spaceMembers", mem(SA, "m"));
-      ok("3C: selfMemberId assente -> write respinto", await throwsA(function(){ return SR.createExpense(SA, { amount:100, paidById:SA+":m", allocationMode:"equal", parts:(function(){var p={};p[SA+":m"]=1;return p;})() }); }));
+      ok("3C: selfMemberId assente -> write respinto", await throwsA(function(){ return SR.createExpense(SA, { date: "2026-08-01", amount:100, paidById:SA+":m", allocationMode:"equal", parts:(function(){var p={};p[SA+":m"]=1;return p;})() }); }));
       // self inesistente
       var SI = "t:selfmissing"; await DB.put("spaces", space(SI, "experience", "active", null, SI+":ghost"));
       await DB.put("spaceMembers", mem(SI, "m"));
-      ok("3C: selfMemberId inesistente -> respinto", await throwsA(function(){ return SR.createExpense(SI, { amount:100, paidById:SI+":m", allocationMode:"equal", parts:(function(){var p={};p[SI+":m"]=1;return p;})() }); }));
+      ok("3C: selfMemberId inesistente -> respinto", await throwsA(function(){ return SR.createExpense(SI, { date: "2026-08-01", amount:100, paidById:SI+":m", allocationMode:"equal", parts:(function(){var p={};p[SI+":m"]=1;return p;})() }); }));
       // self cross-space (punta a un membro di NAT)
       var SC = "t:selfcross"; await DB.put("spaces", space(SC, "experience", "active", null, "t:nat:a"));
       await DB.put("spaceMembers", mem(SC, "m"));
-      ok("3C: selfMemberId cross-space -> respinto", await throwsA(function(){ return SR.createExpense(SC, { amount:100, paidById:SC+":m", allocationMode:"equal", parts:(function(){var p={};p[SC+":m"]=1;return p;})() }); }));
+      ok("3C: selfMemberId cross-space -> respinto", await throwsA(function(){ return SR.createExpense(SC, { date: "2026-08-01", amount:100, paidById:SC+":m", allocationMode:"equal", parts:(function(){var p={};p[SC+":m"]=1;return p;})() }); }));
       // self deleted (tombstone)
       var SD = "t:selfdel"; await DB.put("spaces", space(SD, "experience", "active", null, SD+":s"));
       await DB.put("spaceMembers", { id: SD+":s", spaceId: SD, name: "S", active: true, deleted: true });
       await DB.put("spaceMembers", mem(SD, "m"));
-      ok("3C: self member deleted -> respinto", await throwsA(function(){ return SR.createExpense(SD, { amount:100, paidById:SD+":m", allocationMode:"equal", parts:(function(){var p={};p[SD+":m"]=1;return p;})() }); }));
+      ok("3C: self member deleted -> respinto", await throwsA(function(){ return SR.createExpense(SD, { date: "2026-08-01", amount:100, paidById:SD+":m", allocationMode:"equal", parts:(function(){var p={};p[SD+":m"]=1;return p;})() }); }));
       // self INATTIVO ma identificabile e spazio active: regola canonica 3B = self resta identita' (write 3A consentito);
       // e la 3B continua a impedire l'archiviazione del self.
       var SN = "t:selfinactive"; await DB.put("spaces", space(SN, "experience", "active", null, SN+":s"));
       await DB.put("spaceMembers", { id: SN+":s", spaceId: SN, name: "S", active: false, deleted: false });   // self inattivo (seed artificiale)
       await DB.put("spaceMembers", mem(SN, "m"));
-      var okInactiveWrite = !(await throwsA(function(){ return SR.createExpense(SN, { amount:100, paidById:SN+":m", allocationMode:"equal", parts:(function(){var p={};p[SN+":m"]=1;return p;})() }); }));
+      var okInactiveWrite = !(await throwsA(function(){ return SR.createExpense(SN, { date: "2026-08-01", amount:100, paidById:SN+":m", allocationMode:"equal", parts:(function(){var p={};p[SN+":m"]=1;return p;})() }); }));
       ok("3C: self inattivo ma identificabile -> write 3A consentito", okInactiveWrite);
       ok("3C: self resta non archiviabile (regola 3B)", await throwsA(function(){ return SR.archiveMember(SN, SN+":s"); }));
       // legacy invariato: il gate legacy scatta PRIMA del self (nessun self richiesto)
-      ok("3C: legacy invariato (create respinto per legacy, non per self)", await throwsA(function(){ return SR.createExpense(LEG, { amount:100, paidById:LEG+":a", allocationMode:"equal", parts:{ "t:leg:a":1 } }); }));
+      ok("3C: legacy invariato (create respinto per legacy, non per self)", await throwsA(function(){ return SR.createExpense(LEG, { date: "2026-08-01", amount:100, paidById:LEG+":a", allocationMode:"equal", parts:{ "t:leg:a":1 } }); }));
 
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
@@ -4915,14 +4932,14 @@ if ("serviceWorker" in navigator){
       ok("self non archiviabile", await throwsA(function(){ return SR.archiveMember(S, SELF); }));
 
       // --- 7/8) storico invariato + 3A respinge nuovo riferimento a inattivo ---
-      var spesa = await SR.createExpense(S, { amount: 900, paidById: SELF, allocationMode: "equal", parts: (function(){ var p={}; p[SELF]=1; p[m2]=1; return p; })() });
+      var spesa = await SR.createExpense(S, { date: "2026-08-01", amount: 900, paidById: SELF, allocationMode: "equal", parts: (function(){ var p={}; p[SELF]=1; p[m2]=1; return p; })() });
       var allocPrima = JSON.stringify((await DB.get("transactions", spesa)).allocations);
       await SR.archiveMember(S, m2);   // m2 diventa inattivo DOPO la spesa
       var allocDopo = JSON.stringify((await DB.get("transactions", spesa)).allocations);
       ok("storico invariato dopo archivio membro", allocPrima === allocDopo);
       var b = await SR.balances(S); var somma = 0; for (var k in b) somma += b[k];
       ok("balances ancora zero-sum con membro archiviato", somma === 0);
-      var nuovoRifRespinto = await throwsA(function(){ var p={}; p[SELF]=1; p[m2]=1; return SR.createExpense(S, { amount: 200, paidById: SELF, allocationMode: "equal", parts: p }); });
+      var nuovoRifRespinto = await throwsA(function(){ var p={}; p[SELF]=1; p[m2]=1; return SR.createExpense(S, { date: "2026-08-01", amount: 200, paidById: SELF, allocationMode: "equal", parts: p }); });
       ok("3A respinge nuovo expense verso membro archiviato", nuovoRifRespinto);
       await SR.restoreMember(S, m2);   // ripristino per i test successivi
 
@@ -5006,7 +5023,7 @@ if ("serviceWorker" in navigator){
 
       // --- history immutability: una spesa creata ora NON cambia al cambiare della regola ---
       var pE = {}; pE[S] = 1; pE[m2] = 1;
-      var spesa = await SR.createExpense(OG, { amount: 900, paidById: S, allocationMode: "equal", parts: pE });
+      var spesa = await SR.createExpense(OG, { date: "2026-08-01", amount: 900, paidById: S, allocationMode: "equal", parts: pE });
       var allocPrima = JSON.stringify((await DB.get("transactions", spesa)).allocations);
 
       // --- set equal ---
@@ -5103,7 +5120,7 @@ if ("serviceWorker" in navigator){
       var EX = ex.spaceId, ES = ex.selfMemberId; var em2 = await SR.addMember(EX, { name: "Bea" });
 
       // 1) ongoing senza rule + niente allocation -> equal sui membri attivi
-      var t1 = await SR.createExpense(OG, { amount: 1000, paidById: S });
+      var t1 = await SR.createExpense(OG, { date: "2026-08-01", amount: 1000, paidById: S });
       var a1 = await alloc(t1);
       ok("ongoing no rule -> mode equal", (await DB.get("transactions", t1)).allocationMode === "equal");
       ok("ongoing no rule -> 500/500", amt(a1,S)===500 && amt(a1,m2)===500);
@@ -5112,32 +5129,32 @@ if ("serviceWorker" in navigator){
 
       // 2) ongoing equal rule -> equal
       await SR.setShareRule(OG, { mode: "equal" });
-      var t2 = await SR.createExpense(OG, { amount: 1000, paidById: S });
+      var t2 = await SR.createExpense(OG, { date: "2026-08-01", amount: 1000, paidById: S });
       ok("ongoing equal rule -> 500/500", (function(a){return amt(a,S)===500 && amt(a,m2)===500;})(await alloc(t2)));
 
       // 3) ongoing shares rule -> snapshot corretto
       await SR.setShareRule(OG, { mode: "shares", parts: P(O2(S,1,m2,3)) });
-      var t3 = await SR.createExpense(OG, { amount: 1000, paidById: S });
+      var t3 = await SR.createExpense(OG, { date: "2026-08-01", amount: 1000, paidById: S });
       var x3 = await DB.get("transactions", t3);
       ok("ongoing shares -> mode shares", x3.allocationMode === "shares");
       ok("ongoing shares -> 250/750", amt(x3.allocations,S)===250 && amt(x3.allocations,m2)===750);
 
       // 4) ongoing percent rule -> snapshot corretto
       await SR.setShareRule(OG, { mode: "percent", parts: P(O2(S,2000,m2,8000)) });
-      var t4 = await SR.createExpense(OG, { amount: 1000, paidById: S });
+      var t4 = await SR.createExpense(OG, { date: "2026-08-01", amount: 1000, paidById: S });
       var x4 = await DB.get("transactions", t4);
       ok("ongoing percent -> mode percent", x4.allocationMode === "percent");
       ok("ongoing percent -> 200/800", amt(x4.allocations,S)===200 && amt(x4.allocations,m2)===800);
 
       // 5+6) allocation esplicita prevale sulla shareRule (rule=percent)
-      var t6 = await SR.createExpense(OG, { amount: 1000, paidById: S, allocationMode: "equal", parts: O2(S,1,m2,1) });
+      var t6 = await SR.createExpense(OG, { date: "2026-08-01", amount: 1000, paidById: S, allocationMode: "equal", parts: O2(S,1,m2,1) });
       var x6 = await DB.get("transactions", t6);
       ok("explicit prevale -> mode equal", x6.allocationMode === "equal");
       ok("explicit prevale -> 500/500", amt(x6.allocations,S)===500 && amt(x6.allocations,m2)===500);
 
       // 9+10) modifica/delete rule dopo create -> tx invariata (snapshot immutabile)
       await SR.setShareRule(OG, { mode: "shares", parts: P(O2(S,1,m2,1)) });
-      var tc = await SR.createExpense(OG, { amount: 1000, paidById: S });   // 500/500 shares
+      var tc = await SR.createExpense(OG, { date: "2026-08-01", amount: 1000, paidById: S });   // 500/500 shares
       var allocC = JSON.stringify(await alloc(tc));
       await SR.setShareRule(OG, { mode: "percent", parts: P(O2(S,9000,m2,1000)) });
       ok("modifica rule dopo create -> tx invariata", JSON.stringify(await alloc(tc)) === allocC);
@@ -5146,12 +5163,12 @@ if ("serviceWorker" in navigator){
 
       // 11) nuova spesa dopo cambio rule -> usa la nuova rule
       await SR.setShareRule(OG, { mode: "shares", parts: P(O2(S,3,m2,1)) });
-      var tn = await SR.createExpense(OG, { amount: 1000, paidById: S });
+      var tn = await SR.createExpense(OG, { date: "2026-08-01", amount: 1000, paidById: S });
       var xn = await alloc(tn);
       ok("nuova spesa usa la nuova rule (750/250)", amt(xn,S)===750 && amt(xn,m2)===250);
 
       // 12) updateExpense NON adotta la rule corrente
-      var tu = await SR.createExpense(OG, { amount: 1000, paidById: S, allocationMode: "equal", parts: O2(S,1,m2,1) });  // 500/500 esplicito
+      var tu = await SR.createExpense(OG, { date: "2026-08-01", amount: 1000, paidById: S, allocationMode: "equal", parts: O2(S,1,m2,1) });  // 500/500 esplicito
       await SR.setShareRule(OG, { mode: "shares", parts: P(O2(S,9,m2,1)) });   // rule corrente 900/100
       await SR.updateExpense(OG, tu, { note: "x" });                          // update senza ripartizione
       var xu = await DB.get("transactions", tu);
@@ -5162,19 +5179,19 @@ if ("serviceWorker" in navigator){
       await SR.setShareRule(OG, { mode: "shares", parts: P(O2(S,1,m2,1)) });
       await SR.archiveMember(OG, m2);
       var before = (await SR.listTransactions(OG)).length;
-      ok("stale rule -> create respinto", await throwsA(function(){ return SR.createExpense(OG, { amount: 1000, paidById: S }); }));
+      ok("stale rule -> create respinto", await throwsA(function(){ return SR.createExpense(OG, { date: "2026-08-01", amount: 1000, paidById: S }); }));
       ok("stale -> nessuna tx creata (no fallback)", (await SR.listTransactions(OG)).length === before);
       await SR.restoreMember(OG, m2);
 
       // 7) experience senza allocation -> equal sui membri attivi
-      var te = await SR.createExpense(EX, { amount: 900, paidById: ES });
+      var te = await SR.createExpense(EX, { date: "2026-08-01", amount: 900, paidById: ES });
       var xe = await DB.get("transactions", te);
       ok("experience no allocation -> mode equal", xe.allocationMode === "equal");
       ok("experience -> 450/450", amt(xe.allocations,ES)===450 && amt(xe.allocations,em2)===450);
 
       // 8) experience NON consulta shareRules (record seminato direttamente, deve essere ignorato)
       await DB.put("shareRules", { id: "shareRule:" + EX + ":default", spaceId: EX, mode: "shares", parts: [{memberId:ES,value:1},{memberId:em2,value:9}], createdAt: 0, updatedAt: 0, deleted: false });
-      var te2 = await SR.createExpense(EX, { amount: 1000, paidById: ES });
+      var te2 = await SR.createExpense(EX, { date: "2026-08-01", amount: 1000, paidById: ES });
       var xe2 = await DB.get("transactions", te2);
       ok("experience ignora shareRules -> equal 500/500", xe2.allocationMode === "equal" && amt(xe2.allocations,ES)===500 && amt(xe2.allocations,em2)===500);
 
@@ -5412,7 +5429,57 @@ if ("serviceWorker" in navigator){
     return aggregateLiabilities(legs);
   }
 
+  /* F4 · Passo 5E — riconciliazione MIRATA di una singola source + wiring atomico col write-path Shared.
+     Stessi ID e stesse regole di rebuildSpace, ma limitate a (sourceSpaceId, sourceTransactionId). */
+  // Batch dei cambiamenti proiezione per UNA source. sourceTx vivo => desired da fromSharedTx;
+  // sourceTx null/deleted => desired vuoto (tombstone delle projections esistenti). NON scrive.
+  async function projectionBatchForSource(space, members, spaceId, sourceTxId, sourceTx, now){
+    var desiredTx = {}, desiredLiab = {};
+    if (sourceTx && sourceTx.deleted !== true){
+      var res = fromSharedTx(space, sourceTx, members);
+      if (res.quotaExpense) desiredTx[res.quotaExpense.id] = { q: res.quotaExpense, src: sourceTx };
+      for (var j = 0; j < res.liabilityLegs.length; j++){ var lg = res.liabilityLegs[j]; desiredLiab[lg.id] = { leg: lg, src: sourceTx }; }
+    }
+    var exTx = await window.calculonDB.list("transactions", function(t){ return t && t.derived === true && t.projectionType === "share-quota" && t.sourceSpaceId === spaceId && t.sourceTransactionId === sourceTxId; });
+    var exLiab = await window.calculonDB.list("liabilities", function(l){ return l && l.derived === true && l.sourceSpaceId === spaceId && l.sourceTransactionId === sourceTxId; });
+    var batch = [];
+    reconcile("transactions", exTx, desiredTx, function(ex, d, n){ return quotaRecord(ex, d.q, d.src, n); }, sigQuota, now, batch);
+    reconcile("liabilities", exLiab, desiredLiab, function(ex, d, n){ return liabRecord(ex, d.leg, d.src, n); }, sigLiab, now, batch);
+    return batch;
+  }
+  // API pubblica: riconcilia SOLO quella source rispetto allo stato persistito (idempotente).
+  async function reconcileSource(spaceId, sourceTransactionId){
+    var DB = window.calculonDB, SR = window.sharedRuntime;
+    if (!spaceId || !sourceTransactionId) throw new Error("spaceId e sourceTransactionId richiesti");
+    var space = await DB.get("spaces", spaceId);
+    if (!space || space.deleted === true) throw new Error("spazio inesistente: " + spaceId);
+    if (space.legacyGroupId) throw new Error("spazio legacy: fuori scope");
+    if (space.kind !== "experience" && space.kind !== "ongoing") throw new Error("spazio non nativo shared: kind " + space.kind);
+    var members = await SR.listMembers(spaceId);
+    var src = await DB.get("transactions", sourceTransactionId);
+    if (src && src.spaceId !== spaceId) throw new Error("source cross-space");
+    var now = Date.now();
+    var batch = await projectionBatchForSource(space, members, spaceId, sourceTransactionId, src, now);
+    var written = await scriviProiezioni(batch);
+    return { written: written };
+  }
+  // Seam di test: se attivo, inietta un record invalido nel commit -> rollback (source + projections).
+  var _testPoison = false;
+  // Wiring atomico: scrive la SOURCE shared + le sue proiezioni in UNA transazione multi-store.
+  async function commitSourceWithProjection(space, sourceRecord){
+    if (!space || space.legacyGroupId) throw new Error("commit: spazio non valido/legacy");
+    var members = await window.sharedRuntime.listMembers(space.id);
+    var now = Date.now();
+    var batch = await projectionBatchForSource(space, members, space.id, sourceRecord.id, (sourceRecord.deleted === true ? null : sourceRecord), now);
+    var items = [{ store: "transactions", record: sourceRecord }].concat(batch);
+    if (_testPoison) items.push({ store: "liabilities", record: { derived: true, sourceSpaceId: space.id } });   // manca id -> put fallisce
+    await scriviProiezioni(items);   // atomico: source + quota + liabilities insieme
+  }
+
   window.personalProjection = {
+    reconcileSource: reconcileSource,
+    _commitSourceWithProjection: commitSourceWithProjection,
+    _setTestPoison: function(v){ _testPoison = !!v; },
     fromSharedTx: fromSharedTx,
     aggregateLiabilities: aggregateLiabilities,
     liabilityPosition: liabilityPosition,
@@ -5619,7 +5686,7 @@ if ("serviceWorker" in navigator){
       var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
       var DB = window.calculonDB, SR = window.sharedRuntime, PJ = window.personalProjection, TX = window.personalRuntime.transactions;
       async function throwsA(fn){ try { await fn(); return false; } catch(e){ return true; } }
-      var DATE = "2026-08-01", MONTH = "2026-08";
+      var DATE = "2026-11-01", MONTH = "2026-11";   // mese isolato: le altre suite proiettano su 2026-08
       function createExp(sp, amount, payer, partsObj){ return SR.createExpense(sp, { amount: amount, paidById: payer, allocationMode: "exact", parts: partsObj, date: DATE }); }
       async function inv(name){ var lb = await PJ.liabilityBalance(OG); var bal = await SR.balances(OG); ok(name + ": liab total === native self", lb.totalSignedAmount === (bal[S] || 0)); }
       function O(a){ var o={}; for (var i=0;i<a.length;i+=2) o[a[i]]=a[i+1]; return o; }
@@ -5737,6 +5804,108 @@ if ("serviceWorker" in navigator){
       ok("reload: liabilityBalance === native self", (await PJ.liabilityBalance(OG)).totalSignedAmount === ((await SR.balances(OG))[S] || 0));
 
       function quotaGhost(sp){ return { id: "proj:" + sp + ":GHOST:quota", spaceId: "personal:local", type: "expense", amount: 10, date: DATE, derived: true, projectionType: "share-quota", sourceSpaceId: sp, deleted: false }; }
+
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    },
+    // F4/5E — wiring source lifecycle: dopo ogni API il Personale e' gia' coerente (senza rebuild esplicito).
+    _testWiring: async function(){
+      var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
+      var DB = window.calculonDB, SR = window.sharedRuntime, PJ = window.personalProjection, TX = window.personalRuntime.transactions;
+      async function throwsA(fn){ try { await fn(); return false; } catch(e){ return true; } }
+      var DATE = "2026-09-01", MONTH = "2026-09";
+      function O(a){ var o={}; for (var i=0;i<a.length;i+=2) o[a[i]]=a[i+1]; return o; }
+      async function getT(id){ return await DB.get("transactions", id); }
+      async function getL(id){ return await DB.get("liabilities", id); }
+      async function inv(name){ var lb = await PJ.liabilityBalance(W); var bal = await SR.balances(W); ok(name + ": liab == native self", lb.totalSignedAmount === (bal[SW] || 0)); }
+
+      var w = await SR.createSpace({ kind: "ongoing", name: "Casa5E", selfName: "Gio" });
+      var W = w.spaceId, SW = w.selfMemberId;
+      var A2 = await SR.addMember(W, { name: "Anna" });
+      var B2 = await SR.addMember(W, { name: "Bea" });
+      var qId = function(tx){ return "proj:" + W + ":" + tx + ":quota"; };
+      var lId = function(tx, c){ return "liab:" + W + ":" + tx + ":" + c; };
+
+      // 1) DATE INVARIANT: mancante / invalida respinte
+      ok("date mancante -> create expense respinto", await throwsA(function(){ return SR.createExpense(W, { amount: 100, paidById: SW, allocationMode: "exact", parts: O([SW,100]) }); }));
+      ok("date invalida -> create expense respinto", await throwsA(function(){ return SR.createExpense(W, { amount: 100, paidById: SW, allocationMode: "exact", parts: O([SW,100]), date: "2026-13-40" }); }));
+      ok("date mancante -> create settlement respinto", await throwsA(function(){ return SR.createSettlement(W, { amount: 50, fromMemberId: SW, toMemberId: A2 }); }));
+
+      // 2) create expense -> source + quota + liabilities SUBITO coerenti (nessun rebuild esplicito)
+      var t1 = await SR.createExpense(W, { amount: 420, paidById: SW, allocationMode: "exact", parts: O([SW,126, A2,150, B2,144]), date: DATE });
+      ok("wiring create: source viva", (await getT(t1)) && (await getT(t1)).deleted === false);
+      ok("wiring create: quota 126 subito coerente", (await getT(qId(t1))).amount === 126 && (await getT(qId(t1))).deleted === false);
+      ok("wiring create: liab A2 +150, B2 +144", (await getL(lId(t1,A2))).signedAmount === 150 && (await getL(lId(t1,B2))).signedAmount === 144);
+      await inv("wiring create");
+
+      // 3) create settlement -> liabilities subito coerenti, nessuna quota
+      var s1 = await SR.createSettlement(W, { amount: 30, fromMemberId: A2, toMemberId: SW, date: DATE });
+      ok("wiring settlement: nessuna quota", (await getT(qId(s1))) == null);
+      ok("wiring settlement: leg A2 -30 (A paga me)", (await getL(lId(s1,A2))).signedAmount === -30);
+      await inv("wiring settlement");
+
+      // 6) update: amount/allocation/payer/date/note -> solo le projection cambiate
+      // amount+allocation
+      await SR.updateExpense(W, t1, { amount: 400, allocationMode: "exact", parts: O([SW,100, A2,150, B2,150]) });
+      ok("update allocation: quota -> 100", (await getT(qId(t1))).amount === 100);
+      await inv("update allocation");
+      // payer -> paga A2 -> quota resta, receivable diventano payable verso A2, B2 orfana tombstone
+      await SR.updateExpense(W, t1, { paidById: A2, allocationMode: "exact", parts: O([SW,100, A2,150, B2,150]) });
+      ok("update payer: liab A2 payable -100", (await getL(lId(t1,A2))).signedAmount === -100);
+      ok("update payer: leg B2 orfana tombstone", (await getL(lId(t1,B2))).deleted === true);
+      await inv("update payer");
+      // date
+      await SR.updateExpense(W, t1, { date: "2026-09-15" });
+      ok("update date: quota date propagata", (await getT(qId(t1))).date === "2026-09-15");
+      // note
+      await SR.updateExpense(W, t1, { note: "cena" });
+      ok("update note: quota note propagata", (await getT(qId(t1))).note === "cena");
+      await inv("update note");
+
+      // 7) retry stessa operazione -> niente duplicati (una sola riga quota per source)
+      await SR.updateExpense(W, t1, { note: "cena" });
+      var dupQ = await DB.list("transactions", function(t){ return t.derived === true && t.sourceTransactionId === t1 && t.projectionType === "share-quota"; });
+      ok("retry: nessun duplicato quota", dupQ.length === 1);
+
+      // 8) reconcileSource ripetuto -> zero write, updatedAt invariato
+      var uBefore = (await getT(qId(t1))).updatedAt;
+      var rc1 = await PJ.reconcileSource(W, t1);
+      ok("reconcileSource idempotente: written 0", rc1.written === 0);
+      ok("reconcileSource: updatedAt invariato", (await getT(qId(t1))).updatedAt === uBefore);
+
+      // 5) delete atomico: source + projections tombstone nello stesso ciclo
+      await SR.deleteTransaction(W, s1);
+      ok("delete atomico: source s1 tombstone", (await getT(s1)).deleted === true);
+      ok("delete atomico: leg s1 tombstone", (await getL(lId(s1,A2))).deleted === true);
+      await inv("delete");
+      // restore atomico: stessi ID tornano vivi
+      await SR.restoreTransaction(W, s1);
+      ok("restore atomico: source s1 viva", (await getT(s1)).deleted === false);
+      ok("restore atomico: leg s1 stesso id viva", (await getL(lId(s1,A2))).id === lId(s1,A2) && (await getL(lId(s1,A2))).deleted === false);
+      await inv("restore");
+
+      // 10) incremental == full rebuild (nessun cambiamento residuo)
+      var rb = await PJ.rebuildSpace(W);
+      ok("incrementale == full rebuild: rebuild written 0", rb.written === 0);
+
+      // 13) monthTotals vede solo la quota (mai le liabilities)
+      var mt = await TX.monthTotals(MONTH);
+      var liveQuota = (await DB.list("transactions", function(t){ return t.derived === true && t.projectionType === "share-quota" && t.sourceSpaceId === W && t.deleted !== true; }))
+        .filter(function(t){ return String(t.date).slice(0,7) === MONTH; }).reduce(function(s,t){ return s + t.amount; }, 0);
+      ok("monthTotals expense == somma quote vive (liabilities escluse)", mt.expense === liveQuota);
+
+      // 11) failure injection -> rollback source + projections
+      PJ._setTestPoison(true);
+      var beforeN = (await SR.listTransactions(W)).length;
+      var threw = await throwsA(function(){ return SR.createExpense(W, { amount: 90, paidById: SW, allocationMode: "exact", parts: O([SW,90]), date: DATE }); });
+      PJ._setTestPoison(false);
+      ok("failure injection: create respinto", threw);
+      ok("failure injection: source NON creata (rollback atomico)", (await SR.listTransactions(W)).length === beforeN);
+
+      // 14) reload IndexedDB
+      await DB.close();
+      ok("reload: quota t1 persistita (100)", (await getT(qId(t1))).amount === 100);
+      await inv("reload");
 
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
