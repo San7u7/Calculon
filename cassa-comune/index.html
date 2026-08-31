@@ -5328,10 +5328,97 @@ if ("serviceWorker" in navigator){
     return aggregateLiabilities(legs);
   }
 
+  /* F4 · Passo 5D — persistenza IDEMPOTENTE + ricostruzione ATOMICA delle proiezioni.
+     La source Shared resta l'unica autorita': le proiezioni sono sempre ricostruibili da zero.
+     Nessun DB bump, nessun hook automatico sul write-path Shared (chiamata esplicita a rebuildSpace).
+     Scrive solo su transactions (quota) e liabilities (legs) in un'unica transazione multi-store. */
+  var PID_D = "personal:local";
+  // firma-contenuto (esclude createdAt/updatedAt): stessa firma => record equivalente => nessuna write.
+  function sigQuota(r){ return JSON.stringify([r.id, r.spaceId, r.type, r.amount, r.date, r.note, r.merchant, r.accountId, r.categoryId, JSON.stringify(r.tags || []), r.capitalMovement, r.deleted, r.sourceSpaceId, r.sourceTransactionId, r.sourceMemberId, r.projectionType, r.derived]); }
+  function sigLiab(r){ return JSON.stringify([r.id, r.sourceSpaceId, r.sourceTransactionId, r.sourceMemberId, r.counterpartMemberId, r.signedAmount, r.date, r.projectionType, r.deleted, r.derived]); }
+  function quotaRecord(existing, q, src, now){
+    var createdAt = (existing && existing.createdAt != null) ? existing.createdAt : now;
+    return { id: q.id, spaceId: PID_D, type: "expense", amount: q.amount, date: q.date,
+      accountId: null, categoryId: null, merchant: "", note: (src.note != null ? src.note : ""),
+      tags: [], capitalMovement: false, deleted: false,
+      sourceSpaceId: q.sourceSpaceId, sourceTransactionId: q.sourceTransactionId, sourceMemberId: q.sourceMemberId,
+      projectionType: "share-quota", derived: true, createdAt: createdAt, updatedAt: now };
+  }
+  function liabRecord(existing, leg, src, now){
+    var createdAt = (existing && existing.createdAt != null) ? existing.createdAt : now;
+    return { id: leg.id, sourceSpaceId: leg.sourceSpaceId, sourceTransactionId: leg.sourceTransactionId,
+      sourceMemberId: leg.sourceMemberId, counterpartMemberId: leg.counterpartMemberId,
+      signedAmount: leg.signedAmount, date: (src.date != null ? src.date : null),
+      projectionType: leg.projectionType, derived: true, deleted: false, createdAt: createdAt, updatedAt: now };
+  }
+  // Riconcilia uno store: aggiunge al batch SOLO i record che cambiano (idempotenza forte).
+  function reconcile(store, existingList, desiredMap, buildRec, sigOf, now, batch){
+    var exById = {}; existingList.forEach(function(e){ exById[e.id] = e; });
+    Object.keys(desiredMap).forEach(function(id){
+      var d = desiredMap[id], ex = exById[id];
+      var target = buildRec(ex, d, now);
+      if (!ex || sigOf(ex) !== sigOf(target)) batch.push({ store: store, record: target });   // upsert (createdAt preservato)
+    });
+    existingList.forEach(function(e){
+      if (Object.prototype.hasOwnProperty.call(desiredMap, e.id)) return;
+      if (e.deleted === true) return;                                                          // gia' tombstone
+      batch.push({ store: store, record: Object.assign({}, e, { deleted: true, updatedAt: now }) });   // orphan -> tombstone
+    });
+  }
+  // Scrittura ATOMICA multi-store. Rollback totale se una put fallisce (mai quota nuova con liab vecchie).
+  async function scriviProiezioni(items){
+    if (!items || items.length === 0) return 0;   // niente da scrivere: nessuna transazione, updatedAt invariato
+    var idb = await window.calculonDB.open();
+    await new Promise(function(res, rej){
+      var storeSet = {}; items.forEach(function(it){ storeSet[it.store] = true; });
+      var tx = idb.transaction(Object.keys(storeSet), "readwrite"), settled = false;
+      tx.oncomplete = function(){ if (!settled){ settled = true; res(); } };
+      tx.onabort = function(){ if (!settled){ settled = true; rej(tx.error || new Error("transazione annullata")); } };
+      tx.onerror = function(){};
+      try { items.forEach(function(it){ tx.objectStore(it.store).put(it.record); }); }
+      catch(e){ try { tx.abort(); } catch(_){ } if (!settled){ settled = true; rej(e); } }
+    });
+    return items.length;
+  }
+  // Ricostruisce TUTTE le proiezioni di uno spazio native shared (anche archiviato). Legacy respinto.
+  async function rebuildSpace(spaceId){
+    var DB = window.calculonDB, SR = window.sharedRuntime;
+    if (!spaceId) throw new Error("spaceId richiesto");
+    var space = await DB.get("spaces", spaceId);
+    if (!space || space.deleted === true) throw new Error("spazio inesistente: " + spaceId);
+    if (space.legacyGroupId) throw new Error("spazio legacy: fuori scope");
+    if (space.kind !== "experience" && space.kind !== "ongoing") throw new Error("spazio non nativo shared: kind " + space.kind);
+    var members = await SR.listMembers(spaceId);      // attivi+inattivi, no tombstone
+    var txs = await SR.listTransactions(spaceId);     // SOLO tx vive (!deleted) = source vive
+    // DESIRED da fromSharedTx (fail-closed) su ogni source viva
+    var desiredTx = {}, desiredLiab = {};
+    for (var i = 0; i < txs.length; i++){
+      var res = fromSharedTx(space, txs[i], members);
+      if (res.quotaExpense) desiredTx[res.quotaExpense.id] = { q: res.quotaExpense, src: txs[i] };
+      for (var j = 0; j < res.liabilityLegs.length; j++){ var lg = res.liabilityLegs[j]; desiredLiab[lg.id] = { leg: lg, src: txs[i] }; }
+    }
+    // EXISTING derived per QUESTO sourceSpaceId (inclusi tombstone). MAI record normali o di altri spazi.
+    var exTx = await DB.list("transactions", function(t){ return t && t.derived === true && t.projectionType === "share-quota" && t.sourceSpaceId === spaceId; });
+    var exLiab = await DB.list("liabilities", function(l){ return l && l.derived === true && l.sourceSpaceId === spaceId; });
+    var now = Date.now(), batch = [];
+    reconcile("transactions", exTx, desiredTx, function(ex, d, n){ return quotaRecord(ex, d.q, d.src, n); }, sigQuota, now, batch);
+    reconcile("liabilities", exLiab, desiredLiab, function(ex, d, n){ return liabRecord(ex, d.leg, d.src, n); }, sigLiab, now, batch);
+    var written = await scriviProiezioni(batch);
+    return { spaceId: spaceId, desiredQuota: Object.keys(desiredTx).length, desiredLiab: Object.keys(desiredLiab).length, written: written };
+  }
+  // Saldo di liability persistite (derived, vive) per uno spazio: riduce le legs col core puro.
+  async function liabilityBalance(spaceId){
+    var legs = await window.calculonDB.list("liabilities", function(l){ return l && l.derived === true && l.sourceSpaceId === spaceId && l.deleted !== true; });
+    return aggregateLiabilities(legs);
+  }
+
   window.personalProjection = {
     fromSharedTx: fromSharedTx,
     aggregateLiabilities: aggregateLiabilities,
     liabilityPosition: liabilityPosition,
+    rebuildSpace: rebuildSpace,
+    liabilityBalance: liabilityBalance,
+    _scriviProiezioni: scriviProiezioni,   // esposto solo per il test di rollback atomico
     _test: function(){
       var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
       var PJ = window.personalProjection;
@@ -5523,6 +5610,133 @@ if ("serviceWorker" in navigator){
       ok("position: txs non array respinto", throws(function(){ return PJ.liabilityPosition(SPACE, "x", MEM); }));
       ok("position: tx cross-space respinta", throws(function(){ return PJ.liabilityPosition(SPACE, [ { id:"T", spaceId:"OTHER", type:"expense", amount:100, paidById:SELF, allocations:[{memberId:SELF,amount:100}] } ], MEM); }));
       ok("position: tipo non supportato respinto", throws(function(){ return PJ.liabilityPosition(SPACE, [ { id:"T", spaceId:"S", type:"income", amount:100 } ], MEM); }));
+
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    },
+    // F4/5D — persistenza + rebuild idempotente su IndexedDB reale.
+    _testPersist: async function(){
+      var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
+      var DB = window.calculonDB, SR = window.sharedRuntime, PJ = window.personalProjection, TX = window.personalRuntime.transactions;
+      async function throwsA(fn){ try { await fn(); return false; } catch(e){ return true; } }
+      var DATE = "2026-08-01", MONTH = "2026-08";
+      function createExp(sp, amount, payer, partsObj){ return SR.createExpense(sp, { amount: amount, paidById: payer, allocationMode: "exact", parts: partsObj, date: DATE }); }
+      async function inv(name){ var lb = await PJ.liabilityBalance(OG); var bal = await SR.balances(OG); ok(name + ": liab total === native self", lb.totalSignedAmount === (bal[S] || 0)); }
+      function O(a){ var o={}; for (var i=0;i<a.length;i+=2) o[a[i]]=a[i+1]; return o; }
+      async function getT(id){ return await DB.get("transactions", id); }
+      async function getL(id){ return await DB.get("liabilities", id); }
+
+      var og = await SR.createSpace({ kind: "ongoing", name: "Casa5D", selfName: "Gio" });
+      var OG = og.spaceId, S = og.selfMemberId;
+      var A = await SR.addMember(OG, { name: "Anna" });
+      var B = await SR.addMember(OG, { name: "Bea" });
+      var qId = function(tx){ return "proj:" + OG + ":" + tx + ":quota"; };
+      var lId = function(tx, cpt){ return "liab:" + OG + ":" + tx + ":" + cpt; };
+
+      // normale tx personale: NON deve mai essere toccata dal rebuild
+      var normId = await TX.create({ type: "expense", amount: 500, date: DATE, note: "spesa mia" });
+
+      // 1) pago io 420 / quota 126 / A 150 / B 144
+      var t1 = await createExp(OG, 420, S, O([S,126, A,150, B,144]));
+      await PJ.rebuildSpace(OG);
+      var q1 = await getT(qId(t1));
+      ok("pago io: quota expense 126 persistita", q1 && q1.amount === 126 && q1.type === "expense" && q1.derived === true && q1.capitalMovement === false && q1.spaceId === "personal:local" && q1.deleted === false);
+      ok("pago io: liab A +150", (await getL(lId(t1,A))).signedAmount === 150);
+      ok("pago io: liab B +144", (await getL(lId(t1,B))).signedAmount === 144);
+      await inv("pago io");
+
+      // monthTotals/budget contano SOLO la quota reale (mai le liabilities)
+      var mt = await TX.monthTotals(MONTH);
+      ok("monthTotals expense = personale 500 + quota 126 = 626 (liabilities escluse)", mt.expense === 626);
+      var B0 = window.personalRuntime.budgets;
+      ok("budget.spent = 626 (nessun credito 294)", (await B0.spent(MONTH)) === 626);
+
+      // 5) rebuild ripetuto -> zero duplicati + timestamp invariati
+      var u1 = q1.updatedAt;
+      var rr = await PJ.rebuildSpace(OG);
+      ok("rebuild idempotente: written 0", rr.written === 0);
+      ok("rebuild idempotente: updatedAt invariato", (await getT(qId(t1))).updatedAt === u1);
+      var allQ1 = await DB.list("transactions", function(t){ return t.derived === true && t.sourceTransactionId === t1 && t.projectionType === "share-quota"; });
+      ok("rebuild idempotente: nessun duplicato quota (1 record)", allQ1.length === 1);
+      var createdAt1 = q1.createdAt;
+
+      // 6) allocation change -> stesso quota ID aggiornato, createdAt preservato
+      await SR.updateExpense(OG, t1, { allocationMode: "exact", parts: O([S,200, A,120, B,100]) });
+      await PJ.rebuildSpace(OG);
+      var q1b = await getT(qId(t1));
+      ok("allocation change: stesso id, amount 200", q1b.id === qId(t1) && q1b.amount === 200);
+      ok("allocation change: createdAt preservato", q1b.createdAt === createdAt1);
+      await inv("allocation change");
+
+      // 7) paidById change -> liabilities riconciliate (receivable -> payable), leg orfana tombstonata
+      await SR.updateExpense(OG, t1, { paidById: A, allocationMode: "exact", parts: O([S,200, A,120, B,100]) });
+      await PJ.rebuildSpace(OG);
+      ok("paidById change: liab A payable -200", (await getL(lId(t1,A))).signedAmount === -200 && (await getL(lId(t1,A))).deleted === false);
+      ok("paidById change: leg B orfana tombstonata", (await getL(lId(t1,B))).deleted === true);
+      ok("paidById change: quota resta 200", (await getT(qId(t1))).amount === 200);
+      await inv("paidById change");
+
+      // 10) counterpart change su t2: vecchia leg tombstone + nuova leg
+      var t2 = await createExp(OG, 100, S, O([S,50, A,50]));
+      await PJ.rebuildSpace(OG);
+      ok("t2: leg A viva 50", (await getL(lId(t2,A))).signedAmount === 50 && (await getL(lId(t2,A))).deleted === false);
+      await SR.updateExpense(OG, t2, { allocationMode: "exact", parts: O([S,50, B,50]) });
+      await PJ.rebuildSpace(OG);
+      ok("counterpart change: leg A t2 tombstonata", (await getL(lId(t2,A))).deleted === true);
+      ok("counterpart change: leg B t2 nuova viva 50", (await getL(lId(t2,B))).signedAmount === 50 && (await getL(lId(t2,B))).deleted === false);
+      await inv("counterpart change");
+
+      // 11) quota diventa 0 -> quota tombstone
+      await SR.updateExpense(OG, t2, { paidById: S, allocationMode: "exact", parts: O([A,50, B,50]) });
+      await PJ.rebuildSpace(OG);
+      ok("quota 0: quota t2 tombstonata", (await getT(qId(t2))).deleted === true);
+      ok("quota 0: legs A/B receivable vive (pago io)", (await getL(lId(t2,A))).signedAmount === 50 && (await getL(lId(t2,A))).deleted === false);
+      await inv("quota 0");
+
+      // 8) source delete -> tutte le projections di t2 tombstone
+      await SR.deleteTransaction(OG, t2);
+      await PJ.rebuildSpace(OG);
+      ok("source delete: legs t2 tombstonate", (await getL(lId(t2,A))).deleted === true && (await getL(lId(t2,B))).deleted === true);
+      ok("source delete: quota t2 resta tombstone", (await getT(qId(t2))).deleted === true);
+      await inv("source delete");
+
+      // 9) source restore -> stessi ID tornano vivi
+      await SR.restoreTransaction(OG, t2);
+      await PJ.rebuildSpace(OG);
+      ok("source restore: leg A t2 stesso id, viva", (await getL(lId(t2,A))).id === lId(t2,A) && (await getL(lId(t2,A))).deleted === false);
+      await inv("source restore");
+
+      // 12) spazio archived -> proiezioni conservate + rebuild ancora possibile
+      var qBefore = await getT(qId(t1));
+      await SR.archiveSpace(OG);
+      var rArch = await PJ.rebuildSpace(OG);
+      ok("archived: rebuild eseguito", !!rArch);
+      ok("archived: quota t1 conservata invariata", (await getT(qId(t1))).amount === qBefore.amount && (await getT(qId(t1))).deleted === false);
+      await inv("archived");
+      await SR.restoreSpace(OG);
+
+      // 13) normale tx personale intatta
+      var norm = await getT(normId);
+      ok("normale tx personale intatta (amount 500, non derived, viva)", norm.amount === 500 && norm.derived !== true && norm.deleted === false);
+
+      // 14) manual update/del/restore della derived quota respinti (derived-readonly)
+      ok("manual update quota respinto", await throwsA(function(){ return TX.update(qId(t1), { amount: 999 }); }));
+      ok("manual del quota respinto", await throwsA(function(){ return TX.delete(qId(t1)); }));
+      ok("manual restore quota respinto", await throwsA(function(){ return TX.restore(qId(t1)); }));
+      ok("normale tx personale resta modificabile", (await TX.update(normId, { note: "ok" })) === normId);
+
+      // 15) atomic rollback simulato: seconda write invalida -> nulla persistito
+      var ghostQ = quotaGhost(OG);
+      var rolled = await throwsA(function(){ return PJ._scriviProiezioni([ { store: "transactions", record: ghostQ }, { store: "liabilities", record: { sourceSpaceId: OG, derived: true } } ]); });
+      ok("atomic rollback: throw", rolled);
+      ok("atomic rollback: quota ghost NON persistita", (await getT(ghostQ.id)) == null);
+
+      // 16) reload IndexedDB
+      await DB.close();
+      ok("reload: quota t1 persistita", (await getT(qId(t1))).amount === 200);
+      ok("reload: liabilityBalance === native self", (await PJ.liabilityBalance(OG)).totalSignedAmount === ((await SR.balances(OG))[S] || 0));
+
+      function quotaGhost(sp){ return { id: "proj:" + sp + ":GHOST:quota", spaceId: "personal:local", type: "expense", amount: 10, date: DATE, derived: true, projectionType: "share-quota", sourceSpaceId: sp, deleted: false }; }
 
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
@@ -5909,6 +6123,7 @@ if ("serviceWorker" in navigator){
     if ("spaceId" in patch && patch.spaceId !== PID) throw new Error("spaceId non modificabile");
     var cur = await DB.get("transactions", id);
     if (!isPersonal(cur)) throw new Error("transazione inesistente: " + id);
+    if (cur.derived === true) throw new Error("derived-readonly");   // F4/5D: proiezioni gestite solo da personalProjection
     var merged = {
       type:          ("type"          in patch) ? patch.type          : cur.type,
       amount:        ("amount"        in patch) ? patch.amount        : cur.amount,
@@ -5939,6 +6154,7 @@ if ("serviceWorker" in navigator){
   async function del(id){
     var cur = await DB.get("transactions", id);
     if (!isPersonal(cur)) throw new Error("transazione inesistente: " + id);
+    if (cur.derived === true) throw new Error("derived-readonly");   // F4/5D
     await DB.del("transactions", id);   // tombstone (deleted:true), mai rimozione fisica
     return id;
   }
@@ -5948,6 +6164,7 @@ if ("serviceWorker" in navigator){
   async function restore(id){
     var cur = await DB.get("transactions", id);
     if (!cur || cur.spaceId !== PID) throw new Error("transazione inesistente: " + id);
+    if (cur.derived === true) throw new Error("derived-readonly");   // F4/5D
     if (!cur.deleted) return id;
     cur.deleted = false;
     await DB.put("transactions", cur);
