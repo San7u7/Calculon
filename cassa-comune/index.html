@@ -4076,6 +4076,9 @@ if ("serviceWorker" in navigator){
     if (sp.legacyGroupId) throw new Error("spazio legacy: read-only in questo passo");
     if (sp.kind !== "experience" && sp.kind !== "ongoing") throw new Error("spazio non shared: kind " + sp.kind);
     if (sp.status !== "active") throw new Error("spazio non active: status " + String(sp.status));
+    // F4/3C: invariante selfMemberId effettivo su ogni write nativo (unica funzione canonica, vedi verificaSelf).
+    // Il self deve essere solo IDENTIFICABILE nello spazio, non partecipare alla singola transazione.
+    await verificaSelf(sp);
     return sp;
   }
   // Membri: attivi (active!==false) per i NUOVI riferimenti; tutti (attivi+inattivi, no tombstone)
@@ -4593,15 +4596,16 @@ if ("serviceWorker" in navigator){
       async function zeroSum(spId){ var b = await SR.balances(spId); var s = 0; for (var k in b) s += b[k]; return s === 0; }
       async function net(spId){ return await SR.balances(spId); }
       function mem(spId, id, active){ return { id: spId + ":" + id, spaceId: spId, name: id, active: active !== false, deleted: false }; }
-      function space(id, kind, status, legacyGroupId){ return { id: id, name: id, kind: kind, status: status, currency: "EUR", legacyGroupId: legacyGroupId || null, deleted: false }; }
+      // F4/3C: gli spazi nativi di test hanno un selfMemberId valido (fixture migrata, non indebolita).
+      function space(id, kind, status, legacyGroupId, selfMemberId){ return { id: id, name: id, kind: kind, status: status, currency: "EUR", legacyGroupId: legacyGroupId || null, selfMemberId: selfMemberId || null, deleted: false }; }
 
       var NAT = "t:nat", NAT2 = "t:nat2", LEG = "t:leg", SET = "t:set", ARC = "t:arc";
       // semina spazi (nessuna API membri usata: scrittura diretta store, solo per il test)
-      await DB.put("spaces", space(NAT,  "experience", "active"));
-      await DB.put("spaces", space(NAT2, "experience", "active"));
-      await DB.put("spaces", space(LEG,  "experience", "active", "gLeg"));   // legacy -> read-only
-      await DB.put("spaces", space(SET,  "experience", "settled"));
-      await DB.put("spaces", space(ARC,  "ongoing",    "archived"));
+      await DB.put("spaces", space(NAT,  "experience", "active", null, "t:nat:a"));   // self = membro attivo dello spazio
+      await DB.put("spaces", space(NAT2, "experience", "active", null, "t:nat2:x"));
+      await DB.put("spaces", space(LEG,  "experience", "active", "gLeg"));   // legacy -> read-only (self non richiesto)
+      await DB.put("spaces", space(SET,  "experience", "settled"));          // respinto per status prima del self
+      await DB.put("spaces", space(ARC,  "ongoing",    "archived"));         // respinto per status prima del self
       await DB.put("spaceMembers", mem(NAT, "a")); await DB.put("spaceMembers", mem(NAT, "b")); await DB.put("spaceMembers", mem(NAT, "c")); await DB.put("spaceMembers", mem(NAT, "z", false));
       await DB.put("spaceMembers", mem(NAT2, "x"));
       await DB.put("spaceMembers", mem(LEG, "a")); await DB.put("spaceMembers", mem(SET, "a")); await DB.put("spaceMembers", mem(SET, "b")); await DB.put("spaceMembers", mem(ARC, "a")); await DB.put("spaceMembers", mem(ARC, "b"));
@@ -4711,6 +4715,36 @@ if ("serviceWorker" in navigator){
       var dopoReload = await DB.get("transactions", eqId);
       ok("reload: transazione persistita", dopoReload && dopoReload.id === eqId && dopoReload.deleted === false);
       ok("reload: balances ancora zero-sum", await zeroSum(NAT));
+
+      // --- F4/3C: invariante selfMemberId applicato al write-path 3A ---
+      ok("3C: spazio nativo valido -> write 3A funziona", NAT != null && typeof eqId === "string");   // NAT ha self=t:nat:a e le create sopra sono passate
+      // self assente
+      var SA = "t:selfabsent"; await DB.put("spaces", space(SA, "experience", "active"));   // selfMemberId null
+      await DB.put("spaceMembers", mem(SA, "m"));
+      ok("3C: selfMemberId assente -> write respinto", await throwsA(function(){ return SR.createExpense(SA, { amount:100, paidById:SA+":m", allocationMode:"equal", parts:(function(){var p={};p[SA+":m"]=1;return p;})() }); }));
+      // self inesistente
+      var SI = "t:selfmissing"; await DB.put("spaces", space(SI, "experience", "active", null, SI+":ghost"));
+      await DB.put("spaceMembers", mem(SI, "m"));
+      ok("3C: selfMemberId inesistente -> respinto", await throwsA(function(){ return SR.createExpense(SI, { amount:100, paidById:SI+":m", allocationMode:"equal", parts:(function(){var p={};p[SI+":m"]=1;return p;})() }); }));
+      // self cross-space (punta a un membro di NAT)
+      var SC = "t:selfcross"; await DB.put("spaces", space(SC, "experience", "active", null, "t:nat:a"));
+      await DB.put("spaceMembers", mem(SC, "m"));
+      ok("3C: selfMemberId cross-space -> respinto", await throwsA(function(){ return SR.createExpense(SC, { amount:100, paidById:SC+":m", allocationMode:"equal", parts:(function(){var p={};p[SC+":m"]=1;return p;})() }); }));
+      // self deleted (tombstone)
+      var SD = "t:selfdel"; await DB.put("spaces", space(SD, "experience", "active", null, SD+":s"));
+      await DB.put("spaceMembers", { id: SD+":s", spaceId: SD, name: "S", active: true, deleted: true });
+      await DB.put("spaceMembers", mem(SD, "m"));
+      ok("3C: self member deleted -> respinto", await throwsA(function(){ return SR.createExpense(SD, { amount:100, paidById:SD+":m", allocationMode:"equal", parts:(function(){var p={};p[SD+":m"]=1;return p;})() }); }));
+      // self INATTIVO ma identificabile e spazio active: regola canonica 3B = self resta identita' (write 3A consentito);
+      // e la 3B continua a impedire l'archiviazione del self.
+      var SN = "t:selfinactive"; await DB.put("spaces", space(SN, "experience", "active", null, SN+":s"));
+      await DB.put("spaceMembers", { id: SN+":s", spaceId: SN, name: "S", active: false, deleted: false });   // self inattivo (seed artificiale)
+      await DB.put("spaceMembers", mem(SN, "m"));
+      var okInactiveWrite = !(await throwsA(function(){ return SR.createExpense(SN, { amount:100, paidById:SN+":m", allocationMode:"equal", parts:(function(){var p={};p[SN+":m"]=1;return p;})() }); }));
+      ok("3C: self inattivo ma identificabile -> write 3A consentito", okInactiveWrite);
+      ok("3C: self resta non archiviabile (regola 3B)", await throwsA(function(){ return SR.archiveMember(SN, SN+":s"); }));
+      // legacy invariato: il gate legacy scatta PRIMA del self (nessun self richiesto)
+      ok("3C: legacy invariato (create respinto per legacy, non per self)", await throwsA(function(){ return SR.createExpense(LEG, { amount:100, paidById:LEG+":a", allocationMode:"equal", parts:{ "t:leg:a":1 } }); }));
 
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
