@@ -6593,8 +6593,10 @@ if ("serviceWorker" in navigator){
     var storeByType = { space: "spaces", member: "spaceMembers", shareRule: "shareRules" };
     var store = storeByType[recordType]; if (!store) throw new Error("recordType non gestito: " + recordType);
     var items = [{ store: store, record: record }];
-    var intent = await buildIntentItem(recordType, record);   // crypto PRIMA della transazione
-    if (intent) items.push(intent);
+    if (!opts.noIntent){   // F4/7E3: inbound apply usa noIntent -> nessun echo outbound
+      var intent = await buildIntentItem(recordType, record);   // crypto PRIMA della transazione
+      if (intent) items.push(intent);
+    }
     var pcs = [];
     if (opts.expectAbsent) pcs.push({ store: store, id: record.id, mustBeAbsent: true });
     else if (opts.expect) pcs.push({ store: store, id: record.id, expect: opts.expect });
@@ -6717,12 +6719,111 @@ if ("serviceWorker" in navigator){
     if (typeof document !== "undefined") document.addEventListener("visibilitychange", function(){ if (_autoDeliver && !document.hidden) deliverPending().catch(function(){}); });
   }
 
+  /* F4 · Passo 7E3 — PULL + inbound atomic apply. Worker GET -> decrypt/AAD -> nativeWinner -> apply
+     locale SENZA outbound intent (noIntent) -> Personal projections -> cursor advance. Solo spazi
+     native-born gia' configurati localmente. Batch: decripta/valida TUTTO prima di applicare; cursor
+     avanza SOLO dopo che l'intero batch e' processato. */
+  var SYNC_TYPES = { space: "spaces", member: "spaceMembers", shareRule: "shareRules", transaction: "transactions" };
+  var TYPE_ORDER = { space: 0, member: 1, shareRule: 2, transaction: 3 };   // referenziati prima dei referenti
+  async function getSyncSeq(spaceId){ var v = await DB().meta.get("syncSeq:" + spaceId); return Number.isInteger(v) ? v : 0; }
+  async function setSyncSeq(spaceId, seq){ await DB().meta.set("syncSeq:" + spaceId, seq | 0); return seq | 0; }
+
+  function identico(local, remote){ return local && local.version === remote.version && String(local.deviceId) === String(remote.deviceId) && (local.deleted === true) === (remote.deleted === true); }
+
+  // Applica UN record remoto (winner) con CAS + retry bounded. Ritorna "applied"|"local-wins"|"identical".
+  async function applyOne(space, self, recordType, remote){
+    var store = SYNC_TYPES[recordType];
+    for (var attempt = 0; attempt < 6; attempt++){
+      var local = await DB().get(store, remote.id);
+      if (identico(local, remote)) return "identical";                       // no-op
+      var winner = local ? window.nativeSyncBoundary.nativeWinner(local, remote) : remote;
+      if (winner !== remote) return "local-wins";                            // locale causalmente superiore: intent outbound resta
+      var expect = local ? { version: local.version, deviceId: local.deviceId, deleted: local.deleted === true } : null;
+      var o = { noIntent: true, expect: expect, expectAbsent: !local };
+      try {
+        if (recordType === "transaction"){
+          var src = Object.assign({}, remote);
+          src.createdAt = (local && local.createdAt != null) ? local.createdAt : Date.now();
+          src.updatedAt = Date.now();
+          await window.personalProjection._commitSourceWithProjection(space, src, o);   // source + Personal projections, NO intent
+        } else if (recordType === "space"){
+          var merged = window.nativeSyncBoundary.mergeSharedSpaceIntoLocal(local || {}, remote);   // preserva selfMemberId/authority/cutover/legacyGroupId
+          await commitSharedRecordWithIntent("space", merged, merged, o);
+        } else {   // member | shareRule
+          if (recordType === "member" && remote.id === self && remote.deleted === true) throw new Error("self-identity-conflict");
+          await commitSharedRecordWithIntent(recordType, space, Object.assign({}, remote), o);
+        }
+        return "applied";
+      } catch(e){
+        if (e && (e.message === "local-write-conflict" || e.message === "local-create-conflict")) continue;   // write locale concorrente -> rileggi e rivaluta
+        throw e;   // self-identity-conflict / missing-space-key / altro -> propaga (cursor NON avanza)
+      }
+    }
+    throw new Error("cas-retry-exhausted");
+  }
+
+  // Processa un batch: pre-decrypt/validate TUTTO, poi apply in type-order, poi cursor.
+  async function applyBatch(spaceId, space, self, records, serverSeq){
+    var decoded = [];
+    for (var i = 0; i < records.length; i++){
+      var env = records[i];
+      if (!env || typeof env !== "object" || env.protocolVersion !== 1 || env.spaceId !== spaceId || !SYNC_TYPES[env.recordType]) throw new Error("batch-invalid-structure");
+      var rec;
+      try { rec = await window.nativeCrypto.decryptSharedEnvelope(env); }   // AAD/ciphertext/missing-key -> throw
+      catch(e){ throw new Error(e && e.message === "missing-space-key" ? "missing-space-key" : "batch-decrypt-failed"); }
+      if (env.recordType !== "space" && !window.nativeSyncBoundary.isSyncableSharedRecord(rec)) throw new Error("batch-record-invalid");
+      decoded.push({ recordType: env.recordType, rec: rec });
+    }
+    decoded.sort(function(a, b){ return TYPE_ORDER[a.recordType] - TYPE_ORDER[b.recordType]; });
+    var applied = 0;
+    for (var j = 0; j < decoded.length; j++){ var res = await applyOne(space, self, decoded[j].recordType, decoded[j].rec); if (res === "applied") applied++; }
+    await setSyncSeq(spaceId, serverSeq);   // cursor SOLO dopo l'intero batch
+    return { ok: true, seq: serverSeq, records: decoded.length, applied: applied };
+  }
+
+  // PULL: GET ?since=localSeq. 409 -> full recovery since=0. Errori rete/auth -> cursor invariato.
+  async function pullSpace(spaceId){
+    var space = await DB().get("spaces", spaceId);
+    if (!space || space.deleted === true) throw new Error("spazio inesistente: " + spaceId);
+    if (!nativeBorn(space)) throw new Error("spazio non native-born");
+    var self = space.selfMemberId; if (!self) throw new Error("selfMemberId assente");
+    var cap = await getSpaceCapability(spaceId); if (!cap) throw new Error("capability assente");
+    async function fetchSince(since){
+      var res;
+      try { res = await fetch(_apiBase + "/api/space/" + encodeURIComponent(spaceId) + "?since=" + since, { headers: { "Authorization": "Bearer " + cap } }); }
+      catch(e){ return { net: "offline" }; }
+      return { res: res };
+    }
+    var localSeq = await getSyncSeq(spaceId);
+    var r = await fetchSince(localSeq);
+    if (r.net) return { ok: false, reason: "offline" };                       // cursor invariato
+    var res = r.res;
+    if (res.status === 401 || res.status === 403) throw new Error("auth-error");
+    if (res.status === 409){                                                  // since-out-of-range -> recovery esplicita
+      var rf = await fetchSince(0);
+      if (rf.net) return { ok: false, reason: "offline" };
+      if (rf.res.status !== 200) throw new Error("recovery-failed-http-" + rf.res.status);
+      var bf; try { bf = await rf.res.json(); } catch(e){ throw new Error("malformed-body"); }
+      if (!bf || typeof bf.seq !== "number" || !Array.isArray(bf.records)) throw new Error("malformed-body");
+      var out = await applyBatch(spaceId, space, self, bf.records, bf.seq);
+      out.recovery = true; return out;
+    }
+    if (res.status >= 500) return { ok: false, reason: "server-5xx" };        // cursor invariato
+    if (res.status !== 200) return { ok: false, reason: "http-" + res.status };
+    var body; try { body = await res.json(); } catch(e){ throw new Error("malformed-body"); }
+    if (!body || typeof body.seq !== "number" || !Array.isArray(body.records)) throw new Error("malformed-body");
+    return await applyBatch(spaceId, space, self, body.records, body.seq);
+  }
+
   window.nativeSync = {
     bootstrapSpace: bootstrapSpace,
     setSpaceCapability: setSpaceCapability,
     getSpaceCapability: getSpaceCapability,
     ensureSpaceCapability: ensureSpaceCapability,
     deliverPending: deliverPending,
+    pullSpace: pullSpace,
+    getSyncSeq: getSyncSeq,
+    setSyncSeq: setSyncSeq,
     enableAutoDelivery: function(baseUrl){ if (baseUrl) _apiBase = baseUrl; _autoDeliver = true; },
     _setApiBase: function(u){ _apiBase = u; },
     _setAutoDeliver: function(v){ _autoDeliver = !!v; },
