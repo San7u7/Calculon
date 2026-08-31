@@ -4014,8 +4014,13 @@ if ("serviceWorker" in navigator){
   // legacy) e saldo nativo (balancesFrom sulle allocations proiettate). Nessuna persistenza.
   function legacyCompatibilityFrom(members, txs, legacyData){
     var nativeBalances = balancesFrom(members, txs);
+    // Sorgente legacy assente: NON e' un confronto riuscito. Stato UNKNOWN, fail-closed.
+    // Lo spazio E' legacy (l'adapter chiama il core solo per spazi con legacyGroupId), quindi
+    // applicable resta true, ma non e' valutabile: evaluable=false e compatible=null (mai true).
+    // Distinguere "not-legacy" da questo caso spetta all'adapter, che conosce legacyGroupId.
     if (!legacyData || !legacyData.meta){
-      return { compatible: true, reason: null, applicable: false, legacyBalances: null, nativeBalances: nativeBalances, differences: {} };
+      return { compatible: null, evaluable: false, applicable: true, reason: "legacy-source-unavailable",
+               legacyBalances: null, nativeBalances: nativeBalances, differences: {} };
     }
     var recArr = legacyData.records ? Object.keys(legacyData.records).map(function(k){ return legacyData.records[k]; }) : [];
     var legacyRaw = window.balances(legacyData.meta.members, recArr);   // {legacyMemberId -> centesimi}, esclude i deleted
@@ -4029,7 +4034,9 @@ if ("serviceWorker" in navigator){
     }
     var compatible = Object.keys(differences).length === 0;
     var reason = compatible ? null : (inactiveReferenced(legacyData) ? "inactive-member-history" : "balance-mismatch");
-    return { compatible: compatible, reason: reason, applicable: true, legacyBalances: legacyBalances, nativeBalances: nativeBalances, differences: differences };
+    // Confronto EFFETTIVAMENTE eseguito: applicable+evaluable true, compatible e' un booleano reale.
+    // compatible:true puo' nascere SOLO da qui (differences vuoto dopo un confronto riuscito).
+    return { compatible: compatible, evaluable: true, applicable: true, reason: reason, legacyBalances: legacyBalances, nativeBalances: nativeBalances, differences: differences };
   }
   // Adattatore async: carica spazio/membri/tx da IndexedDB e la sorgente legacy da
   // localStorage (cc.data.<GID>), poi delega al core puro. Solo spazi con legacyGroupId.
@@ -4037,7 +4044,9 @@ if ("serviceWorker" in navigator){
     if (!spaceId) throw new Error("spaceId richiesto");
     var space = await db().get("spaces", spaceId);
     if (!space || !space.legacyGroupId){
-      return { compatible: true, reason: null, applicable: false, legacyBalances: null, nativeBalances: await balances(spaceId), differences: {} };
+      // Spazio NATIVO (nessun legacyGroupId): il gate di compatibilita' legacy NON si applica.
+      // Stato definito ma non valutabile: compatible=null, un futuro cut-over non lo tratta come "ok".
+      return { compatible: null, evaluable: false, applicable: false, reason: "not-legacy", legacyBalances: null, nativeBalances: await balances(spaceId), differences: {} };
     }
     var members = await listMembers(spaceId);
     var txs = await listTransactions(spaceId);
@@ -4099,10 +4108,40 @@ if ("serviceWorker" in navigator){
       var natRef = SR._balancesFrom(pRef.members, pRef.transactions);
       ok("native invariato (m1=+600)", natRef["D00003:m1"] === 600);
 
-      // async: spazio non-legacy -> applicable false, compatible true
+      // legacy + sorgente presente -> confronto ESEGUITO: applicable + evaluable true
+      var cEval = compatOf("V00001", grp("V00001", M, [ exp("r1","m1",1000,"equal",{m1:1,m2:1,m3:1}) ]));
+      ok("legacy+sorgente -> applicable true", cEval.applicable === true);
+      ok("legacy+sorgente -> evaluable true", cEval.evaluable === true);
+      ok("legacy+sorgente -> compatible true (confronto riuscito)", cEval.compatible === true);
+      ok("inactive-member-history -> evaluable true", cRef.evaluable === true);
+
+      // FALLBACK dedicato reason=balance-mismatch: legacy e native divergono SENZA inactive-member-history.
+      // Fixture deterministico: lato nativo = spesa 900 equal; sorgente legacy = spesa 1200 equal.
+      // Stessi id membri (gid "BM0001"), NESSUN membro cancellato -> inactiveReferenced=false.
+      var pNat  = proj("BM0001", grp("BM0001", M, [ exp("r1","m1", 900,"equal",{m1:1,m2:1,m3:1}) ]));  // native m1=+600
+      var dLeg  =               grp("BM0001", M, [ exp("r1","m1",1200,"equal",{m1:1,m2:1,m3:1}) ]);     // legacy m1=+800
+      var bm = SR._legacyCompatibilityFrom(pNat.members, pNat.transactions, dLeg);
+      ok("balance-mismatch -> incompatible", bm.compatible === false);
+      ok("balance-mismatch -> reason dedicato", bm.reason === "balance-mismatch");
+      ok("balance-mismatch -> NON inactive-member-history", bm.reason !== "inactive-member-history");
+      ok("balance-mismatch -> evaluable true", bm.evaluable === true && bm.applicable === true);
+      ok("balance-mismatch -> diff m1 (legacy 800 / native 600)", bm.differences["BM0001:m1"] && bm.differences["BM0001:m1"].legacy === 800 && bm.differences["BM0001:m1"].native === 600);
+
+      // Sorgente legacy ASSENTE -> stato UNKNOWN fail-closed: applicable true, evaluable false, compatible NULL.
+      var unk = SR._legacyCompatibilityFrom(pNat.members, pNat.transactions, null);
+      ok("source-unavailable -> applicable true", unk.applicable === true);
+      ok("source-unavailable -> evaluable false", unk.evaluable === false);
+      ok("source-unavailable -> compatible null (mai true)", unk.compatible === null);
+      ok("source-unavailable -> reason legacy-source-unavailable", unk.reason === "legacy-source-unavailable");
+      // INVARIANTE DI SICUREZZA: nessuno stato non-valutabile puo' risultare compatible:true
+      ok("invariante: UNKNOWN mai compatible true", unk.compatible !== true);
+
+      // async: spazio non-legacy -> il gate NON si applica: applicable false, evaluable false, compatible NULL
       var pc = await SR.legacyCompatibility("personal:local");
       ok("non-legacy -> applicable false", pc.applicable === false);
-      ok("non-legacy -> compatible true", pc.compatible === true);
+      ok("non-legacy -> evaluable false", pc.evaluable === false);
+      ok("non-legacy -> compatible null (non true)", pc.compatible === null);
+      ok("non-legacy -> reason not-legacy", pc.reason === "not-legacy");
       var threw = false; try { await SR.legacyCompatibility(); } catch(e){ threw = true; }
       ok("spaceId richiesto -> throw", threw);
 
