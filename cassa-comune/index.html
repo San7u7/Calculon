@@ -6831,11 +6831,13 @@ if ("serviceWorker" in navigator){
     var ctHash = await sha256hex((env && env.ciphertext) || "");   // solo per diagnosi/dedup
     var now = Date.now();
     var ex = await DB().get("syncQuarantine", id);
+    // Stesso causal id ma ciphertext diverso: una sola entry logica (attempts++, lastSeenAt e ctHash
+    // aggiornati) + flag hashChanged sticky come evidenza. Nessuna history completa, nessun plaintext.
     var rec = ex
-      ? Object.assign({}, ex, { seq: serverSeq | 0, reason: reason, ctHash: ctHash, lastSeenAt: now, attempts: (ex.attempts | 0) + 1 })
+      ? Object.assign({}, ex, { seq: serverSeq | 0, reason: reason, ctHash: ctHash, lastSeenAt: now, attempts: (ex.attempts | 0) + 1, hashChanged: (ex.hashChanged === true) || (ex.ctHash !== ctHash) })
       : { id: id, spaceId: spaceId, seq: serverSeq | 0, recordType: String(env && env.recordType), recordId: String(env && env.recordId),
           version: (env && env.version) | 0, deviceId: String(env && env.deviceId), keyVersion: (env && env.keyVersion),
-          deleted: (env && env.deleted) === true, ctHash: ctHash, reason: reason, firstSeenAt: now, lastSeenAt: now, attempts: 1 };
+          deleted: (env && env.deleted) === true, ctHash: ctHash, hashChanged: false, reason: reason, firstSeenAt: now, lastSeenAt: now, attempts: 1 };
     await DB().put("syncQuarantine", rec);
     return rec;
   }
@@ -6846,15 +6848,22 @@ if ("serviceWorker" in navigator){
     var db = await DB().open();
     await new Promise(function(res, rej){ var t = db.transaction("syncQuarantine", "readwrite"); t.objectStore("syncQuarantine").delete(id); t.oncomplete = function(){ res(); }; t.onerror = function(){ rej(t.error); }; });
   }
-  // Rimuove SOLO le entry PROVATE risolte: esiste localmente un record shared per lo stesso recordId con
-  // version >= a quella quarantinata (uno stato remoto valido ha superato/sostituito l'evento). Nessuna
-  // clear-all cieca: un problema irrisolto resta visibile (niente skip invisibile).
+  // Rimuove SOLO le entry PROVATE risolte: il record Shared locale corrente DOMINA (o eguaglia)
+  // causalmente il quarantinato secondo lo STESSO comparator canonico del sync 7E3 (nativeWinner:
+  // version, tombstone-wins, deviceId). Non basta confrontare version (il tie-break usa deviceId e la
+  // semantica tombstone). Nessuna seconda implementazione della causal ordering. Nessuna clear-all cieca:
+  // un problema irrisolto resta visibile (niente skip invisibile).
   async function clearResolvedQuarantine(spaceId){
     var list = await listQuarantine(spaceId), removed = [];
+    var NW = window.nativeSyncBoundary.nativeWinner;
     for (var i = 0; i < list.length; i++){
       var q = list[i], store = SYNC_TYPES[q.recordType]; if (!store) continue;
       var cur = await DB().get(store, q.recordId);
-      if (cur && Number.isInteger(cur.version) && (cur.version | 0) >= (q.version | 0)){ await hardDeleteQuarantine(q.id); removed.push(q.id); }
+      if (!cur || !Number.isInteger(cur.version)) continue;
+      var qRec = { version: q.version | 0, deviceId: q.deviceId, deleted: q.deleted === true };
+      var curRec = { version: cur.version | 0, deviceId: cur.deviceId, deleted: cur.deleted === true };
+      // RESOLVED <=> il quarantinato NON domina strettamente il locale (locale vince o eguaglia).
+      if (NW(qRec, curRec) !== qRec){ await hardDeleteQuarantine(q.id); removed.push(q.id); }
     }
     return { removed: removed.length, ids: removed };
   }
@@ -7107,6 +7116,7 @@ if ("serviceWorker" in navigator){
       // una keyVersion mai importata -> HOLD). In prodotto le key non vengono mai cancellate.
       async function hardDelKey(kv){ var db = await DBx.open(); await new Promise(function(res, rej){ var t = db.transaction("spaceKeys", "readwrite"); t.objectStore("spaceKeys").delete("spaceKey:" + SP + ":" + kv); t.oncomplete = function(){ res(); }; t.onerror = function(){ rej(t.error); }; }); }
       async function derivedOf(txId){ return (await DBx.list("transactions", function(t){ return t && t.derived === true && t.sourceTransactionId === txId; })).length; }
+      async function sha(s){ var b = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(s))); var u = new Uint8Array(b), o = ""; for (var i = 0; i < u.length; i++) o += u[i].toString(16).padStart(2, "0"); return o; }
 
       // ===== HOLD (solo missing-space-key) =====
       await NS.setSyncSeq(SP, 0);
@@ -7193,6 +7203,71 @@ if ("serviceWorker" in navigator){
       var cr2 = await NS.clearResolvedQuarantine(SP);
       ok("clearResolved: rimuove SOLO la entry risolta", cr2.removed === 1 && (await NS.listQuarantine(SP)).filter(function(x){ return x.recordId === SP + ":btx"; }).length === 0);
       ok("clearResolved: la entry irrisolta (idem) resta visibile", (await NS.listQuarantine(SP)).filter(function(x){ return x.recordId === SP + ":idem"; }).length === 1);
+
+      // ===== 7G-P2: RESOLUTION DOMINANCE (comparator canonico, non solo version) =====
+      async function quarWith(rid, ver, dev, del){
+        var env = tamper(await C.encryptSharedRecord("transaction", { id: rid, spaceId: SP, type: "expense", amount: 1000, paidById: SELF, allocations: alloc(1000), allocationMode: "exact", date: "2026-09-01", version: ver, deviceId: dev, deleted: del === true }));
+        await NS._applyBatch(SP, space, SELF, [env], 100, {});
+      }
+      function putLocal(rid, ver, dev, del){ return DBx.put("transactions", { id: rid, spaceId: SP, type: "expense", amount: 1000, paidById: SELF, allocations: alloc(1000), allocationMode: "exact", date: "2026-09-01", version: ver, deviceId: dev, deleted: del === true }); }
+      await quarWith(SP + ":d1", 5, "B", false); await putLocal(SP + ":d1", 6, "A", false);   // v6/A domina v5/B -> RESOLVED
+      await quarWith(SP + ":d2", 5, "B", false); await putLocal(SP + ":d2", 5, "C", false);   // tie v5: "C">"B" -> RESOLVED
+      await quarWith(SP + ":d3", 5, "B", false); await putLocal(SP + ":d3", 5, "A", false);   // tie v5: "B">"A" -> NOT RESOLVED
+      await quarWith(SP + ":d4", 5, "B", false); await putLocal(SP + ":d4", 4, "Z", false);   // v4/Z < v5/B -> NOT RESOLVED
+      await quarWith(SP + ":d5", 5, "B", false); await putLocal(SP + ":d5", 5, "A", true);    // tombstone locale domina live -> RESOLVED
+      await quarWith(SP + ":d6", 5, "B", true);  await putLocal(SP + ":d6", 5, "A", false);   // quar tombstone domina live locale -> NOT RESOLVED
+      await NS.clearResolvedQuarantine(SP);
+      var afterDom = (await NS.listQuarantine(SP)).map(function(x){ return x.recordId; });
+      var domHas = function(rid){ return afterDom.indexOf(rid) >= 0; };
+      ok("dominance: local v6/A domina quar v5/B -> RESOLVED", !domHas(SP + ":d1"));
+      ok("dominance tie v5: local C > quar B (deviceId) -> RESOLVED", !domHas(SP + ":d2"));
+      ok("dominance tie v5: local A < quar B (deviceId) -> NOT RESOLVED", domHas(SP + ":d3"));
+      ok("dominance: local v4 < quar v5 -> NOT RESOLVED", domHas(SP + ":d4"));
+      ok("dominance tombstone: local tombstone domina quar live -> RESOLVED", !domHas(SP + ":d5"));
+      ok("dominance tombstone: quar tombstone domina local live -> NOT RESOLVED", domHas(SP + ":d6"));
+
+      // ===== 7G-P2: SAME CAUSAL ID / DIFFERENT CIPHERTEXT =====
+      var hcBase = { id: SP + ":hc1", spaceId: SP, type: "expense", amount: 1000, paidById: SELF, allocations: alloc(1000), allocationMode: "exact", date: "2026-09-02", version: 3, deviceId: "H", deleted: false };
+      var e1 = tamper(await C.encryptSharedRecord("transaction", hcBase));
+      var e2 = tamper(await C.encryptSharedRecord("transaction", hcBase));   // IV random -> ciphertext/hash diverso, stesso causal id
+      await NS._applyBatch(SP, space, SELF, [e1], 100, {});
+      await NS._applyBatch(SP, space, SELF, [e2], 100, {});
+      var hc = (await NS.listQuarantine(SP)).filter(function(x){ return x.recordId === SP + ":hc1"; });
+      ok("hashChange: una sola entry logica", hc.length === 1);
+      ok("hashChange: attempts 2", hc[0].attempts === 2);
+      ok("hashChange: hashChanged true", hc[0].hashChanged === true);
+      ok("hashChange: ctHash corrente aggiornato", hc[0].ctHash === (await sha(e2.ciphertext)));
+      ok("hashChange: nessun plaintext", !("name" in hc[0]) && !("amount" in hc[0]) && !("allocations" in hc[0]) && !("iv" in hc[0]) && !("ciphertext" in hc[0]));
+
+      // ===== 7G-P2: CRASH A — fallimento PRIMA che la quarantine sia durable -> cursor NON avanza =====
+      await NS.setSyncSeq(SP, 0);
+      var ca = tamper(await C.encryptSharedRecord("transaction", { id: SP + ":ca", spaceId: SP, type: "expense", amount: 1000, paidById: SELF, allocations: alloc(1000), allocationMode: "exact", date: "2026-09-03", version: 1, deviceId: "rd", deleted: false }));
+      var origPut = DBx.put;
+      DBx.put = function(store, rec){ if (store === "syncQuarantine") return Promise.reject(new Error("crash-before-quarantine-durable")); return origPut.call(DBx, store, rec); };
+      var crashedA = null; try { await NS._applyBatch(SP, space, SELF, [ca], 77, {}); } catch(e){ crashedA = e && e.message; }
+      DBx.put = origPut;
+      ok("crashA: applyBatch propaga il crash", crashedA != null);
+      ok("crashA: cursor NON avanzato", (await NS.getSyncSeq(SP)) === 0);
+      ok("crashA: nessuna entry (non durable)", (await NS.listQuarantine(SP)).filter(function(x){ return x.recordId === SP + ":ca"; }).length === 0);
+      await NS._applyBatch(SP, space, SELF, [ca], 77, {});   // retry
+      ok("crashA retry: entry persistita", (await NS.listQuarantine(SP)).filter(function(x){ return x.recordId === SP + ":ca"; }).length === 1);
+      ok("crashA retry: cursor avanza a 77", (await NS.getSyncSeq(SP)) === 77);
+
+      // ===== 7G-P2: CRASH B — quarantine durable, crash PRIMA del cursor -> retry: stessa entry, cursor avanza =====
+      await NS.setSyncSeq(SP, 0);
+      var cb = tamper(await C.encryptSharedRecord("transaction", { id: SP + ":cb", spaceId: SP, type: "expense", amount: 1000, paidById: SELF, allocations: alloc(1000), allocationMode: "exact", date: "2026-09-04", version: 1, deviceId: "rd", deleted: false }));
+      var origMetaSet = DBx.meta.set;
+      DBx.meta.set = function(key, val){ if (String(key).indexOf("syncSeq:") === 0) return Promise.reject(new Error("crash-before-cursor")); return origMetaSet.call(DBx.meta, key, val); };
+      var crashedB = null; try { await NS._applyBatch(SP, space, SELF, [cb], 88, {}); } catch(e){ crashedB = e && e.message; }
+      DBx.meta.set = origMetaSet;
+      ok("crashB: applyBatch propaga il crash", crashedB != null);
+      ok("crashB: quarantine durable nonostante il crash", (await NS.listQuarantine(SP)).filter(function(x){ return x.recordId === SP + ":cb"; }).length === 1);
+      ok("crashB: cursor NON avanzato", (await NS.getSyncSeq(SP)) === 0);
+      await NS._applyBatch(SP, space, SELF, [cb], 88, {});   // retry
+      var cbEntry = (await NS.listQuarantine(SP)).filter(function(x){ return x.recordId === SP + ":cb"; });
+      ok("crashB retry: una sola entry logica", cbEntry.length === 1);
+      ok("crashB retry: attempts incrementato a 2", cbEntry[0].attempts === 2);
+      ok("crashB retry: cursor avanza a 88", (await NS.getSyncSeq(SP)) === 88);
 
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
