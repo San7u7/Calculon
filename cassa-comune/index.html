@@ -3413,13 +3413,13 @@ if ("serviceWorker" in navigator){
 /* F0P3-DB-START */
 (function(){
   var DB_NAME     = "calculon";
-  var DB_VERSION  = 3;   // struttura IndexedDB (F2.2: +"budgets" 1->2; F4/7C: +"syncOutbox"+"spaceKeys" 2->3, additivo)
+  var DB_VERSION  = 4;   // struttura IndexedDB (F2.2: +"budgets" 1->2; F4/7C: +"syncOutbox"+"spaceKeys" 2->3; F4/7G-P: +"syncQuarantine" 3->4, additivo)
   var SCHEMA_TARGET = 1; // modello dati che la migrazione M1 introdurra' (Passo 4); NON applicata in F0
   // Store previsti da spec v1.1 §3 per F0. spaceMembers e shareRules sono separati
   // apposta (membership e quote non devono fondersi come array atomici).
   // F2.2: "budgets" aggiunto in coda. onupgradeneeded crea SOLO gli store mancanti
   // (create-if-absent), quindi l'upgrade 1->2 aggiunge budgets senza toccare gli altri.
-  var STORES = ["spaces","spaceMembers","shareRules","transactions","accounts","categories","liabilities","recurring","budgets","meta","syncOutbox","spaceKeys"];
+  var STORES = ["spaces","spaceMembers","shareRules","transactions","accounts","categories","liabilities","recurring","budgets","meta","syncOutbox","spaceKeys","syncQuarantine"];
 
   function reqP(req){ return new Promise(function(res, rej){ req.onsuccess = function(){ res(req.result); }; req.onerror = function(){ rej(req.error); }; }); }
   function txDone(tx){ return new Promise(function(res, rej){ tx.oncomplete = function(){ res(); }; tx.onerror = function(){ rej(tx.error); }; tx.onabort = function(){ rej(tx.error || new Error("transazione annullata")); }; }); }
@@ -6462,11 +6462,17 @@ if ("serviceWorker" in navigator){
     ok("upgrade v2->v3: dato preesistente conservato", await new Promise(function(res){ var g = db3.transaction("spaces").objectStore("spaces").get("space:keep"); g.onsuccess = function(){ res(g.result && g.result.name === "Keep"); }; g.onerror = function(){ res(false); }; }));
     ok("upgrade: store syncOutbox presente", db3.objectStoreNames.contains("syncOutbox"));
     ok("upgrade: store spaceKeys presente", db3.objectStoreNames.contains("spaceKeys"));
-    db3.close(); await del(UNAME);
-    // il DB reale dell'app e' a v3 con i nuovi store
-    ok("app DB_VERSION 3", DBx.DB_VERSION === 3);
+    db3.close();
+    // F4/7G-P: v3 -> v4 additivo (syncQuarantine), dato preesistente conservato
+    var db4 = await openRaw(UNAME, 4, ["spaces", "transactions", "meta", "syncOutbox", "spaceKeys", "syncQuarantine"]);
+    ok("upgrade v3->v4: dato preesistente conservato", await new Promise(function(res){ var g = db4.transaction("spaces").objectStore("spaces").get("space:keep"); g.onsuccess = function(){ res(g.result && g.result.name === "Keep"); }; g.onerror = function(){ res(false); }; }));
+    ok("upgrade: store syncQuarantine presente", db4.objectStoreNames.contains("syncQuarantine"));
+    db4.close(); await del(UNAME);
+    // il DB reale dell'app e' a v4 con i nuovi store
+    ok("app DB_VERSION 4", DBx.DB_VERSION === 4);
     ok("app: syncOutbox scrivibile", (await DBx.put("syncOutbox", { id: "sync:probe", status: "delivered" })) === "sync:probe");
     ok("app: spaceKeys leggibile (vuoto)", Array.isArray(await DBx.list("spaceKeys", function(){ return false; })));
+    ok("app: syncQuarantine scrivibile", (await DBx.put("syncQuarantine", { id: "quar:probe", spaceId: "x", attempts: 1 })) === "quar:probe");
 
     // ---------- keys ----------
     var og = await SR.createSpace({ kind: "ongoing", name: "Cripto", selfName: "Gio" });
@@ -6786,24 +6792,96 @@ if ("serviceWorker" in navigator){
     throw new Error("cas-retry-exhausted");
   }
 
-  // Processa un batch: pre-decrypt/validate TUTTO, poi apply in type-order, poi cursor.
+  /* F4/7G-P — INBOUND HOLD / QUARANTINE.
+     Classifica ogni record inbound in APPLIED | QUARANTINED | HELD, senza piu' buttare l'intero
+     batch a un singolo errore. HOLD = SOLO chiave AES mancante (recuperabile): ferma il processing
+     e NON avanza il cursor. QUARANTINE = record intrinsecamente non applicabile (decrypt/AAD/
+     boundary/metadata): persiste una entry diagnostica, NON applica, NON blocca i successivi,
+     lascia avanzare il cursor. */
+  async function sha256hex(str){
+    var buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(str)));
+    var b = new Uint8Array(buf), s = ""; for (var i = 0; i < b.length; i++) s += b[i].toString(16).padStart(2, "0"); return s;
+  }
+  // Identita' IMMUTABILE dell'evento ricevuto (dedup su retry / full-recovery): causale + record.
+  function quarantineId(spaceId, env){
+    return "quar:" + spaceId + ":" + String(env && env.recordType) + ":" + String(env && env.recordId) + ":" + ((env && env.version) | 0) + ":" + String(env && env.deviceId);
+  }
+  // Classifica un envelope inbound. keyVersion malformata = QUARANTINE (NON hold); key assente con
+  // keyVersion valida = HOLD; decrypt/AAD/boundary = QUARANTINE. Nessun plaintext esce di qui.
+  async function classifyEnvelope(spaceId, env){
+    if (!env || typeof env !== "object" || env.protocolVersion !== 1 || env.spaceId !== spaceId
+        || !SYNC_TYPES[env.recordType] || typeof env.recordId !== "string" || env.recordId === "")
+      return { status: "quarantine", reason: "structure-invalid" };
+    if (!Number.isInteger(env.keyVersion) || env.keyVersion < 1)
+      return { status: "quarantine", reason: "keyVersion-invalid" };   // metadata impossibile -> quarantine, mai hold
+    var rec;
+    try { rec = await window.nativeCrypto.decryptSharedEnvelope(env); }
+    catch(e){
+      var m = e && e.message;
+      if (m === "missing-space-key") return { status: "hold", reason: "missing-space-key", keyVersion: env.keyVersion };
+      return { status: "quarantine", reason: m === "decrypt-failed" ? "decrypt-failed" : "envelope-invalid" };
+    }
+    if (env.recordType !== "space" && !window.nativeSyncBoundary.isSyncableSharedRecord(rec))
+      return { status: "quarantine", reason: "boundary-invalid" };   // schema del decrypted non valido
+    return { status: "apply", rec: rec };
+  }
+  // Upsert idempotente della entry diagnostica (nessun plaintext / key / cap / invite / ciphertext pieno).
+  async function upsertQuarantine(spaceId, env, reason, serverSeq){
+    var id = quarantineId(spaceId, env);
+    var ctHash = await sha256hex((env && env.ciphertext) || "");   // solo per diagnosi/dedup
+    var now = Date.now();
+    var ex = await DB().get("syncQuarantine", id);
+    var rec = ex
+      ? Object.assign({}, ex, { seq: serverSeq | 0, reason: reason, ctHash: ctHash, lastSeenAt: now, attempts: (ex.attempts | 0) + 1 })
+      : { id: id, spaceId: spaceId, seq: serverSeq | 0, recordType: String(env && env.recordType), recordId: String(env && env.recordId),
+          version: (env && env.version) | 0, deviceId: String(env && env.deviceId), keyVersion: (env && env.keyVersion),
+          deleted: (env && env.deleted) === true, ctHash: ctHash, reason: reason, firstSeenAt: now, lastSeenAt: now, attempts: 1 };
+    await DB().put("syncQuarantine", rec);
+    return rec;
+  }
+  async function listQuarantine(spaceId){ return await DB().list("syncQuarantine", function(q){ return q && (!spaceId || q.spaceId === spaceId); }); }
+  // Rimozione REALE della entry (calculonDB.del e' soft-delete; inoltre il campo "deleted" della entry
+  // e' la semantica tombstone dell'envelope, non un marcatore di cancellazione -> serve hard delete).
+  async function hardDeleteQuarantine(id){
+    var db = await DB().open();
+    await new Promise(function(res, rej){ var t = db.transaction("syncQuarantine", "readwrite"); t.objectStore("syncQuarantine").delete(id); t.oncomplete = function(){ res(); }; t.onerror = function(){ rej(t.error); }; });
+  }
+  // Rimuove SOLO le entry PROVATE risolte: esiste localmente un record shared per lo stesso recordId con
+  // version >= a quella quarantinata (uno stato remoto valido ha superato/sostituito l'evento). Nessuna
+  // clear-all cieca: un problema irrisolto resta visibile (niente skip invisibile).
+  async function clearResolvedQuarantine(spaceId){
+    var list = await listQuarantine(spaceId), removed = [];
+    for (var i = 0; i < list.length; i++){
+      var q = list[i], store = SYNC_TYPES[q.recordType]; if (!store) continue;
+      var cur = await DB().get(store, q.recordId);
+      if (cur && Number.isInteger(cur.version) && (cur.version | 0) >= (q.version | 0)){ await hardDeleteQuarantine(q.id); removed.push(q.id); }
+    }
+    return { removed: removed.length, ids: removed };
+  }
+
+  // Processa un batch in ordine (seq-ascendente come dal server): classifica, quarantena i non
+  // applicabili (durable PRIMA del cursor), applica i validi in TYPE_ORDER, avanza il cursor SOLO se
+  // nessun HELD. Un HELD ferma il processing e lascia il cursor fermo prima del suo seq.
   async function applyBatch(spaceId, space, self, records, serverSeq, opts){
     opts = opts || {};
-    var decoded = [];
+    var toApply = [], quarantined = [], held = null;
     for (var i = 0; i < records.length; i++){
-      var env = records[i];
-      if (!env || typeof env !== "object" || env.protocolVersion !== 1 || env.spaceId !== spaceId || !SYNC_TYPES[env.recordType]) throw new Error("batch-invalid-structure");
-      var rec;
-      try { rec = await window.nativeCrypto.decryptSharedEnvelope(env); }   // AAD/ciphertext/missing-key -> throw
-      catch(e){ throw new Error(e && e.message === "missing-space-key" ? "missing-space-key" : "batch-decrypt-failed"); }
-      if (env.recordType !== "space" && !window.nativeSyncBoundary.isSyncableSharedRecord(rec)) throw new Error("batch-record-invalid");
-      decoded.push({ recordType: env.recordType, rec: rec });
+      var cls = await classifyEnvelope(spaceId, records[i]);
+      if (cls.status === "hold"){ held = { keyVersion: cls.keyVersion }; break; }   // stop: preserva l'ordine del cursor
+      if (cls.status === "quarantine"){ quarantined.push({ env: records[i], reason: cls.reason }); continue; }
+      toApply.push({ recordType: records[i].recordType, rec: cls.rec });
     }
-    decoded.sort(function(a, b){ return TYPE_ORDER[a.recordType] - TYPE_ORDER[b.recordType]; });
+    // 1) quarantine DURABILE prima di qualunque avanzamento del cursor (crash-safety dell'invariante)
+    var qids = [];
+    for (var q = 0; q < quarantined.length; q++){ var e = await upsertQuarantine(spaceId, quarantined[q].env, quarantined[q].reason, serverSeq); qids.push(e.id); }
+    // 2) apply dei validi in TYPE_ORDER (integrita' referenziale invariata; CAS/7E3/projections intatti)
+    toApply.sort(function(a, b){ return TYPE_ORDER[a.recordType] - TYPE_ORDER[b.recordType]; });
     var applied = 0;
-    for (var j = 0; j < decoded.length; j++){ var res = await applyOne(space, self, decoded[j].recordType, decoded[j].rec, opts); if (res === "applied") applied++; }
-    await setSyncSeq(spaceId, serverSeq);   // cursor SOLO dopo l'intero batch
-    return { ok: true, seq: serverSeq, records: decoded.length, applied: applied };
+    for (var j = 0; j < toApply.length; j++){ var res = await applyOne(space, self, toApply[j].recordType, toApply[j].rec, opts); if (res === "applied") applied++; }
+    // 3) cursor: fermo se HELD; altrimenti avanza (i quarantined sono gia' durable -> non bloccano)
+    if (held) return { ok: true, seq: await getSyncSeq(spaceId), held: true, heldKeyVersion: held.keyVersion, applied: applied, quarantined: quarantined.length, quarantinedIds: qids, records: records.length };
+    await setSyncSeq(spaceId, serverSeq);
+    return { ok: true, seq: serverSeq, records: records.length, applied: applied, quarantined: quarantined.length, quarantinedIds: qids, held: false };
   }
 
   // PULL: GET ?since=localSeq. 409 -> full recovery since=0. Errori rete/auth -> cursor invariato.
@@ -7011,6 +7089,114 @@ if ("serviceWorker" in navigator){
     claimSelf: claimSelf,
     getJoinState: getJoinState,
     setJoinState: setJoinState,
+    listQuarantine: listQuarantine,                    // F4/7G-P: diagnostica sola lettura
+    clearResolvedQuarantine: clearResolvedQuarantine,  // F4/7G-P: rimuove SOLO le entry provate risolte
+    _applyBatch: applyBatch,                            // hook di test (harness ermetico)
+    _classifyEnvelope: classifyEnvelope,
+    _testInboundHardening: async function(){
+      var r = [], ok = function(n, c){ r.push({ name: n, pass: !!c }); };
+      var SR = window.sharedRuntime, C = window.nativeCrypto, PJ = window.personalProjection, DBx = window.calculonDB, K = window.spaceKeys, NB = window.nativeSyncBoundary, NS = window.nativeSync;
+      var made = await SR.createSpace({ kind: "experience", name: "Hardening", selfName: "Aldo" });
+      var SP = made.spaceId, SELF = made.selfMemberId, space = await DBx.get("spaces", SP);
+      async function memEnv(id, name, ver, dev){ return await C.encryptSharedRecord("member", { id: id, spaceId: SP, name: name, active: true, version: ver | 0, deviceId: dev, deleted: false }); }
+      function tamper(env){ var e = Object.assign({}, env), c = env.ciphertext; e.ciphertext = c.slice(0, -2) + (c.slice(-2) === "AA" ? "BB" : "AA"); return e; }
+      function alloc(n){ return [{ memberId: SELF, amount: n }]; }              // formato canonico: array {memberId,amount}
+      var other = null;   // 2o membro, valorizzato nella sezione PROJECTION
+      function split(a, b){ return [{ memberId: SELF, amount: a }, { memberId: other, amount: b }]; }
+      // hard-delete di una key (calculonDB.del e' soft-delete; qui serve un'assenza REALE per simulare
+      // una keyVersion mai importata -> HOLD). In prodotto le key non vengono mai cancellate.
+      async function hardDelKey(kv){ var db = await DBx.open(); await new Promise(function(res, rej){ var t = db.transaction("spaceKeys", "readwrite"); t.objectStore("spaceKeys").delete("spaceKey:" + SP + ":" + kv); t.oncomplete = function(){ res(); }; t.onerror = function(){ rej(t.error); }; }); }
+      async function derivedOf(txId){ return (await DBx.list("transactions", function(t){ return t && t.derived === true && t.sourceTransactionId === txId; })).length; }
+
+      // ===== HOLD (solo missing-space-key) =====
+      await NS.setSyncSeq(SP, 0);
+      await K.createSpaceKey(SP, 3);
+      var key3 = await K.getSpaceKey(SP, 3), raw3 = await K.exportSpaceKey(SP, 3);
+      var mBefore = await memEnv(SP + ":m1", "Ada", 1, "rd");
+      var mAfter  = await memEnv(SP + ":m2", "Bea", 1, "rd");
+      var holdEnv = await C._encryptWith("member", { id: SP + ":mh", spaceId: SP, name: "Held", active: true, version: 1, deviceId: "rd", deleted: false }, key3, 3);
+      await hardDelKey(3);   // key v3 assente (rimozione reale) -> HOLD
+      var preSeq = await NS.getSyncSeq(SP);
+      var h1 = await NS._applyBatch(SP, space, SELF, [mBefore, holdEnv, mAfter], 10, {});
+      ok("HOLD: held=true, keyVersion 3", h1.held === true && h1.heldKeyVersion === 3);
+      ok("HOLD: record precedente applicato", (await DBx.get("spaceMembers", SP + ":m1")) != null);
+      ok("HOLD: record held NON applicato", (await DBx.get("spaceMembers", SP + ":mh")) == null);
+      ok("HOLD: record successivo NON applicato", (await DBx.get("spaceMembers", SP + ":m2")) == null);
+      ok("HOLD: cursor fermo prima dell'held", (await NS.getSyncSeq(SP)) === preSeq);
+      ok("HOLD: zero quarantine entry", (await NS.listQuarantine(SP)).length === 0);
+      await K.importSpaceKey(SP, 3, raw3);   // import key -> retry
+      var h2 = await NS._applyBatch(SP, space, SELF, [mBefore, holdEnv, mAfter], 10, {});
+      ok("HOLD retry: processing completo", h2.held === false);
+      ok("HOLD retry: held ora applicato", (await DBx.get("spaceMembers", SP + ":mh")) != null);
+      ok("HOLD retry: successivo applicato", (await DBx.get("spaceMembers", SP + ":m2")) != null);
+      ok("HOLD retry: cursor avanza a 10", (await NS.getSyncSeq(SP)) === 10);
+
+      // ===== CLASSIFICAZIONE =====
+      ok("classify: valido -> apply", (await NS._classifyEnvelope(SP, await memEnv(SP + ":cok", "Cok", 1, "rd"))).status === "apply");
+      var kvBad = Object.assign({}, await memEnv(SP + ":kx", "Kx", 1, "rd")); kvBad.keyVersion = 0;
+      ok("classify: keyVersion 0 -> quarantine keyVersion-invalid", (await NS._classifyEnvelope(SP, kvBad)).reason === "keyVersion-invalid");
+      var structBad = { protocolVersion: 1, spaceId: SP, recordId: "", recordType: "member", version: 1, deviceId: "x", keyVersion: 1, deleted: false, iv: "AA", ciphertext: "AA" };
+      ok("classify: recordId vuoto -> structure-invalid", (await NS._classifyEnvelope(SP, structBad)).reason === "structure-invalid");
+      // record causalmente completo (version 1) ma id "proj:*" -> il decrypted e' rifiutato dal boundary
+      var boundEnv = await memEnv("proj:" + SP + ":x", "Boundary", 1, "rd");
+      ok("classify: decrypted id proj: -> boundary-invalid", (await NS._classifyEnvelope(SP, boundEnv)).reason === "boundary-invalid");
+      var hcEnv = await C._encryptWith("member", { id: SP + ":hc", spaceId: SP, name: "Hc", active: true, version: 1, deviceId: "rd", deleted: false }, key3, 3);
+      await hardDelKey(3);
+      ok("classify: key assente (kv valida) -> hold", (await NS._classifyEnvelope(SP, hcEnv)).status === "hold");
+      await K.importSpaceKey(SP, 3, raw3);   // ripristina
+
+      // ===== QUARANTINE (batch) =====
+      await NS.setSyncSeq(SP, 0);
+      var vGood = await memEnv(SP + ":ok1", "Cid", 1, "rd");
+      var vGood2 = await memEnv(SP + ":ok2", "Dan", 1, "rd");
+      var badTx = tamper(await C.encryptSharedRecord("transaction", { id: SP + ":btx", spaceId: SP, type: "expense", amount: 1000, paidById: SELF, allocations: alloc(1000), allocationMode: "exact", date: "2026-08-01", version: 1, deviceId: "rd", deleted: false }));
+      var q1 = await NS._applyBatch(SP, space, SELF, [vGood, badTx, vGood2], 20, {});
+      ok("QUAR: entrambi i validi applicati", (await DBx.get("spaceMembers", SP + ":ok1")) != null && (await DBx.get("spaceMembers", SP + ":ok2")) != null);
+      ok("QUAR: cursor supera il quarantined (20)", (await NS.getSyncSeq(SP)) === 20 && q1.quarantined === 1);
+      var ql = (await NS.listQuarantine(SP)).filter(function(x){ return x.recordId === SP + ":btx"; });
+      ok("QUAR: una entry persistita", ql.length === 1 && ql[0].reason === "decrypt-failed");
+      var qe = ql[0];
+      ok("QUAR: entry senza plaintext/segreti", !("name" in qe) && !("amount" in qe) && !("allocations" in qe) && !("payload" in qe) && !("ciphertext" in qe) && !("iv" in qe) && typeof qe.ctHash === "string" && qe.ctHash.length === 64);
+      ok("QUAR: projection del bad record assente", (await DBx.get("transactions", SP + ":btx")) == null && (await derivedOf(SP + ":btx")) === 0);
+
+      // ===== PROJECTION dei validi (tx inbound con liability reale verso un 2o membro) =====
+      other = await SR.addMember(SP, { name: "Bea" });   // SP e' ready -> write consentito; split() usa 'other'
+      var TXID = SP + ":ptx";
+      var remoteEnv = await C.encryptSharedRecord("transaction", { id: TXID, spaceId: SP, type: "expense", amount: 10000, paidById: SELF, allocations: split(5000, 5000), allocationMode: "exact", date: "2026-08-01", version: 1, deviceId: "remoteZZ", deleted: false });
+      await NS.setSyncSeq(SP, 0);
+      await NS._applyBatch(SP, space, SELF, [remoteEnv], 30, {});
+      var appliedTx = await DBx.get("transactions", TXID);
+      ok("PROJ: tx inbound valido applicato", appliedTx != null && String(appliedTx.deviceId) === "remoteZZ" && appliedTx.version === 1);
+      ok("PROJ: proiezioni del valido presenti", (await derivedOf(TXID)) >= 1);
+
+      // ===== noProjection seam (join) intatto: tx che PRODURREBBE proiezione, ma con noProjection no =====
+      var npEnv = await C.encryptSharedRecord("transaction", { id: SP + ":np", spaceId: SP, type: "expense", amount: 2000, paidById: SELF, allocations: split(1000, 1000), allocationMode: "exact", date: "2026-08-02", version: 1, deviceId: "rd", deleted: false });
+      await NS._applyBatch(SP, space, SELF, [npEnv], 40, { noProjection: true });
+      ok("noProjection: source applicato", (await DBx.get("transactions", SP + ":np")) != null);
+      ok("noProjection: nessuna proiezione (seam attivo)", (await derivedOf(SP + ":np")) === 0);
+
+      // ===== IDEMPOTENCY / retry (stesso poisoned due volte) =====
+      await NS.setSyncSeq(SP, 0);
+      var poison = tamper(await C.encryptSharedRecord("transaction", { id: SP + ":idem", spaceId: SP, type: "expense", amount: 700, paidById: SELF, allocations: alloc(700), allocationMode: "exact", date: "2026-08-04", version: 1, deviceId: "rd", deleted: false }));
+      await NS._applyBatch(SP, space, SELF, [poison], 50, {});
+      await NS._applyBatch(SP, space, SELF, [poison], 50, {});   // full-recovery / retry
+      var idemList = (await NS.listQuarantine(SP)).filter(function(x){ return x.recordId === SP + ":idem"; });
+      ok("IDEMP: una sola entry logica", idemList.length === 1);
+      ok("IDEMP: attempts incrementato a 2", idemList[0].attempts === 2);
+
+      // ===== clearResolvedQuarantine (no skip cieco) =====
+      var beforeClear = (await NS.listQuarantine(SP)).length;
+      var cr1 = await NS.clearResolvedQuarantine(SP);
+      ok("clearResolved: NON rimuove entry irrisolte", cr1.removed === 0 && (await NS.listQuarantine(SP)).length === beforeClear);
+      var fixEnv = await C.encryptSharedRecord("transaction", { id: SP + ":btx", spaceId: SP, type: "expense", amount: 1000, paidById: SELF, allocations: alloc(1000), allocationMode: "exact", date: "2026-08-05", version: 5, deviceId: "fix", deleted: false });
+      await NS._applyBatch(SP, space, SELF, [fixEnv], 60, {});   // stato remoto valido supera il badTx
+      var cr2 = await NS.clearResolvedQuarantine(SP);
+      ok("clearResolved: rimuove SOLO la entry risolta", cr2.removed === 1 && (await NS.listQuarantine(SP)).filter(function(x){ return x.recordId === SP + ":btx"; }).length === 0);
+      ok("clearResolved: la entry irrisolta (idem) resta visibile", (await NS.listQuarantine(SP)).filter(function(x){ return x.recordId === SP + ":idem"; }).length === 1);
+
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    },
     _setTestPoison: function(v){ _poison = !!v; },
     _test: async function(){
       var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
