@@ -4104,6 +4104,7 @@ if ("serviceWorker" in navigator){
     // il legacyGroupId da solo non blocca piu' (un futuro cut-over legacy+native e' modellisticamente scrivibile).
     if (authorityEffettiva(sp) !== "native") throw new Error("spazio non scrivibile: authority " + String(authorityEffettiva(sp)));
     if (sp.status !== "active") throw new Error("spazio non active: status " + String(sp.status));
+    await verificaJoinReady(spaceId);   // F4/7F: join non ancora "ready" -> read-only
     // F4/3C: invariante selfMemberId effettivo su ogni write nativo (unica funzione canonica, vedi verificaSelf).
     // Il self deve essere solo IDENTIFICABILE nello spazio, non partecipare alla singola transazione.
     await verificaSelf(sp);
@@ -4347,6 +4348,7 @@ if ("serviceWorker" in navigator){
     if (sp.kind !== "experience" && sp.kind !== "ongoing") throw new Error("spazio non shared: kind " + sp.kind);
     // F4/6B: modifica consentita solo con authority native (coerente con spazioScrivibile).
     if (authorityEffettiva(sp) !== "native") throw new Error("spazio non modificabile: authority " + String(authorityEffettiva(sp)));
+    await verificaJoinReady(spaceId);   // F4/7F: rename/archive/restore/shareRule bloccati finche' join != ready
     return sp;
   }
   // Coerenza dell'identita' "io" per uno spazio nativo (fail-closed).
@@ -4355,6 +4357,13 @@ if ("serviceWorker" in navigator){
     var self = await db().get("spaceMembers", sp.selfMemberId);
     if (!self || self.deleted === true || self.spaceId !== sp.id) throw new Error("selfMemberId incoerente");
     return self;
+  }
+  // F4/7F — write guard persistente. Autorita' = meta joinState:<spaceId>. Uno spazio entrato via join
+  // (importing/awaiting-self/error) NON e' scrivibile finche' non e' "ready". Stato assente = spazio
+  // native-born locale o pre-7F -> scrivibile. Sopravvive al reload perche' vive in meta, non in RAM.
+  async function verificaJoinReady(spaceId){
+    var js = await db().meta.get("joinState:" + spaceId);
+    if (js && js !== "ready") throw new Error("spazio non pronto: join " + js);
   }
   async function caricaMembro(spaceId, memberId){
     if (!memberId) throw new Error("memberId richiesto");
@@ -5654,11 +5663,16 @@ if ("serviceWorker" in navigator){
   async function commitSourceWithProjection(space, sourceRecord, opts){
     if (!space || space.legacyGroupId) throw new Error("commit: spazio non valido/legacy");
     opts = opts || {};
-    var members = await window.sharedRuntime.listMembers(space.id);
     var now = Date.now();
-    var batch = await projectionBatchForSource(space, members, space.id, sourceRecord.id, (sourceRecord.deleted === true ? null : sourceRecord), now);
+    // F4/7F: opts.noProjection = FIRST PULL del join, prima del claim (self non ancora scelto):
+    // si scrive SOLO la source shared, nessuna proiezione Personale (verrebbe calcolata senza self).
+    var batch = [];
+    if (!opts.noProjection){
+      var members = await window.sharedRuntime.listMembers(space.id);
+      batch = await projectionBatchForSource(space, members, space.id, sourceRecord.id, (sourceRecord.deleted === true ? null : sourceRecord), now);
+    }
     var items = [{ store: "transactions", record: sourceRecord }].concat(batch);
-    if (!opts.noIntent && space.authority === "native"){
+    if (!opts.noIntent && !opts.noProjection && space.authority === "native"){
       var intent = await window.nativeSync._buildIntentItem("transaction", sourceRecord);   // encrypt (fail-closed se manca la key)
       if (intent) items.push(intent);
     }
@@ -6619,6 +6633,7 @@ if ("serviceWorker" in navigator){
     var pcs = [{ store: "spaces", id: space.id, mustBeAbsent: true }, { store: "spaceMembers", id: member.id, mustBeAbsent: true }];
     await window.personalProjection._scriviProiezioni(items, pcs);   // atomico: space+member+key+outbox
     await ensureSpaceCapability(space.id);   // F4/7E2: capability random 32B generata insieme alla key E2EE
+    await setJoinState(space.id, "ready");   // F4/7F: uno spazio creato localmente e' scrivibile da subito
     poke(space.id);
   }
   var _poison = false;
@@ -6728,10 +6743,18 @@ if ("serviceWorker" in navigator){
   async function getSyncSeq(spaceId){ var v = await DB().meta.get("syncSeq:" + spaceId); return Number.isInteger(v) ? v : 0; }
   async function setSyncSeq(spaceId, seq){ await DB().meta.set("syncSeq:" + spaceId, seq | 0); return seq | 0; }
 
+  /* F4/7F — stato del join PERSISTENTE (autorita' in meta, mai solo in RAM). Valori canonici:
+     importing (import key/cap + first pull in corso) -> awaiting-self (pull completo, self non scelto)
+     -> ready (claim + rebuild riusciti). error = fallimento recuperabile (retry-safe: re-invocare join). */
+  var JOIN_STATES = { importing: 1, "awaiting-self": 1, ready: 1, error: 1 };
+  async function getJoinState(spaceId){ return (await DB().meta.get("joinState:" + spaceId)) || null; }
+  async function setJoinState(spaceId, st){ if (!JOIN_STATES[st]) throw new Error("join-state-invalido: " + st); await DB().meta.set("joinState:" + spaceId, st); return st; }
+
   function identico(local, remote){ return local && local.version === remote.version && String(local.deviceId) === String(remote.deviceId) && (local.deleted === true) === (remote.deleted === true); }
 
   // Applica UN record remoto (winner) con CAS + retry bounded. Ritorna "applied"|"local-wins"|"identical".
-  async function applyOne(space, self, recordType, remote){
+  async function applyOne(space, self, recordType, remote, opts){
+    opts = opts || {};
     var store = SYNC_TYPES[recordType];
     for (var attempt = 0; attempt < 6; attempt++){
       var local = await DB().get(store, remote.id);
@@ -6740,6 +6763,7 @@ if ("serviceWorker" in navigator){
       if (winner !== remote) return "local-wins";                            // locale causalmente superiore: intent outbound resta
       var expect = local ? { version: local.version, deviceId: local.deviceId, deleted: local.deleted === true } : null;
       var o = { noIntent: true, expect: expect, expectAbsent: !local };
+      if (opts.noProjection) o.noProjection = true;                          // F4/7F: FIRST PULL join, nessuna proiezione Personale
       try {
         if (recordType === "transaction"){
           var src = Object.assign({}, remote);
@@ -6763,7 +6787,8 @@ if ("serviceWorker" in navigator){
   }
 
   // Processa un batch: pre-decrypt/validate TUTTO, poi apply in type-order, poi cursor.
-  async function applyBatch(spaceId, space, self, records, serverSeq){
+  async function applyBatch(spaceId, space, self, records, serverSeq, opts){
+    opts = opts || {};
     var decoded = [];
     for (var i = 0; i < records.length; i++){
       var env = records[i];
@@ -6776,7 +6801,7 @@ if ("serviceWorker" in navigator){
     }
     decoded.sort(function(a, b){ return TYPE_ORDER[a.recordType] - TYPE_ORDER[b.recordType]; });
     var applied = 0;
-    for (var j = 0; j < decoded.length; j++){ var res = await applyOne(space, self, decoded[j].recordType, decoded[j].rec); if (res === "applied") applied++; }
+    for (var j = 0; j < decoded.length; j++){ var res = await applyOne(space, self, decoded[j].recordType, decoded[j].rec, opts); if (res === "applied") applied++; }
     await setSyncSeq(spaceId, serverSeq);   // cursor SOLO dopo l'intero batch
     return { ok: true, seq: serverSeq, records: decoded.length, applied: applied };
   }
@@ -6815,6 +6840,153 @@ if ("serviceWorker" in navigator){
     return await applyBatch(spaceId, space, self, body.records, body.seq);
   }
 
+  /* F4 · Passo 7F — Native Invite / Join / claimSelf.
+     L'invito trasporta SOLO il materiale d'accesso allo spazio: spaceId, spaceCap (32B),
+     chiave AES raw (base64url) e keyVersion. Nessuna identita' (nome/foto/pay/nome dispositivo):
+     l'identita' del joiner e' un membro GIA' presente nello spazio, scelto via claimSelf. */
+  var INVITE_PREFIX = "CALCULON-INVITE-1.";
+  function b64urlToBytes(s){
+    s = String(s).replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "=";
+    var bin = atob(s), out = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  function inviteEncode(obj){ return INVITE_PREFIX + b64urlBytes(new TextEncoder().encode(JSON.stringify(obj))); }
+  // Estrae il token accettando: token nudo, "invite=<token>", oppure una URL col token nel FRAGMENT
+  // (#...). Se e' presente un '#', si guarda SOLO il fragment: cosi' key/cap non vengono mai raccolti
+  // da una query string (ne' vi finiscono, dato che createInvite emette il token nudo).
+  function extractInviteToken(input){
+    if (typeof input !== "string") throw new Error("invite-malformed");
+    var s = input.trim();
+    var hash = s.indexOf("#");
+    if (hash >= 0) s = s.slice(hash + 1);
+    if (s.indexOf("invite=") === 0) s = s.slice(7);
+    var p = s.indexOf(INVITE_PREFIX);
+    if (p < 0) throw new Error("invite-malformed");
+    return s.slice(p).trim();
+  }
+  function inviteDecode(str){
+    var tok = extractInviteToken(str);
+    var bytes; try { bytes = b64urlToBytes(tok.slice(INVITE_PREFIX.length)); } catch(e){ throw new Error("invite-malformed"); }
+    try { return JSON.parse(new TextDecoder().decode(bytes)); } catch(e){ throw new Error("invite-malformed"); }
+  }
+
+  // createInvite: [device A] produce il token d'invito per uno spazio native-born che ha gia' key+cap.
+  async function createInvite(spaceId){
+    var sp = await DB().get("spaces", spaceId);
+    if (!sp || sp.deleted === true) throw new Error("spazio inesistente: " + spaceId);
+    if (!nativeBorn(sp)) throw new Error("invito solo su spazi native-born");
+    var cap = await ensureSpaceCapability(spaceId);                       // idempotente
+    var kv = Number.isInteger(sp.keyVersion) ? sp.keyVersion : 1;
+    var keyRaw = await window.spaceKeys.exportSpaceKey(spaceId, kv);      // throws missing-space-key (fail-closed)
+    return inviteEncode({ v: 1, s: spaceId, c: cap, k: keyRaw, kv: kv });
+  }
+
+  // parseInvite: [device B] valida forma + materiale crittografico. Fail-closed su qualunque campo storto.
+  function parseInvite(str){
+    var o = inviteDecode(str);
+    if (!o || o.v !== 1) throw new Error("invite-version");
+    if (typeof o.s !== "string" || o.s === "" || o.s === "personal:local" || o.s.length > 512) throw new Error("invite-spaceId");
+    if (typeof o.c !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(o.c)) throw new Error("invite-cap");
+    if (typeof o.k !== "string" || !/^[A-Za-z0-9_-]+$/.test(o.k)) throw new Error("invite-key");
+    var kb; try { kb = b64urlToBytes(o.k); } catch(e){ throw new Error("invite-key"); }
+    if (kb.length !== 32) throw new Error("invite-key-length");           // AES-256 raw = 32 byte
+    if (!Number.isInteger(o.kv) || o.kv < 1) throw new Error("invite-keyVersion");
+    return { spaceId: o.s, spaceCap: o.c, keyRaw: o.k, keyVersion: o.kv };
+  }
+
+  // FIRST PULL del join: GET since=0, applica i record shared SENZA proiezioni Personali (self non ancora
+  // scelto). Non richiede selfMemberId. Richiede shell locale + cap + key gia' presenti.
+  async function joinPull(spaceId){
+    var space = await DB().get("spaces", spaceId);
+    if (!space || space.deleted === true) throw new Error("join: shell assente");
+    if (!nativeBorn(space)) throw new Error("join: spazio non native-born");
+    var cap = await getSpaceCapability(spaceId); if (!cap) throw new Error("join: capability assente");
+    var res;
+    try { res = await fetch(_apiBase + "/api/space/" + encodeURIComponent(spaceId) + "?since=0", { headers: { "Authorization": "Bearer " + cap } }); }
+    catch(e){ return { ok: false, reason: "offline" }; }
+    if (res.status === 401 || res.status === 403) throw new Error("auth-error");
+    if (res.status >= 500) return { ok: false, reason: "server-5xx" };
+    if (res.status !== 200) return { ok: false, reason: "http-" + res.status };
+    var body; try { body = await res.json(); } catch(e){ throw new Error("malformed-body"); }
+    if (!body || typeof body.seq !== "number" || !Array.isArray(body.records)) throw new Error("malformed-body");
+    return await applyBatch(spaceId, space, null, body.records, body.seq, { noProjection: true });
+  }
+
+  // joinSpace: [device B] orchestrazione fino a "awaiting-self". Stato persistente in meta:
+  // importing (prima di toccare key/cap) -> awaiting-self (first pull completo). Fallimento -> error
+  // (retry-safe: re-invocare joinSpace con lo stesso invito ripete import+pull idempotenti). Import key +
+  // cap -> shell locale (native, selfMemberId null) -> first pull. Ritorna la lista membri per il claim.
+  async function joinSpace(inviteStr){
+    var inv = parseInvite(inviteStr);
+    var sid = inv.spaceId;
+    var existing = await DB().get("spaces", sid);
+    var st0 = await getJoinState(sid);
+    if (existing && existing.deleted !== true && nativeBorn(existing) && existing.selfMemberId && st0 === "ready") throw new Error("gia-membro");
+    await setJoinState(sid, "importing");   // autorita' persistente PRIMA di import/pull (crash -> resta importing)
+    try {
+      await setSpaceCapability(sid, inv.spaceCap);
+      await window.spaceKeys.importSpaceKey(sid, inv.keyVersion, inv.keyRaw);   // idempotente/sovrascrive: retry-safe
+      if (!existing || existing.deleted === true){
+        var shell = { id: sid, name: "", kind: "experience", status: "active", currency: "EUR",
+          version: 0, deviceId: dev(), keyVersion: inv.keyVersion, deleted: false,
+          authority: "native", legacyGroupId: null, selfMemberId: null };   // selfMemberId null = join non completato
+        await DB().put("spaces", shell);
+      }
+      var pulled = await joinPull(sid);
+      if (!pulled || pulled.ok === false) throw new Error("join-pull-failed:" + (pulled && pulled.reason));
+      await setJoinState(sid, "awaiting-self");
+      var members = await DB().list("spaceMembers", function(m){ return m && m.spaceId === sid && m.deleted !== true; });
+      return { spaceId: sid, seq: pulled.seq, state: "awaiting-self", selfMemberId: null,
+        members: members.map(function(m){ return { id: m.id, name: m.name, active: m.active !== false }; }) };
+    } catch(e){
+      await setJoinState(sid, "error");
+      throw e;
+    }
+  }
+
+  // claimSelf: [device B] sceglie il proprio membro fra quelli gia' presenti, poi finalizza (rebuild +
+  // "ready"). selfMemberId e' LOCAL: nessun bump causale, nessun intent outbound.
+  //  - stesso self gia' presente -> idempotente (prosegue a rebuild+ready, resume-safe);
+  //  - self diverso gia' presente -> existing-self-conflict;
+  //  - membro inattivo/tombstone/cross-space/inesistente -> fail closed;
+  //  - se il rebuild fallisce, lo stato resta NON "ready" (retry: richiamare claimSelf con lo stesso self).
+  async function claimSelf(spaceId, memberId){
+    var sp = await DB().get("spaces", spaceId);
+    if (!sp || sp.deleted === true) throw new Error("spazio inesistente: " + spaceId);
+    if (!nativeBorn(sp)) throw new Error("claim: spazio non native-born");
+    var m = await DB().get("spaceMembers", memberId);
+    if (!m || m.deleted === true || m.spaceId !== spaceId || m.active === false) throw new Error("claim-member-invalid");
+    if (sp.selfMemberId){
+      if (sp.selfMemberId !== memberId) throw new Error("existing-self-conflict");
+      // stesso self: idempotente, si prosegue verso rebuild+ready
+    } else {
+      sp.selfMemberId = memberId;              // LOCAL: nessun bump version, nessun intent
+      await DB().put("spaces", sp);
+    }
+    await window.personalProjection.rebuildSpace(spaceId);   // fallisce -> "ready" NON viene impostato
+    await setJoinState(spaceId, "ready");
+    return { spaceId: spaceId, selfMemberId: memberId, state: "ready" };
+  }
+
+  // joinState: superficie di sola lettura sullo stato persistente (meta). "pending" = importing|awaiting-self.
+  window.joinState = {
+    get: getJoinState,
+    isPending: async function(spaceId){ var st = await getJoinState(spaceId); return st === "importing" || st === "awaiting-self"; },
+    pending: async function(){
+      var spaces = await DB().list("spaces", function(sp){ return sp && sp.deleted !== true && sp.authority === "native" && !sp.legacyGroupId; });
+      var out = [];
+      for (var i = 0; i < spaces.length; i++){
+        var sp = spaces[i];
+        var st = await getJoinState(sp.id);
+        if (st !== "importing" && st !== "awaiting-self") continue;
+        var members = await DB().list("spaceMembers", function(m){ return m && m.spaceId === sp.id && m.deleted !== true; });
+        out.push({ spaceId: sp.id, name: sp.name || "", state: st, memberCandidates: members.map(function(m){ return { id: m.id, name: m.name }; }) });
+      }
+      return out;
+    }
+  };
+
   window.nativeSync = {
     bootstrapSpace: bootstrapSpace,
     setSpaceCapability: setSpaceCapability,
@@ -6832,6 +7004,13 @@ if ("serviceWorker" in navigator){
     _commitSharedRecordWithIntent: commitSharedRecordWithIntent,
     _buildIntentItem: buildIntentItem,
     _intentItemFromEnvelope: intentItemFromEnvelope,
+    createInvite: createInvite,
+    parseInvite: parseInvite,
+    joinSpace: joinSpace,
+    joinPull: joinPull,
+    claimSelf: claimSelf,
+    getJoinState: getJoinState,
+    setJoinState: setJoinState,
     _setTestPoison: function(v){ _poison = !!v; },
     _test: async function(){
       var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
@@ -7058,6 +7237,110 @@ if ("serviceWorker" in navigator){
       await DBx.close();
       ok("reload: tx vincente persistita", (await DBx.get("transactions", tE)).note === "vincente");
       ok("reload: space vincente persistito", (await DBx.get("spaces", SP)).name === "CAS Vince");
+
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    }
+  };
+
+  // F4/7F — superficie join dedicata (le stesse funzioni sono anche su nativeSync) + test offline.
+  window.nativeJoin = {
+    createInvite: createInvite, parseInvite: parseInvite,
+    joinSpace: joinSpace, joinPull: joinPull, claimSelf: claimSelf,
+    _test: async function(){
+      var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
+      async function throwsMsg(fn){ try { await fn(); return null; } catch(e){ return (e && e.message) || "err"; } }
+      var SR = window.sharedRuntime, DBx = window.calculonDB, K = window.spaceKeys;
+
+      // --- roundtrip createInvite -> parseInvite su spazio nativo reale ---
+      var made = await SR.createSpace({ kind: "experience", name: "Invito7F", selfName: "A" });
+      var S = made.spaceId;
+      var token = await createInvite(S);
+      ok("token ha prefisso invito", typeof token === "string" && token.indexOf(INVITE_PREFIX) === 0);
+      var inv = parseInvite(token);
+      ok("parse: spaceId", inv.spaceId === S);
+      ok("parse: cap 43 char base64url", /^[A-Za-z0-9_-]{43}$/.test(inv.spaceCap));
+      ok("parse: cap == capability locale", inv.spaceCap === (await window.nativeSync.getSpaceCapability(S)));
+      ok("parse: keyRaw decodifica a 32 byte", b64urlToBytes(inv.keyRaw).length === 32);
+      ok("parse: keyVersion intero >=1", Number.isInteger(inv.keyVersion) && inv.keyVersion >= 1);
+      ok("parse: keyRaw == export locale", inv.keyRaw === (await K.exportSpaceKey(S, inv.keyVersion)));
+      var decoded = JSON.parse(new TextDecoder().decode(b64urlToBytes(token.slice(INVITE_PREFIX.length))));
+      ok("payload: SOLO chiavi d'accesso (no identita')", JSON.stringify(Object.keys(decoded).sort()) === JSON.stringify(["c", "k", "kv", "s", "v"]));
+
+      // --- parseInvite fail-closed ---
+      ok("malformed: stringa vuota", (await throwsMsg(function(){ return parseInvite(""); })) === "invite-malformed");
+      ok("malformed: prefisso errato", (await throwsMsg(function(){ return parseInvite("XYZ." + token.slice(INVITE_PREFIX.length)); })) !== null);
+      ok("malformed: cap non 32B", (await throwsMsg(function(){ return parseInvite(inviteEncode({ v: 1, s: S, c: "corta", k: inv.keyRaw, kv: 1 })); })) === "invite-cap");
+      ok("malformed: key non 32B", (await throwsMsg(function(){ return parseInvite(inviteEncode({ v: 1, s: S, c: inv.spaceCap, k: b64urlBytes(new Uint8Array(16)), kv: 1 })); })) === "invite-key-length");
+      ok("malformed: keyVersion < 1", (await throwsMsg(function(){ return parseInvite(inviteEncode({ v: 1, s: S, c: inv.spaceCap, k: inv.keyRaw, kv: 0 })); })) === "invite-keyVersion");
+      ok("malformed: spaceId personale", (await throwsMsg(function(){ return parseInvite(inviteEncode({ v: 1, s: "personal:local", c: inv.spaceCap, k: inv.keyRaw, kv: 1 })); })) === "invite-spaceId");
+
+      var NS = window.nativeSync, PJ = window.personalProjection;
+
+      // --- INVITE SECURITY: nessuna query string, fragment/URL accettati, errori senza segreti ---
+      ok("createInvite: nessuna query string", token.indexOf("?") < 0 && token.indexOf("&") < 0);
+      ok("parse da token nudo", parseInvite(token).spaceId === S);
+      ok("parse da #fragment", parseInvite("#" + token).spaceId === S);
+      ok("parse da URL con #invite=", parseInvite("https://cassa.example/j#invite=" + token).spaceId === S);
+      var errCap = await throwsMsg(function(){ return parseInvite(inviteEncode({ v: 1, s: S, c: "corta", k: inv.keyRaw, kv: 1 })); });
+      ok("errore parse generico (non stampa segreti)", errCap === "invite-cap" && errCap.indexOf(inv.keyRaw) < 0 && errCap.indexOf(inv.spaceCap) < 0);
+
+      // --- STATO PERSISTENTE: createSpace -> ready; valore non canonico rifiutato ---
+      ok("createSpace -> joinState ready", (await NS.getJoinState(S)) === "ready");
+      ok("setJoinState valore non canonico -> throw", (await throwsMsg(function(){ return NS.setJoinState(S, "bogus"); })) === "join-state-invalido: bogus");
+
+      // --- WRITE GUARD: awaiting-self blocca i write; ready li riabilita ---
+      var made2 = await SR.createSpace({ kind: "ongoing", name: "Guard7F", selfName: "G" });
+      var G = made2.spaceId;
+      await NS.setJoinState(G, "awaiting-self");
+      ok("awaiting-self blocca addMember", /non pronto/.test(await throwsMsg(function(){ return SR.addMember(G, { name: "X" }); }) || ""));
+      ok("awaiting-self blocca renameSpace", /non pronto/.test(await throwsMsg(function(){ return SR.renameSpace(G, "Y"); }) || ""));
+      ok("awaiting-self blocca archiveSpace", /non pronto/.test(await throwsMsg(function(){ return SR.archiveSpace(G); }) || ""));
+      ok("awaiting-self blocca createExpense", /non pronto/.test(await throwsMsg(function(){ return SR.createExpense(G, { amount: 100, paidById: made2.selfMemberId, allocationMode: "exact", parts: {}, date: "2026-08-01" }); }) || ""));
+      await NS.setJoinState(G, "importing");
+      ok("importing blocca addMember", /non pronto/.test(await throwsMsg(function(){ return SR.addMember(G, { name: "X" }); }) || ""));
+      await NS.setJoinState(G, "ready");
+      var addedOK = await throwsMsg(function(){ return SR.addMember(G, { name: "Dopo" }); });
+      ok("ready riabilita addMember", addedOK === null);
+
+      // --- CLAIM SAFETY (shell manuale, offline) ---
+      var suffix = S.slice(-6);
+      var CS = "space:claim7f-" + suffix;
+      await DBx.put("spaces", { id: CS, name: "Claim", kind: "experience", status: "active", currency: "EUR", version: 5, deviceId: "dz", keyVersion: 1, deleted: false, authority: "native", legacyGroupId: null, selfMemberId: null });
+      await DBx.put("spaceMembers", { id: CS + ":m1", spaceId: CS, name: "Ada", active: true, deleted: false, version: 1, deviceId: "dz" });
+      await DBx.put("spaceMembers", { id: CS + ":m2", spaceId: CS, name: "Bea", active: true, deleted: false, version: 1, deviceId: "dz" });
+      await DBx.put("spaceMembers", { id: CS + ":m3", spaceId: CS, name: "Off", active: false, deleted: false, version: 1, deviceId: "dz" });
+      await DBx.put("spaceMembers", { id: "space:other7f:mX", spaceId: "space:other7f", name: "Z", active: true, deleted: false, version: 1, deviceId: "dz" });
+      await NS.setJoinState(CS, "awaiting-self");
+      ok("joinState.isPending true in awaiting-self", (await window.joinState.isPending(CS)) === true);
+      ok("joinState.pending elenca CS con 3 candidati vivi", (await window.joinState.pending()).some(function(p){ return p.spaceId === CS && p.memberCandidates.length === 3; }));
+      var outBefore = (await DBx.list("syncOutbox", function(x){ return x && x.spaceId === CS; })).length;
+      ok("claim membro inattivo -> fail closed", (await throwsMsg(function(){ return claimSelf(CS, CS + ":m3"); })) === "claim-member-invalid");
+      ok("claim membro inesistente -> fail closed", (await throwsMsg(function(){ return claimSelf(CS, CS + ":ghost"); })) === "claim-member-invalid");
+      ok("claim membro cross-space -> fail closed", (await throwsMsg(function(){ return claimSelf(CS, "space:other7f:mX"); })) === "claim-member-invalid");
+      var c1 = await claimSelf(CS, CS + ":m2");
+      ok("claim valido -> ready", c1.state === "ready" && (await NS.getJoinState(CS)) === "ready");
+      ok("claim imposta selfMemberId", (await DBx.get("spaces", CS)).selfMemberId === CS + ":m2");
+      ok("claim NON bumpa version", (await DBx.get("spaces", CS)).version === 5);
+      ok("claim NON genera intent", (await DBx.list("syncOutbox", function(x){ return x && x.spaceId === CS; })).length === outBefore);
+      ok("re-claim stesso self -> idempotente ready", (await claimSelf(CS, CS + ":m2")).state === "ready");
+      ok("claim self diverso -> existing-self-conflict", (await throwsMsg(function(){ return claimSelf(CS, CS + ":m1"); })) === "existing-self-conflict");
+      ok("joinState.isPending false dopo ready", (await window.joinState.isPending(CS)) === false);
+
+      // --- RESUME: claim persistito ma rebuild fallito -> NON ready; resume -> ready ---
+      var RS = "space:resume7f-" + suffix;
+      await DBx.put("spaces", { id: RS, name: "Resume", kind: "experience", status: "active", currency: "EUR", version: 2, deviceId: "dz", keyVersion: 1, deleted: false, authority: "native", legacyGroupId: null, selfMemberId: null });
+      await DBx.put("spaceMembers", { id: RS + ":m1", spaceId: RS, name: "Uno", active: true, deleted: false, version: 1, deviceId: "dz" });
+      await NS.setJoinState(RS, "awaiting-self");
+      var origRebuild = PJ.rebuildSpace;
+      PJ.rebuildSpace = async function(){ throw new Error("rebuild-simulato-fallito"); };
+      var rebFail = await throwsMsg(function(){ return claimSelf(RS, RS + ":m1"); });
+      PJ.rebuildSpace = origRebuild;
+      ok("rebuild fallito -> propagato", rebFail === "rebuild-simulato-fallito");
+      ok("self persistito nonostante rebuild fallito", (await DBx.get("spaces", RS)).selfMemberId === RS + ":m1");
+      ok("stato NON ready dopo rebuild fallito", (await NS.getJoinState(RS)) === "awaiting-self");
+      var resumed = await claimSelf(RS, RS + ":m1");   // resume idempotente
+      ok("resume completa -> ready", resumed.state === "ready" && (await NS.getJoinState(RS)) === "ready");
 
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
