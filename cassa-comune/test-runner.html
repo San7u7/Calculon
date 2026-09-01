@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calculon F4 — Hermetic Test Harness</title>
+<style>
+  body{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;margin:16px;color:#222;background:#fafafa}
+  h1{font-size:15px;margin:0 0 8px}
+  #out{white-space:pre-wrap;background:#fff;border:1px solid #ddd;border-radius:6px;padding:12px}
+  .pass{color:#137333}.fail{color:#c5221f;font-weight:600}
+</style>
+</head>
+<body>
+<h1>Calculon · F4 hermetic test harness</h1>
+<div id="out"></div>
+
+<!--
+  7G-T HERMETIC HARNESS (test/infra only — nessuna dipendenza dal codice di prodotto,
+  product-diff = 0). Obiettivo: eseguire tutte le suite F4 (_test*) da uno stato IndexedDB
+  isolato e VUOTO, in modo hermetic / repeatable / order-independent / production-data-safe.
+
+  ISOLAMENTO
+   - Deve girare SU UN'ORIGINE DEDICATA AI TEST (porta separata, es. :8799) che l'app reale
+     non usa. L'IndexedDB e' per-origine: cancellare il DB "calculon" su questa origine NON
+     tocca alcun dato dell'app reale (che vive su un'altra origine).
+   - Ogni suite gira su un DB "calculon" appena cancellato -> hermetic e order-independent.
+
+  SERVICE WORKER / CACHE (deterministico sul codice corrente)
+   - Il SW dell'app serve le NAVIGAZIONI da cache con ignoreSearch:true: un semplice
+     cache-bust non basterebbe. Per questo, PRIMA DI OGNI load dell'iframe, de-registriamo
+     tutti i SW e svuotiamo le cache: la navigazione dell'iframe risulta NON controllata ->
+     va in rete -> carica index.html CORRENTE. Ripetere runAllF4() NON ri-naviga questa
+     pagina runner (evita che il SW la dirotti su index.html).
+
+  SICUREZZA DATI
+   - Cancella ESCLUSIVAMENTE il DB IndexedDB "calculon" e le cache/SW di QUESTA origine.
+     Nessuna scrittura sul prodotto, nessun ramo if(test) nei write-path dell'app.
+-->
+<script>
+"use strict";
+var DB_NAME = "calculon";
+// Moduli che possono esporre metodi _test* (scansione a runtime: niente hardcoding delle suite).
+var MODULES = ["calculonDB","sharedRuntime","personalProjection","nativeSyncBoundary","spaceKeys","nativeCrypto","syncOutbox","nativeSync","nativeJoin"];
+var outEl = document.getElementById("out");
+function log(s, cls){ var span = document.createElement("span"); if (cls) span.className = cls; span.textContent = s + "\n"; outEl.appendChild(span); }
+
+function deleteDB(name){
+  return new Promise(function(resolve){
+    var settled = false, done = function(v){ if(!settled){ settled = true; resolve(v); } };
+    var req = indexedDB.deleteDatabase(name);
+    req.onsuccess = function(){ done("deleted"); };
+    req.onerror   = function(){ done("error"); };
+    req.onblocked = function(){ /* una connessione e' ancora aperta: attende, poi timeout sotto */ };
+    setTimeout(function(){ done("timeout"); }, 4000);
+  });
+}
+async function killServiceWorkers(){
+  try { var regs = await navigator.serviceWorker.getRegistrations(); for (var i=0;i<regs.length;i++) await regs[i].unregister(); } catch(e){}
+  try { if (window.caches){ var ks = await caches.keys(); for (var j=0;j<ks.length;j++) await caches.delete(ks[j]); } } catch(e){}
+}
+async function closeAppDB(win){ try { if (win && win.calculonDB && win.calculonDB.close) await win.calculonDB.close(); } catch(e){} }
+
+var _bust = 0;
+function loadApp(){
+  return new Promise(function(resolve, reject){
+    var old = document.getElementById("app"); if (old) old.remove();
+    var ifr = document.createElement("iframe");
+    ifr.id = "app";
+    ifr.setAttribute("style", "position:absolute;left:-9999px;top:0;width:2px;height:2px;border:0");
+    ifr.src = "index.html?harness=" + (++_bust);
+    ifr.onload = function(){
+      var win = ifr.contentWindow, t0 = performance.now();
+      (function poll(){
+        var ready = win.calculonDB && win.sharedRuntime && win.personalProjection && win.nativeSyncBoundary && win.nativeCrypto && win.nativeSync && win.nativeJoin;
+        if (ready){ resolve(win); return; }
+        if (performance.now() - t0 > 20000){ reject(new Error("app non pronta (timeout moduli)")); return; }
+        setTimeout(poll, 40);
+      })();
+    };
+    ifr.onerror = function(){ reject(new Error("iframe load error")); };
+    document.body.appendChild(ifr);
+  });
+}
+
+function discoverSuites(win){
+  var suites = [];
+  for (var m=0;m<MODULES.length;m++){
+    var name = MODULES[m], obj = win[name];
+    if (!obj) continue;
+    for (var k in obj){ if (Object.prototype.hasOwnProperty.call(obj,k) && /^_test/.test(k) && typeof obj[k] === "function") suites.push({ mod:name, key:k }); }
+  }
+  suites.sort(function(a,b){ return (a.mod+"."+a.key).localeCompare(b.mod+"."+b.key); });
+  return suites;
+}
+
+// Esegue UNA suite su un DB PRISTINO: SW off -> DB cancellato -> app fresca -> run.
+async function runOne(mod, key){
+  var prev = document.getElementById("app");
+  if (prev){ await closeAppDB(prev.contentWindow); prev.remove(); }
+  await killServiceWorkers();      // navigazione non controllata -> codice corrente
+  await deleteDB(DB_NAME);         // stato pristino
+  var win = await loadApp();
+  try {
+    var res = await win[mod][key]();
+    return { suite: mod+"."+key, total:res.total|0, passed:res.passed|0, failed:res.failed|0, fails:(res.fails||[]).map(function(f){ return f && f.name ? f.name : String(f); }) };
+  } catch(e){
+    return { suite: mod+"."+key, total:0, passed:0, failed:1, fails:["THREW: " + (e && e.message ? e.message : String(e))] };
+  }
+}
+
+async function runAllF4(opts){
+  opts = opts || {};
+  var label = opts.label || "run";
+  log("\n===== " + label + " =====");
+  await killServiceWorkers();
+  await deleteDB(DB_NAME);
+  var probe = await loadApp();
+  var suites = discoverSuites(probe);
+  await closeAppDB(probe); var pf = document.getElementById("app"); if (pf) pf.remove();
+  if (opts.only) suites = suites.filter(function(s){ return opts.only.indexOf(s.mod)>=0 || opts.only.indexOf(s.mod+"."+s.key)>=0; });
+  if (opts.order === "reverse") suites.reverse();
+  if (typeof opts.orderFn === "function") suites = opts.orderFn(suites.slice());
+
+  var results = [];
+  for (var i=0;i<suites.length;i++){
+    var r = await runOne(suites[i].mod, suites[i].key);
+    results.push(r);
+    log((r.failed ? "FAIL  " : "pass  ") + r.suite + "  " + r.passed + "/" + r.total + (r.failed ? ("   <" + r.fails.join("; ") + ">") : ""), r.failed ? "fail" : "pass");
+  }
+  var totals = results.reduce(function(a,r){ return { total:a.total+r.total, passed:a.passed+r.passed, failed:a.failed+r.failed }; }, {total:0,passed:0,failed:0});
+  var summary = { label:label, order:(opts.order||"default"), count:results.length, totals:totals, allGreen:(totals.failed===0), suites:results.map(function(r){ return r.suite; }), details:results };
+  log("TOTAL " + totals.passed + "/" + totals.total + "  suites=" + results.length + "  " + (summary.allGreen ? "ALL GREEN" : "HAS FAILURES"), summary.allGreen ? "pass" : "fail");
+  await killServiceWorkers();   // teardown: lascia l'origine pulita per il prossimo run/navigazione
+  window.__F4 = summary;
+  (window.__F4_RUNS = window.__F4_RUNS || []).push(summary);
+  return summary;
+}
+window.runAllF4 = runAllF4;
+window.__F4_READY = false;
+
+// Auto-run al load (ordine di default). I run successivi si lanciano con window.runAllF4(...)
+// SENZA ri-navigare questa pagina (evita l'hijack del SW sulla pagina runner).
+runAllF4({ label: "auto (default order)" })
+  .then(function(){ window.__F4_READY = true; })
+  .catch(function(e){ log("HARNESS ERROR: " + (e && e.message ? e.message : String(e)), "fail"); window.__F4 = { error: String(e && e.message ? e.message : e) }; window.__F4_READY = true; });
+</script>
+</body>
+</html>
