@@ -4349,13 +4349,18 @@ if ("serviceWorker" in navigator){
     // F4/6B: modifica consentita solo con authority native (coerente con spazioScrivibile).
     if (authorityEffettiva(sp) !== "native") throw new Error("spazio non modificabile: authority " + String(authorityEffettiva(sp)));
     await verificaJoinReady(spaceId);   // F4/7F: rename/archive/restore/shareRule bloccati finche' join != ready
+    await verificaSelf(sp);             // F4/7G-Self: write Shared richiedono join ready AND self active (self-revoked)
     return sp;
   }
   // Coerenza dell'identita' "io" per uno spazio nativo (fail-closed).
   async function verificaSelf(sp){
     if (!sp.selfMemberId) throw new Error("selfMemberId assente: spazio nativo incoerente");
     var self = await db().get("spaceMembers", sp.selfMemberId);
-    if (!self || self.deleted === true || self.spaceId !== sp.id) throw new Error("selfMemberId incoerente");
+    if (self && self.spaceId !== sp.id) throw new Error("selfMemberId incoerente");   // cross-space: incoerenza vera (non revoca)
+    // F4/7G-Self — REVOCA APPLICATIVA (cooperative-client, NON crittografica): self assente/tombstone/
+    // inattivo -> write Shared bloccate con errore stabile "self-revoked". Il sync inbound (pull/decrypt/
+    // apply/read/diagnostica/reclaim) resta consentito: qui si guardano SOLO le write.
+    if (!self || self.deleted === true || self.active === false) throw new Error("self-revoked");
     return self;
   }
   // F4/7F — write guard persistente. Autorita' = meta joinState:<spaceId>. Uno spazio entrato via join
@@ -4909,13 +4914,14 @@ if ("serviceWorker" in navigator){
       await DB.put("spaceMembers", { id: SD+":s", spaceId: SD, name: "S", active: true, deleted: true });
       await DB.put("spaceMembers", mem(SD, "m"));
       ok("3C: self member deleted -> respinto", await throwsA(function(){ return SR.createExpense(SD, { date: "2026-08-01", amount:100, paidById:SD+":m", allocationMode:"equal", parts:(function(){var p={};p[SD+":m"]=1;return p;})() }); }));
-      // self INATTIVO ma identificabile e spazio active: regola canonica 3B = self resta identita' (write 3A consentito);
-      // e la 3B continua a impedire l'archiviazione del self.
+      // F4/7G-Self SUPERA la 3B per il self INATTIVO: selfStatus(inattivo) = revoked -> write Shared read-only
+      // (self-revoked). Coerente col modello: l'auto-archiviazione del self resta VIETATA (sotto), quindi un
+      // self inattivo e' raggiungibile SOLO via revoca remota, che 7G-Self tratta come read-only fino a reclaim.
       var SN = "t:selfinactive"; await DB.put("spaces", space(SN, "experience", "active", null, SN+":s"));
       await DB.put("spaceMembers", { id: SN+":s", spaceId: SN, name: "S", active: false, deleted: false });   // self inattivo (seed artificiale)
       await DB.put("spaceMembers", mem(SN, "m"));
-      var okInactiveWrite = !(await throwsA(function(){ return SR.createExpense(SN, { date: "2026-08-01", amount:100, paidById:SN+":m", allocationMode:"equal", parts:(function(){var p={};p[SN+":m"]=1;return p;})() }); }));
-      ok("3C: self inattivo ma identificabile -> write 3A consentito", okInactiveWrite);
+      var eInactiveWrite = await throwsA(function(){ return SR.createExpense(SN, { date: "2026-08-01", amount:100, paidById:SN+":m", allocationMode:"equal", parts:(function(){var p={};p[SN+":m"]=1;return p;})() }); });
+      ok("3C/7G-Self: self inattivo (revoked) -> write respinto", eInactiveWrite);
       ok("3C: self resta non archiviabile (regola 3B)", await throwsA(function(){ return SR.archiveMember(SN, SN+":s"); }));
       // legacy invariato: il gate legacy scatta PRIMA del self (nessun self richiesto)
       ok("3C: legacy invariato (create respinto per legacy, non per self)", await throwsA(function(){ return SR.createExpense(LEG, { date: "2026-08-01", amount:100, paidById:LEG+":a", allocationMode:"equal", parts:{ "t:leg:a":1 } }); }));
@@ -6775,18 +6781,29 @@ if ("serviceWorker" in navigator){
           var src = Object.assign({}, remote);
           src.createdAt = (local && local.createdAt != null) ? local.createdAt : Date.now();
           src.updatedAt = Date.now();
-          await window.personalProjection._commitSourceWithProjection(space, src, o);   // source + Personal projections, NO intent
+          var to = o;
+          // F4/7G-Self — se il self locale non e' piu' proiettabile (tombstone/assente), la proiezione
+          // Personale non e' calcolabile (fromSharedTx richiede il self fra i membri vivi). Applica SOLO la
+          // source shared (noProjection, seam gia' esistente): il batch non deve brickare per una revoca
+          // legittima. Le proiezioni si ricostruiscono a reclaimSelf. Il self INATTIVO resta proiettabile.
+          if (!o.noProjection){
+            var selfMem = self ? await DB().get("spaceMembers", self) : null;
+            if (!selfMem || selfMem.deleted === true) to = Object.assign({}, o, { noProjection: true });
+          }
+          await window.personalProjection._commitSourceWithProjection(space, src, to);   // source + (eventuali) Personal projections, NO intent
         } else if (recordType === "space"){
           var merged = window.nativeSyncBoundary.mergeSharedSpaceIntoLocal(local || {}, remote);   // preserva selfMemberId/authority/cutover/legacyGroupId
           await commitSharedRecordWithIntent("space", merged, merged, o);
         } else {   // member | shareRule
-          if (recordType === "member" && remote.id === self && remote.deleted === true) throw new Error("self-identity-conflict");
+          // F4/7G-Self — nessuna eccezione causale per il self: selfMemberId e' identita' LOCALE, il record
+          // membro e' Shared source-of-truth. Un tombstone/inactive remoto del self VINCE via comparator 7E3
+          // e viene applicato normalmente (selfMemberId resta, selfStatus deriva "revoked"). Nessun rollback.
           await commitSharedRecordWithIntent(recordType, space, Object.assign({}, remote), o);
         }
         return "applied";
       } catch(e){
         if (e && (e.message === "local-write-conflict" || e.message === "local-create-conflict")) continue;   // write locale concorrente -> rileggi e rivaluta
-        throw e;   // self-identity-conflict / missing-space-key / altro -> propaga (cursor NON avanza)
+        throw e;   // missing-space-key / altro -> propaga (cursor NON avanza)
       }
     }
     throw new Error("cas-retry-exhausted");
@@ -7114,6 +7131,46 @@ if ("serviceWorker" in navigator){
     return { spaceId: spaceId, selfMemberId: memberId, state: "ready" };
   }
 
+  /* F4 · Passo 7G-Self — SELF STATUS (derivato, nessun flag persistente).
+     Deriva da spaces.selfMemberId + membro Shared corrente. Ortogonale al lifecycle join (joinState
+     resta autorita' del first-join): qui si guarda SOLO l'identita' self.
+       no-self  = selfMemberId assente (join non ancora completato o first-join non fatto)
+       revoked  = selfMemberId presente ma il membro non esiste / e' tombstone / e' inattivo / cross-space
+       active   = self presente, vivo, attivo, nello spazio
+     revoked NON e' HOLD/QUARANTINE (7G-P): e' revoca applicativa. Poiche' e' derivato, un restore remoto
+     del membro riporta selfStatus ad "active" automaticamente (nessun flag stale lo impedisce). */
+  async function selfStatus(spaceId){
+    var sp = await DB().get("spaces", spaceId);
+    if (!sp || sp.deleted === true) throw new Error("spazio inesistente: " + spaceId);
+    if (!nativeBorn(sp)) throw new Error("selfStatus: spazio non native-born");
+    if (!sp.selfMemberId) return "no-self";
+    var m = await DB().get("spaceMembers", sp.selfMemberId);
+    if (!m || m.deleted === true || m.active === false || m.spaceId !== spaceId) return "revoked";
+    return "active";
+  }
+
+  /* reclaimSelf: dopo una revoca, il device sceglie un NUOVO membro attivo come self. Distinto da
+     claimSelf (first-join con selfMemberId == null): reclaimSelf agisce SOLO su uno stato revoked.
+     Puramente LOCALE: nessun bump version, nessun deviceId causale, nessun intent, nessuna delivery,
+     nessuna modifica al membro Shared. Poi rebuild delle proiezioni; solo dopo il rebuild lo spazio e'
+     di nuovo scrivibile (selfStatus active). Crash-safety come claimSelf: selfMemberId persistito PRIMA
+     del rebuild; se il rebuild fallisce, il resume e' re-invocare reclaimSelf con lo STESSO membro
+     (ramo idempotente sotto), che ricalcola il rebuild. Nessun marker "rebuild pending" duplicato. */
+  async function reclaimSelf(spaceId, newMemberId){
+    var sp = await DB().get("spaces", spaceId);
+    if (!sp || sp.deleted === true) throw new Error("spazio inesistente: " + spaceId);
+    if (!nativeBorn(sp)) throw new Error("reclaim: spazio non native-born");
+    var st = await selfStatus(spaceId);
+    if (st === "no-self") throw new Error("reclaim-no-self");                                   // first-join -> usa claimSelf
+    if (st === "active" && sp.selfMemberId !== newMemberId) throw new Error("reclaim-not-revoked");   // identita' sana: nessun cambio arbitrario
+    // consentito: st === "revoked" (reclaim vero) | st === "active" && selfMemberId === newMemberId (resume idempotente)
+    var m = await DB().get("spaceMembers", newMemberId);
+    if (!m || m.deleted === true || m.spaceId !== spaceId || m.active === false) throw new Error("reclaim-member-invalid");
+    if (sp.selfMemberId !== newMemberId){ sp.selfMemberId = newMemberId; await DB().put("spaces", sp); }   // LOCAL: nessun bump/intent/delivery
+    await window.personalProjection.rebuildSpace(spaceId);   // fallisce -> selfStatus resta (retry: reclaimSelf stesso membro)
+    return { spaceId: spaceId, selfMemberId: newMemberId, state: "active" };
+  }
+
   // joinState: superficie di sola lettura sullo stato persistente (meta). "pending" = importing|awaiting-self.
   window.joinState = {
     get: getJoinState,
@@ -7154,6 +7211,8 @@ if ("serviceWorker" in navigator){
     joinSpace: joinSpace,
     joinPull: joinPull,
     claimSelf: claimSelf,
+    selfStatus: selfStatus,          // F4/7G-Self: stato self derivato (no-self|active|revoked)
+    reclaimSelf: reclaimSelf,        // F4/7G-Self: reclaim locale dopo revoca
     getJoinState: getJoinState,
     setJoinState: setJoinState,
     listQuarantine: listQuarantine,                    // F4/7G-P: diagnostica sola lettura
@@ -7556,6 +7615,166 @@ if ("serviceWorker" in navigator){
       await DBx.close();
       ok("reload: tx vincente persistita", (await DBx.get("transactions", tE)).note === "vincente");
       ok("reload: space vincente persistito", (await DBx.get("spaces", SP)).name === "CAS Vince");
+
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    },
+
+    /* F4 · Passo 7G-Self — SELF REVOCATION / RECLAIM (hermetic, via _applyBatch + crypto reale, no rete).
+       Una revoca remota legittima del membro-self NON deve brickare il sync; il self diventa read-only
+       fino a reclaimSelf verso un nuovo membro attivo. Include la regressione 7G-CAP (root re-update). */
+    _testSelfRevocation: async function(){
+      var r = [], ok = function(n, c){ r.push({ name: n, pass: !!c }); };
+      async function throwsMsg(fn){ try { await fn(); return null; } catch(e){ return (e && e.message) || "err"; } }
+      var SR = window.sharedRuntime, NS = window.nativeSync, C = window.nativeCrypto, DBx = window.calculonDB,
+          PJ = window.personalProjection, OB = window.syncOutbox;
+      function O(a){ var o = {}; for (var i = 0; i < a.length; i += 2) o[a[i]] = a[i + 1]; return o; }
+      async function encMember(rec){ return await C.encryptSharedRecord("member", rec); }
+      async function encTx(rec){ return await C.encryptSharedRecord("transaction", rec); }
+      async function derivedCount(sid){ return (await DBx.list("transactions", function(t){ return t && t.derived === true && t.sourceSpaceId === sid; })).length; }
+      async function membersFor(sid){ return (await DBx.list("spaceMembers", function(m){ return m && m.spaceId === sid; })).length; }
+      async function outCount(sid){ return (await DBx.list("syncOutbox", function(x){ return x && x.spaceId === sid; })).length; }
+      async function quarFor(sid){ return (await DBx.list("syncQuarantine", function(q){ return q && q.spaceId === sid; })).length; }
+      async function sp(sid){ return await DBx.get("spaces", sid); }
+
+      // ===== SETUP: spazio ongoing con self Alice + Bob/Carlo attivi + Franco inattivo =====
+      var s = await SR.createSpace({ kind: "ongoing", name: "SelfRev", selfName: "Alice" });
+      var SP = s.spaceId, ALICE = s.selfMemberId;
+      var BOB = await SR.addMember(SP, { name: "Bob" });
+      var CARLO = await SR.addMember(SP, { name: "Carlo" });
+      var FRANCO = await SR.addMember(SP, { name: "Franco" }); await SR.archiveMember(SP, FRANCO);   // inactive (self ancora attivo)
+      var s2 = await SR.createSpace({ kind: "ongoing", name: "Altro", selfName: "Bruno" });
+      var SP2 = s2.spaceId, SP2SELF = s2.selfMemberId, BOB2 = await SR.addMember(SP2, { name: "BobDue" });
+      var aliceVer = (await DBx.get("spaceMembers", ALICE)).version, carloVer = (await DBx.get("spaceMembers", CARLO)).version;
+
+      // ===== 1. self active -> status active =====
+      ok("1. self active -> selfStatus active", (await NS.selfStatus(SP)) === "active");
+
+      // ===== 2-6. self INACTIVE remote winner: applied, revoked, cursor avanza, record successivo applied, no quarantine =====
+      var batchInact = [ await encMember({ id: ALICE, spaceId: SP, name: "Alice", active: false, deleted: false, version: aliceVer + 1, deviceId: "dRemote" }),
+                         await encMember({ id: SP + ":dora", spaceId: SP, name: "Dora", active: true, deleted: false, version: 1, deviceId: "dRemote" }) ];
+      var resI = await NS._applyBatch(SP, await sp(SP), ALICE, batchInact, 10);
+      ok("2. self inactive remote winner -> applied", (await DBx.get("spaceMembers", ALICE)).active === false);
+      ok("3. selfStatus revoked (inactive)", (await NS.selfStatus(SP)) === "revoked");
+      ok("4. cursor avanza a serverSeq", (await NS.getSyncSeq(SP)) === 10 && resI.seq === 10);
+      ok("5. record successivo del batch applicato", (await DBx.get("spaceMembers", SP + ":dora")) != null && resI.applied === 2);
+      ok("6. nessuna quarantine per revoca legittima", (await quarFor(SP)) === 0 && resI.quarantined === 0);
+
+      // ===== 7 (+sez.4/10). self TOMBSTONE winner + transaction seguente: batch non bricka =====
+      var remoteTx = { id: SP + ":rtx1", spaceId: SP, type: "expense", amount: 100, paidById: BOB,
+        allocations: [{ memberId: BOB, amount: 40 }, { memberId: CARLO, amount: 60 }], allocationMode: "exact",
+        date: "2026-09-01", note: "remote", deleted: false, version: 1, deviceId: "dRemote" };
+      var batchTomb = [ await encMember({ id: ALICE, spaceId: SP, name: "Alice", active: true, deleted: true, version: aliceVer + 2, deviceId: "dRemote" }),
+                        await encTx(remoteTx),
+                        await encMember({ id: SP + ":emil", spaceId: SP, name: "Emil", active: true, deleted: false, version: 1, deviceId: "dRemote" }) ];
+      var resT = await NS._applyBatch(SP, await sp(SP), ALICE, batchTomb, 20);
+      ok("7. self tombstone remote winner -> applied", (await DBx.get("spaceMembers", ALICE)).deleted === true);
+      ok("7b. selfStatus revoked (tombstone)", (await NS.selfStatus(SP)) === "revoked");
+      ok("4b. transazione dopo il self tombstone APPLICATA (no brick)", (await DBx.get("transactions", SP + ":rtx1")) != null);
+      ok("10. proiezione Personale SALTATA durante revoca (source-only, no throw)", (await derivedCount(SP)) === 0);
+      ok("4c. cursor avanza oltre il tombstone", (await NS.getSyncSeq(SP)) === 20 && resT.applied === 3 && resT.held === false);
+      ok("6b. nessuna quarantine (revoca != poisoned)", (await quarFor(SP)) === 0);
+
+      // ===== 8. self member MISSING -> revoked =====
+      var SPm = "space:selfmiss-" + SP.slice(-4);
+      await DBx.put("spaces", { id: SPm, name: "Miss", kind: "ongoing", status: "active", currency: "EUR", version: 1, deviceId: "dz", keyVersion: 1, deleted: false, authority: "native", legacyGroupId: null, selfMemberId: SPm + ":ghost" });
+      await NS.setJoinState(SPm, "ready");
+      ok("8. selfMemberId presente ma membro assente -> revoked", (await NS.selfStatus(SPm)) === "revoked");
+
+      // ===== 9. Shared write durante revoked -> reject self-revoked (tutte le superfici) =====
+      ok("9a. createExpense revoked -> self-revoked", (await throwsMsg(function(){ return SR.createExpense(SP, { amount: 50, paidById: BOB, allocationMode: "exact", parts: O([BOB, 50]), date: "2026-09-01" }); })) === "self-revoked");
+      ok("9b. addMember revoked -> self-revoked", (await throwsMsg(function(){ return SR.addMember(SP, { name: "X" }); })) === "self-revoked");
+      ok("9c. renameSpace revoked -> self-revoked", (await throwsMsg(function(){ return SR.renameSpace(SP, "Y"); })) === "self-revoked");
+      ok("9d. archiveSpace revoked -> self-revoked", (await throwsMsg(function(){ return SR.archiveSpace(SP); })) === "self-revoked");
+      ok("9e. setShareRule revoked -> self-revoked", (await throwsMsg(function(){ return SR.setShareRule(SP, { mode: "equal" }); })) === "self-revoked");
+
+      // ===== 10b. pull/apply inbound durante revoked -> consentito (cursor avanza) =====
+      var resP = await NS._applyBatch(SP, await sp(SP), ALICE, [ await encMember({ id: SP + ":gina", spaceId: SP, name: "Gina", active: true, deleted: false, version: 1, deviceId: "dRemote" }) ], 30);
+      ok("10b. inbound apply durante revoked consentito", resP.applied === 1 && (await NS.getSyncSeq(SP)) === 30);
+
+      // ===== 11-15. reclaim rejections =====
+      ok("11. active self -> reclaimSelf(other) reject", (await throwsMsg(function(){ return NS.reclaimSelf(SP2, BOB2); })) === "reclaim-not-revoked");
+      ok("12. reclaim -> membro inesistente reject", (await throwsMsg(function(){ return NS.reclaimSelf(SP, SP + ":ghost"); })) === "reclaim-member-invalid");
+      ok("13. reclaim -> membro deleted (Alice tombstone) reject", (await throwsMsg(function(){ return NS.reclaimSelf(SP, ALICE); })) === "reclaim-member-invalid");
+      ok("14. reclaim -> membro inattivo (Franco) reject", (await throwsMsg(function(){ return NS.reclaimSelf(SP, FRANCO); })) === "reclaim-member-invalid");
+      ok("15. reclaim -> membro cross-space reject", (await throwsMsg(function(){ return NS.reclaimSelf(SP, SP2SELF); })) === "reclaim-member-invalid");
+      // no-self (selfMemberId null, join ready): reclaim rifiutato -> usa claimSelf
+      var SPn = "space:noself-" + SP.slice(-4);
+      await DBx.put("spaces", { id: SPn, name: "NoSelf", kind: "ongoing", status: "active", currency: "EUR", version: 1, deviceId: "dz", keyVersion: 1, deleted: false, authority: "native", legacyGroupId: null, selfMemberId: null });
+      await DBx.put("spaceMembers", { id: SPn + ":m1", spaceId: SPn, name: "Uno", active: true, deleted: false, version: 1, deviceId: "dz" });
+      await NS.setJoinState(SPn, "ready");
+      ok("15b. reclaim su no-self -> reclaim-no-self", (await throwsMsg(function(){ return NS.reclaimSelf(SPn, SPn + ":m1"); })) === "reclaim-no-self");
+
+      // ===== 16-21. reclaim valido -> active, solo locale, no bump/intent, projections rebuilt, write riaperto =====
+      var spVerBefore = (await sp(SP)).version, outBefore = await outCount(SP);
+      var recl = await NS.reclaimSelf(SP, CARLO);
+      ok("16. revoked -> reclaim membro valido success", recl.state === "active" && (await NS.selfStatus(SP)) === "active");
+      ok("17. selfMemberId cambia solo localmente", (await sp(SP)).selfMemberId === CARLO);
+      ok("17b. membro Carlo NON modificato (version invariata)", (await DBx.get("spaceMembers", CARLO)).version === carloVer);
+      ok("18. zero version bump dello spazio", (await sp(SP)).version === spVerBefore);
+      ok("19. zero sync intent dal reclaim", (await outCount(SP)) === outBefore);
+      ok("20. projections rebuilt per il nuovo self", (await derivedCount(SP)) > 0 && (await PJ.rebuildSpace(SP)).written === 0);
+      ok("21. write dopo reclaim -> consentita", (await throwsMsg(function(){ return SR.addMember(SP, { name: "Ivo" }); })) === null);
+
+      // ===== 22-24. crash dopo selfMemberId persistito / prima del rebuild -> resume idempotente =====
+      var sc = await SR.createSpace({ kind: "ongoing", name: "Crash", selfName: "Cora" });
+      var SPc = sc.spaceId, CORA = sc.selfMemberId, DARIO = await SR.addMember(SPc, { name: "Dario" });
+      var cVer = (await DBx.get("spaceMembers", CORA)).version;
+      await NS._applyBatch(SPc, await sp(SPc), CORA, [ await encMember({ id: CORA, spaceId: SPc, name: "Cora", active: true, deleted: true, version: cVer + 1, deviceId: "dRemote" }) ], 5);
+      var membBeforeC = await membersFor(SPc), cSpVer = (await sp(SPc)).version;
+      var origRebuild = PJ.rebuildSpace;
+      PJ.rebuildSpace = async function(){ throw new Error("rebuild-sim-fail"); };
+      var eCrash = await throwsMsg(function(){ return NS.reclaimSelf(SPc, DARIO); });
+      PJ.rebuildSpace = origRebuild;
+      ok("22. rebuild fallito -> propagato", eCrash === "rebuild-sim-fail");
+      ok("22b. selfMemberId nuovo persistito nonostante rebuild fallito", (await sp(SPc)).selfMemberId === DARIO);
+      ok("22c. NON torna al vecchio self automaticamente", (await sp(SPc)).selfMemberId !== CORA);
+      var resumed = await NS.reclaimSelf(SPc, DARIO);   // resume idempotente (selfMemberId gia' == DARIO)
+      ok("23. resume rebuild -> active", resumed.state === "active" && (await NS.selfStatus(SPc)) === "active");
+      ok("24. nessuna duplicazione membri dal reclaim/resume", (await membersFor(SPc)) === membBeforeC);
+      ok("24b. resume idempotente: zero version bump dello spazio", (await sp(SPc)).version === cSpVer);
+
+      // ===== 25. remote RESTORE dello stesso self -> active automaticamente (nessun flag stale) =====
+      var srr = await SR.createSpace({ kind: "ongoing", name: "Restore", selfName: "Rosa" });
+      var SPr = srr.spaceId, ROSA = srr.selfMemberId;
+      var rVer = (await DBx.get("spaceMembers", ROSA)).version;
+      await NS._applyBatch(SPr, await sp(SPr), ROSA, [ await encMember({ id: ROSA, spaceId: SPr, name: "Rosa", active: true, deleted: true, version: rVer + 1, deviceId: "dRemote" }) ], 5);
+      ok("25a. dopo tombstone remoto -> revoked + write bloccata", (await NS.selfStatus(SPr)) === "revoked" && (await throwsMsg(function(){ return SR.addMember(SPr, { name: "Z" }); })) === "self-revoked");
+      await NS._applyBatch(SPr, await sp(SPr), ROSA, [ await encMember({ id: ROSA, spaceId: SPr, name: "Rosa", active: true, deleted: false, version: rVer + 2, deviceId: "dRemote" }) ], 6);
+      ok("25. remote restore stesso self -> selfStatus active AUTOMATICAMENTE (no reclaim)", (await NS.selfStatus(SPr)) === "active");
+      ok("25b. write riaperta dopo restore automatico", (await throwsMsg(function(){ return SR.addMember(SPr, { name: "Nia" }); })) === null);
+
+      // ===== 26. claimSelf existing-self semantics invariata =====
+      ok("26. claimSelf su self attivo diverso -> existing-self-conflict", (await throwsMsg(function(){ return NS.claimSelf(SP, BOB); })) === "existing-self-conflict");
+
+      // ===== 27-28. HOLD / QUARANTINE invariati (7G-P non indebolito) =====
+      var sh = await SR.createSpace({ kind: "ongoing", name: "Hold", selfName: "Hera" });
+      var SPh = sh.spaceId, HERA = sh.selfMemberId, seqH0 = await NS.getSyncSeq(SPh);
+      var freshKey = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
+      var holdEnv = await C._encryptWith("member", { id: SPh + ":held", spaceId: SPh, name: "Held", active: true, deleted: false, version: 1, deviceId: "dRemote" }, freshKey, 99);
+      var resH = await NS._applyBatch(SPh, await sp(SPh), HERA, [holdEnv], 50);
+      ok("27. HOLD (key mancante) invariato: batch fermo, cursor non avanza", resH.held === true && (await NS.getSyncSeq(SPh)) === seqH0);
+      var goodEnv = await encMember({ id: SPh + ":q", spaceId: SPh, name: "Q", active: true, deleted: false, version: 1, deviceId: "dRemote" });
+      var tampered = Object.assign({}, goodEnv); var ct = goodEnv.ciphertext; tampered.ciphertext = ct.slice(0, -2) + (ct.slice(-2) === "AA" ? "BB" : "AA");
+      var resQ = await NS._applyBatch(SPh, await sp(SPh), HERA, [tampered], 51);
+      ok("28. QUARANTINE (decrypt-failed) invariata: entry durevole, cursor avanza", resQ.quarantined === 1 && (await quarFor(SPh)) >= 1 && (await NS.getSyncSeq(SPh)) === 51);
+
+      // ===== REGRESSIONE 7G-CAP: root gia' delivered -> successivo update root pending =====
+      var sg = await SR.createSpace({ kind: "ongoing", name: "CapReg", selfName: "Gaia" });
+      var GID = sg.spaceId, gRoot = "sync:" + GID + ":space:" + GID;
+      var gi = await DBx.get("syncOutbox", gRoot); await OB.markDelivered(gRoot, gi.version, gi.deviceId);
+      var inv1 = await throwsMsg(async function(){ return await NS.createInvite(GID); });
+      ok("7G-CAP: invite dopo delivery -> ok", inv1 === null);
+      await SR.renameSpace(GID, "CapReg2");   // update del root -> nuovo intent pending (sovrascrive delivered)
+      var rootAfter = await DBx.get("syncOutbox", gRoot);
+      var reg = null; try { await NS.createInvite(GID); reg = "ok"; } catch(e){ reg = e.message; }
+      // KNOWN-LIMITATION-7GCAP (sez.16, NON fixato qui): un update legittimo del root (rename/archive) fra
+      // delivery e createInvite sovrascrive l'intent "delivered" con un nuovo "pending" (version 2), e la
+      // prova di delivery viene persa -> FALSO reject "space-not-remotely-initialized". createInvite guarda
+      // solo lo status dell'intent corrente, non "consegnato almeno una volta". Caratterizzazione del
+      // comportamento attuale (mitigato in-app da autoDelivery). Riportato come blocker separato.
+      ok("7G-CAP KNOWN-LIMITATION: root re-update perde la prova delivered -> createInvite falso-reject [status=" + rootAfter.status + "]",
+         rootAfter.status === "pending" && reg === "space-not-remotely-initialized");
 
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
