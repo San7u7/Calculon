@@ -6963,6 +6963,14 @@ if ("serviceWorker" in navigator){
     var sp = await DB().get("spaces", spaceId);
     if (!sp || sp.deleted === true) throw new Error("spazio inesistente: " + spaceId);
     if (!nativeBorn(sp)) throw new Error("invito solo su spazi native-born");
+    // F4/7G-Cap — INVARIANTE remote-init: un invito nativo puo' nascere SOLO quando lo Shared space-root
+    // e' stato consegnato e riconosciuto dal remote. Prova di delivery = intent space-root con status
+    // "delivered" (autorita' ESISTENTE della syncOutbox: markDelivered scatta solo su ack guardato del
+    // Worker; presenza/pending/error NON bastano -> nessun falso positivo, cfr. sezione 9). Nessun nuovo
+    // flag persistente. Gate fail-closed e side-effect free: SOLO lettura, PRIMA di ensureSpaceCapability,
+    // cosi' il path di rifiuto non produce token, non minta cap, non tocca key, non fa delivery implicita.
+    var rootIntent = await DB().get("syncOutbox", "sync:" + spaceId + ":space:" + spaceId);
+    if (!rootIntent || rootIntent.status !== "delivered") throw new Error("space-not-remotely-initialized");
     var cap = await ensureSpaceCapability(spaceId);                       // idempotente
     var kv = Number.isInteger(sp.keyVersion) ? sp.keyVersion : 1;
     var keyRaw = await window.spaceKeys.exportSpaceKey(spaceId, kv);      // throws missing-space-key (fail-closed)
@@ -6982,8 +6990,44 @@ if ("serviceWorker" in navigator){
     return { spaceId: o.s, spaceCap: o.c, keyRaw: o.k, keyVersion: o.kv };
   }
 
-  // FIRST PULL del join: GET since=0, applica i record shared SENZA proiezioni Personali (self non ancora
-  // scelto). Non richiede selfMemberId. Richiede shell locale + cap + key gia' presenti.
+  // F4/7G-Cap — schema/boundary del decrypted space-root: prova FORTE che il record e' il root canonico
+  // dello spazio (appartiene a spaceId + causalmente completo + shape valida). rec.id proviene sempre
+  // dall'header recordId (decryptSharedEnvelope), quindi l'uguaglianza a spaceId conferma il binding.
+  function isValidJoinSpaceRoot(spaceId, rec){
+    return !!rec && typeof rec === "object"
+      && rec.id === spaceId
+      && rec.deleted !== true
+      && Number.isInteger(rec.version) && rec.version >= 1
+      && typeof rec.deviceId === "string" && rec.deviceId !== ""
+      && typeof rec.kind === "string" && rec.kind !== "";
+  }
+  // F4/7G-Cap — PROVA CANONICA di remote valido: NON "records.length > 0" ma l'esistenza di uno Shared
+  // space-root autenticato (recordType=space, recordId=spaceId) che decripta, passa boundary/schema e
+  // appartiene allo spaceId. Distingue le cause di fallimento (mai un falso awaiting-self):
+  //   nessun root / remote vuoto -> capability-mismatch  (cap errata -> DO diverso -> DO vuoto)
+  //   root presente, decrypt-failed -> bootstrap-decrypt-failed  (ciphertext c'e' ma AES key errata)
+  //   root presente, key mancante  -> space-needs-key  (7G-P: keyVersion non importata, NON cap mismatch)
+  //   root presente, schema/boundary invalida -> space-root-invalid  (root poisoned/quarantinato)
+  async function evaluateJoinRoot(spaceId, records){
+    var root = null;
+    for (var i = 0; i < records.length; i++){ var e = records[i]; if (e && e.recordType === "space" && e.recordId === spaceId){ root = e; break; } }
+    if (!root) return { valid: false, reason: "capability-mismatch" };                 // Caso A: vuoto o senza space-root
+    var cls = await classifyEnvelope(spaceId, root);
+    if (cls.status === "hold") return { valid: false, reason: "space-needs-key" };      // Caso C: 7G-P HOLD (key assente)
+    if (cls.status === "quarantine"){                                                   // Caso B/D
+      var reason = (cls.reason === "decrypt-failed") ? "bootstrap-decrypt-failed" : "space-root-invalid";
+      return { valid: false, reason: reason, quarantine: { env: root, why: cls.reason } };
+    }
+    if (!isValidJoinSpaceRoot(spaceId, cls.rec))                                         // Caso D: decrypta ma schema non valido
+      return { valid: false, reason: "space-root-invalid", quarantine: { env: root, why: "boundary-invalid" } };
+    return { valid: true };
+  }
+
+  // FIRST PULL del join: GET since=0. PRIMA di applicare o toccare il cursor, esige la PROVA CANONICA di
+  // uno space-root autenticato (evaluateJoinRoot). Senza prova: NESSUN apply, NESSUN avanzamento cursor,
+  // NESSUNA proiezione Personale, gate:true col motivo stabile. I casi poisoned/wrong-key restano
+  // diagnosticabili (entry di quarantine durevole, mai cancellata). Con prova: applica SENZA proiezioni
+  // Personali (self non ancora scelto). Richiede shell locale + cap + key gia' presenti.
   async function joinPull(spaceId){
     var space = await DB().get("spaces", spaceId);
     if (!space || space.deleted === true) throw new Error("join: shell assente");
@@ -6997,6 +7041,13 @@ if ("serviceWorker" in navigator){
     if (res.status !== 200) return { ok: false, reason: "http-" + res.status };
     var body; try { body = await res.json(); } catch(e){ throw new Error("malformed-body"); }
     if (!body || typeof body.seq !== "number" || !Array.isArray(body.records)) throw new Error("malformed-body");
+    var proof = await evaluateJoinRoot(spaceId, body.records);
+    if (!proof.valid){
+      // Caso B/D: persiste l'evidenza diagnostica (solo header + ctHash, mai key/ciphertext/plaintext) e
+      // NON la cancella. Nessun apply, nessun cursor: lo spazio NON viene mai considerato valido.
+      if (proof.quarantine) await upsertQuarantine(spaceId, proof.quarantine.env, proof.quarantine.why, body.seq);
+      return { ok: false, reason: proof.reason, gate: true };
+    }
     return await applyBatch(spaceId, space, null, body.records, body.seq, { noProjection: true });
   }
 
@@ -7021,7 +7072,14 @@ if ("serviceWorker" in navigator){
         await DB().put("spaces", shell);
       }
       var pulled = await joinPull(sid);
-      if (!pulled || pulled.ok === false) throw new Error("join-pull-failed:" + (pulled && pulled.reason));
+      if (!pulled || pulled.ok === false){
+        // F4/7G-Cap — gate della prova canonica: propaga il motivo STABILE cosi' com'e' (capability-mismatch
+        // / bootstrap-decrypt-failed / space-needs-key / space-root-invalid). Errori transitori (offline /
+        // server-5xx / http-*) restano "join-pull-failed:*" (retry-safe). In ogni caso: joinState -> error
+        // via catch, MAI awaiting-self, MAI proiezioni Personali.
+        if (pulled && pulled.gate) throw new Error(pulled.reason);
+        throw new Error("join-pull-failed:" + (pulled && pulled.reason));
+      }
       await setJoinState(sid, "awaiting-self");
       var members = await DB().list("spaceMembers", function(m){ return m && m.spaceId === sid && m.deleted !== true; });
       return { spaceId: sid, seq: pulled.seq, state: "awaiting-self", selfMemberId: null,
@@ -7516,6 +7574,11 @@ if ("serviceWorker" in navigator){
       // --- roundtrip createInvite -> parseInvite su spazio nativo reale ---
       var made = await SR.createSpace({ kind: "experience", name: "Invito7F", selfName: "A" });
       var S = made.spaceId;
+      // F4/7G-Cap — createInvite ora esige il remote-init (space-root consegnato). Qui, offline, si simula
+      // la delivery marcando "delivered" l'intent space-root con la SUA versione (la stessa API guardata
+      // usata dalla delivery pump). Senza questo, createInvite rifiuta con space-not-remotely-initialized.
+      var _riJ = "sync:" + S + ":space:" + S, _rootJ = await DBx.get("syncOutbox", _riJ);
+      await window.syncOutbox.markDelivered(_riJ, _rootJ.version, _rootJ.deviceId);
       var token = await createInvite(S);
       ok("token ha prefisso invito", typeof token === "string" && token.indexOf(INVITE_PREFIX) === 0);
       var inv = parseInvite(token);
@@ -7602,6 +7665,131 @@ if ("serviceWorker" in navigator){
       ok("stato NON ready dopo rebuild fallito", (await NS.getJoinState(RS)) === "awaiting-self");
       var resumed = await claimSelf(RS, RS + ":m1");   // resume idempotente
       ok("resume completa -> ready", resumed.state === "ready" && (await NS.getJoinState(RS)) === "ready");
+
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    },
+
+    /* F4 · Passo 7G-Cap — WRONG CAPABILITY GATE (hermetic).
+       Il fetch e' stubato: joinPull fa GET e riceve FAKE.body, che SIMULA il DO risolto dalla cap
+       (cap errata -> DO diverso -> DO vuoto -> {seq:0,records:[]}). Ogni scenario usa uno spaceId
+       fresco e envelope reali cifrati con nativeCrypto: il gate viene esercitato end-to-end senza rete. */
+    _testWrongCapGate: async function(){
+      var r = [], ok = function(n, c){ r.push({ name: n, pass: !!c }); };
+      async function throwsMsg(fn){ try { await fn(); return null; } catch(e){ return (e && e.message) || "err"; } }
+      var SR = window.sharedRuntime, DBx = window.calculonDB, K = window.spaceKeys, C = window.nativeCrypto,
+          NS = window.nativeSync, OB = window.syncOutbox;
+      function capRnd(){ return b64urlBytes(crypto.getRandomValues(new Uint8Array(32))); }   // 32B -> 43 char base64url
+      async function freshKey(){ return await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]); }
+      async function rawOf(key){ return b64urlBytes(new Uint8Array(await crypto.subtle.exportKey("raw", key))); }
+      async function mkInvite(sid, cap, key, kv){ return inviteEncode({ v: 1, s: sid, c: cap, k: (await rawOf(key)), kv: kv || 1 }); }
+      function spaceRec(sid, kv){ return { id: sid, name: "WC", kind: "experience", status: "active", currency: "EUR", version: 1, deviceId: "dRemote", keyVersion: kv || 1, deleted: false }; }
+      function memberRec(sid, mid){ return { id: mid, spaceId: sid, name: "Ada", active: true, deleted: false, version: 1, deviceId: "dRemote" }; }
+      async function derivedCount(sid){ return (await DBx.list("transactions", function(t){ return t && t.derived === true && t.sourceSpaceId === sid; })).length; }
+      async function spacesFor(sid){ return (await DBx.list("spaces", function(s){ return s && s.id === sid; })).length; }
+      async function membersFor(sid){ return (await DBx.list("spaceMembers", function(m){ return m && m.spaceId === sid; })).length; }
+      async function quarFor(sid){ return (await DBx.list("syncQuarantine", function(q){ return q && q.spaceId === sid; })).length; }
+
+      var FAKE = { status: 200, body: { seq: 0, records: [] } };
+      var origFetch = window.fetch;
+      window.fetch = async function(){ return { status: FAKE.status, json: async function(){ return FAKE.body; } }; };
+      try {
+        var n = 0, suffix = "";
+
+        // ===== CREATE INVITE GATE (sez. 1,2,9): reject fail-closed + side-effect free =====
+        var g = await SR.createSpace({ kind: "experience", name: "Gate", selfName: "A" });
+        var GID = g.spaceId, gRootId = "sync:" + GID + ":space:" + GID; suffix = GID.slice(-4);
+        var capBefore = await NS.getSpaceCapability(GID), tokenLeak = null;
+        var e1 = await throwsMsg(async function(){ tokenLeak = await createInvite(GID); });
+        ok("1. createInvite prima della delivery -> reject", e1 === "space-not-remotely-initialized");
+        ok("2. reject: nessun token prodotto", tokenLeak === null);
+        ok("3. reject side-effect free: cap invariata", (await NS.getSpaceCapability(GID)) === capBefore);
+        ok("3b. reject side-effect free: root ancora pending (nessuna delivery implicita)", (await DBx.get("syncOutbox", gRootId)).status === "pending");
+        var ge = await DBx.get("syncOutbox", gRootId); ge.status = "error"; await DBx.put("syncOutbox", ge);
+        ok("4. root pending/error NON abilita invite (no falso positivo sez.9)", (await throwsMsg(function(){ return createInvite(GID); })) === "space-not-remotely-initialized");
+        var gr = await DBx.get("syncOutbox", gRootId); await OB.markDelivered(gRootId, gr.version, gr.deviceId);
+        var gTok = await createInvite(GID);
+        ok("5. root delivered abilita invite (token valido)", typeof gTok === "string" && gTok.indexOf(INVITE_PREFIX) === 0);
+
+        // ===== WRONG CAP -> EMPTY REMOTE (sez. 4,5A) =====
+        var sidW = "space:wcap-" + (++n) + "-" + suffix, keyW = await freshKey();
+        var invW = await mkInvite(sidW, capRnd(), keyW, 1);
+        FAKE.body = { seq: 0, records: [] };
+        var eW = await throwsMsg(function(){ return joinSpace(invW); });
+        ok("6. wrong cap (remote vuoto) -> capability-mismatch", eW === "capability-mismatch");
+        ok("7. joinState = error", (await NS.getJoinState(sidW)) === "error");
+        ok("8. mai awaiting-self", (await NS.getJoinState(sidW)) !== "awaiting-self");
+        ok("9. zero proiezioni Personali", (await derivedCount(sidW)) === 0);
+        ok("9b. shell senza selfMemberId (join non riuscito)", (await DBx.get("spaces", sidW)).selfMemberId == null);
+
+        // ===== RETRY wrong cap idempotente (sez. 8,10) =====
+        FAKE.body = { seq: 0, records: [] };
+        var eW2 = await throwsMsg(function(){ return joinSpace(invW); });
+        ok("10. retry wrong cap -> ancora capability-mismatch", eW2 === "capability-mismatch");
+        ok("10b. retry wrong cap: nessun duplicato spazio", (await spacesFor(sidW)) === 1);
+        ok("10c. retry wrong cap: nessun membro creato", (await membersFor(sidW)) === 0);
+
+        // ===== WRONG -> CORRECT recovery (sez. 7, 11-C): stesso sid, cap giusta + STESSA key, remote popolato =====
+        var invC = await mkInvite(sidW, capRnd(), keyW, 1);
+        FAKE.body = { seq: 2, records: [ await C._encryptWith("space", spaceRec(sidW, 1), keyW, 1),
+                                        await C._encryptWith("member", memberRec(sidW, sidW + ":m1"), keyW, 1) ] };
+        var recovered = await joinSpace(invC);
+        ok("11. recovery: awaiting-self", recovered.state === "awaiting-self" && (await NS.getJoinState(sidW)) === "awaiting-self");
+        ok("11b. recovery: root autenticato applicato", (await DBx.get("spaces", sidW)).name === "WC");
+        ok("11c. recovery: candidato membro presente", (await membersFor(sidW)) === 1);
+        ok("11d. recovery: nessun duplicato spazio", (await spacesFor(sidW)) === 1);
+        var claimed = await claimSelf(sidW, sidW + ":m1");
+        ok("11e/14. recovery: claim -> ready", claimed.state === "ready" && (await NS.getJoinState(sidW)) === "ready");
+
+        // ===== CORRECT first pull trova root valido + idempotenza (sez. 3, test 12,13,20) =====
+        var sidV = "space:wcap-" + (++n) + "-" + suffix, keyV = await freshKey();
+        var invV = await mkInvite(sidV, capRnd(), keyV, 1);
+        FAKE.body = { seq: 2, records: [ await C._encryptWith("space", spaceRec(sidV, 1), keyV, 1),
+                                        await C._encryptWith("member", memberRec(sidV, sidV + ":m1"), keyV, 1) ] };
+        var jv = await joinSpace(invV);
+        ok("12. first pull: root canonico riconosciuto (kind)", (await DBx.get("spaces", sidV)).kind === "experience");
+        ok("13. correct join -> awaiting-self", jv.state === "awaiting-self");
+        var jv2 = await joinSpace(invV);
+        ok("20. correct ripetuto -> awaiting-self, nessun duplicato", jv2.state === "awaiting-self" && (await spacesFor(sidV)) === 1 && (await membersFor(sidV)) === 1);
+        await claimSelf(sidV, sidV + ":m1");
+        ok("14b. correct: claim -> ready", (await NS.getJoinState(sidV)) === "ready");
+
+        // ===== WRONG AES KEY (sez. 5B, test 15): l'invito porta la key ERRATA, il root e' cifrato con quella giusta =====
+        var sidK = "space:wcap-" + (++n) + "-" + suffix, keyRight = await freshKey(), keyWrong = await freshKey();
+        var invK = await mkInvite(sidK, capRnd(), keyWrong, 1);
+        FAKE.body = { seq: 1, records: [ await C._encryptWith("space", spaceRec(sidK, 1), keyRight, 1) ] };
+        var eK = await throwsMsg(function(){ return joinSpace(invK); });
+        ok("15. wrong AES key -> bootstrap-decrypt-failed (distinto da wrong cap)", eK === "bootstrap-decrypt-failed");
+        ok("15b. wrong key: joinState error, mai awaiting-self", (await NS.getJoinState(sidK)) === "error");
+
+        // ===== MISSING keyVersion / HOLD (sez. 5C, test 16): root a kv=2 non importata =====
+        var sidH = "space:wcap-" + (++n) + "-" + suffix, keyH = await freshKey();
+        var invH = await mkInvite(sidH, capRnd(), keyH, 1);
+        FAKE.body = { seq: 1, records: [ await C._encryptWith("space", spaceRec(sidH, 2), keyH, 2) ] };
+        var eH = await throwsMsg(function(){ return joinSpace(invH); });
+        ok("16. missing keyVersion -> space-needs-key (distinto da wrong cap)", eH === "space-needs-key");
+        ok("16b. hold: joinState error", (await NS.getJoinState(sidH)) === "error");
+
+        // ===== POISONED / QUARANTINED ROOT (sez. 5D, test 17,18): decripta ma schema invalido (no kind) =====
+        var sidP = "space:wcap-" + (++n) + "-" + suffix, keyP = await freshKey();
+        var invP = await mkInvite(sidP, capRnd(), keyP, 1);
+        var poison = { id: sidP, name: "P", status: "active", currency: "EUR", version: 1, deviceId: "dRemote", keyVersion: 1, deleted: false };   // NO kind
+        FAKE.body = { seq: 1, records: [ await C._encryptWith("space", poison, keyP, 1) ] };
+        var eP = await throwsMsg(function(){ return joinSpace(invP); });
+        ok("17. poisoned root -> space-root-invalid, mai awaiting-self", eP === "space-root-invalid" && (await NS.getJoinState(sidP)) !== "awaiting-self");
+        ok("17b. poisoned: joinState error", (await NS.getJoinState(sidP)) === "error");
+        ok("18. quarantine del root preservata", (await quarFor(sidP)) >= 1);
+
+        // ===== RELOAD da error -> retry deterministico possibile (sez. 7, test 19) =====
+        await DBx.close();
+        ok("19. reload: joinState error persistito", (await NS.getJoinState(sidK)) === "error");
+        FAKE.body = { seq: 2, records: [ await C._encryptWith("space", spaceRec(sidK, 1), keyRight, 1),
+                                        await C._encryptWith("member", memberRec(sidK, sidK + ":m1"), keyRight, 1) ] };
+        var reK = await joinSpace(await mkInvite(sidK, capRnd(), keyRight, 1));   // invito con la key giusta
+        ok("19b. reload+retry (cap+key corrette) -> awaiting-self", reK.state === "awaiting-self");
+      } finally {
+        window.fetch = origFetch;
+      }
 
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
