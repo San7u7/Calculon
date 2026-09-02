@@ -6604,9 +6604,49 @@ if ("serviceWorker" in navigator){
   function nativeBorn(sp){ return sp && sp.authority === "native" && !sp.legacyGroupId; }
   function intentId(env){ return "sync:" + env.spaceId + ":" + env.recordType + ":" + env.recordId; }
 
+  // F4/7G-O2a — DELIVERABILITY GATE. Mirror STATICO dei limiti envelope del Worker.
+  // MUST MATCH space_sync.js envelope limits (const LIMITS): se il Worker cambia i limiti, aggiornare qui.
+  // Il Worker resta la safety net (400 ciphertext / 413 body); questo e' il validator NORMALE pre-commit.
+  var DELIVER_LIMITS = {
+    MAX_BODY_BYTES: 65536,       // 64 KiB: intero body della PUT (raw). Safety net: il ciphertext (sotto) e' piu' stretto.
+    MAX_CIPHERTEXT_B64: 49152,   // ~48 KiB base64url ciphertext: gate pratico piu' STRETTO (Worker: 400 "ciphertext").
+    MAX_IV_B64: 24,              // iv 12 byte -> 16 char base64url; margine 24.
+    MAX_ID_LEN: 512,             // spaceId / recordId / deviceId.
+    RECORD_TYPES: { space: 1, member: 1, transaction: 1, shareRule: 1 }
+  };
+  function isB64urlShape(s){ return typeof s === "string" && s.length > 0 && /^[A-Za-z0-9_-]+$/.test(s); }
+  // Misura ESATTA del body come lo misura il Worker (raw della PUT, che deliverPending invia come
+  // JSON.stringify(envelope)). Byte UTF-8 reali per evitare drift client/Worker su campi non-ASCII.
+  function envelopeBodyBytes(env){ return new TextEncoder().encode(JSON.stringify(env)).byteLength; }
+  // Gate deterministico sull'envelope REALE (lo stesso che verra' persistito nell'intent e spedito).
+  // Errore pubblico stabile: "shared-record-too-large" (size) | "shared-envelope-invalid" (header/boundary).
+  // reason/limit/measured sono diagnostici (nessun plaintext/ciphertext/key/cap/invite).
+  function assertDeliverableEnvelope(env){
+    var L = DELIVER_LIMITS;
+    function invalid(reason){ var e = new Error("shared-envelope-invalid"); e.reason = reason; throw e; }
+    function tooLarge(reason, limit, measured){ var e = new Error("shared-record-too-large"); e.reason = reason; e.limit = limit; e.measured = measured; throw e; }
+    if (!env || typeof env !== "object") invalid("envelope-assente");
+    if (env.protocolVersion !== 1) invalid("protocolVersion");
+    if (typeof env.spaceId !== "string" || env.spaceId.length === 0 || env.spaceId.length > L.MAX_ID_LEN) invalid("spaceId");
+    if (typeof env.recordId !== "string" || env.recordId.length === 0 || env.recordId.length > L.MAX_ID_LEN) invalid("recordId");
+    if (!L.RECORD_TYPES[env.recordType]) invalid("recordType");
+    if (!Number.isInteger(env.version) || env.version < 1) invalid("version");
+    if (typeof env.deviceId !== "string" || env.deviceId === "" || env.deviceId.length > L.MAX_ID_LEN) invalid("deviceId");
+    if (!Number.isInteger(env.keyVersion) || env.keyVersion < 1) invalid("keyVersion");
+    if (typeof env.deleted !== "boolean") invalid("deleted");
+    if (!isB64urlShape(env.iv) || env.iv.length > L.MAX_IV_B64) invalid("iv");
+    if (!isB64urlShape(env.ciphertext)) invalid("ciphertext-shape");
+    // SIZE — misura l'envelope FINALE, mai stimare dal plaintext. Ciphertext = gate piu' stretto (400);
+    // body-byte = safety net allineata al 413 (con questi limiti un envelope valido non lo raggiunge mai).
+    if (env.ciphertext.length > L.MAX_CIPHERTEXT_B64) tooLarge("ciphertext-too-large", L.MAX_CIPHERTEXT_B64, env.ciphertext.length);
+    var bodyBytes = envelopeBodyBytes(env);
+    if (bodyBytes > L.MAX_BODY_BYTES) tooLarge("request-body-too-large", L.MAX_BODY_BYTES, bodyBytes);
+  }
+
   // Costruisce l'item {store:"syncOutbox", record:intent} da un envelope gia' cifrato, applicando il
   // coalescing 7C (nativeWinner): se un intent piu' nuovo esiste gia', NON lo sovrascrive (ritorna null).
   async function intentItemFromEnvelope(env){
+    assertDeliverableEnvelope(env);   // F4/7G-O2a: gate DOPO la cifratura, PRIMA della transazione IDB (fail -> zero commit)
     var id = intentId(env);
     var ex = await DB().get("syncOutbox", id), now = Date.now();
     var inM = { version: env.version, deviceId: env.deviceId, deleted: env.deleted === true };
@@ -7307,6 +7347,9 @@ if ("serviceWorker" in navigator){
     _commitSharedRecordWithIntent: commitSharedRecordWithIntent,
     _buildIntentItem: buildIntentItem,
     _intentItemFromEnvelope: intentItemFromEnvelope,
+    _assertDeliverableEnvelope: assertDeliverableEnvelope,   // F4/7G-O2a: gate (hook di test)
+    _envelopeBodyBytes: envelopeBodyBytes,                    // F4/7G-O2a: misura byte UTF-8 (hook di test)
+    _deliverLimits: DELIVER_LIMITS,                           // F4/7G-O2a: mirror limiti Worker (hook di test)
     createInvite: createInvite,
     parseInvite: parseInvite,
     _getRemoteInitProof: getRemoteInitProof,          // F4/7G-Cap2: proof sticky (hook di test / diagnostica RO)
@@ -8118,6 +8161,105 @@ if ("serviceWorker" in navigator){
         ok("SEC2. proof: fingerprint one-way (cf1:<sha256hex>, no plaintext cap)", /^cf1:[0-9a-f]{64}$/.test(secProof.capabilityFingerprint));
         ok("SEC3. proof: SOLO chiavi minime (capabilityFingerprint/observedAt/source)", JSON.stringify(Object.keys(secProof).sort()) === JSON.stringify(["capabilityFingerprint", "observedAt", "source"]));
       } finally { window.fetch = origFetch; }
+
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    },
+
+    /* F4 · Passo 7G-O2a — SHARED DELIVERABILITY SIZE GATE (hermetic, no rete).
+       Impossibile committare durabilmente uno Shared source + intent con un envelope gia'
+       deterministicamente non deliverable (size/boundary statica). Gate DOPO la cifratura, PRIMA della
+       transazione IDB (encrypt once, validate exact, atomic commit). Il Worker resta la safety net. */
+    _testDeliverabilityGate: async function(){
+      var r = [], ok = function(n, c){ r.push({ name: n, pass: !!c }); };
+      async function catchErr(fn){ try { await fn(); return null; } catch(e){ return e; } }
+      async function throwsMsg(fn){ var e = await catchErr(fn); return e ? e.message : null; }
+      var SR = window.sharedRuntime, NS = window.nativeSync, C = window.nativeCrypto, DBx = window.calculonDB;
+      var L = NS._deliverLimits;
+      async function txCount(sid){ return (await DBx.list("transactions", function(t){ return t && t.spaceId === sid && t.derived !== true; })).length; }
+      async function derivedCount(sid){ return (await DBx.list("transactions", function(t){ return t && t.derived === true && t.sourceSpaceId === sid; })).length; }
+      async function intentFor(sid, rid){ return await DBx.get("syncOutbox", "sync:" + sid + ":transaction:" + rid); }
+      var HUGE = new Array(40001).join("x");   // ~40 KiB note -> ciphertext b64 ~53 KiB > 49152
+
+      var s = await SR.createSpace({ kind: "ongoing", name: "Gate", selfName: "A" });
+      var SP1 = s.spaceId, A = s.selfMemberId, BOB = await SR.addMember(SP1, { name: "Bob" });
+      function parts(amt){ var h = amt / 2, o = {}; o[A] = h; o[BOB] = h; return o; }
+
+      // ===== 1-2. encrypt ONCE, envelope reused (nessuna seconda cifratura per il gate) =====
+      var encCount = 0, origEnc = C.encryptSharedRecord;
+      C.encryptSharedRecord = async function(){ encCount++; return origEnc.apply(this, arguments); };
+      await SR.addMember(SP1, { name: "Uno" });   // 1 write shared -> 1 cifratura
+      C.encryptSharedRecord = origEnc;
+      ok("1. encrypt once: il gate NON re-cifra (count == 1)", encCount === 1);
+      ok("2. no second encryption: envelope reale riusato (single encrypt)", encCount === 1);
+
+      // ===== 3. ciphertext sotto limite -> commit =====
+      var tOk = await SR.createExpense(SP1, { amount: 100, paidById: A, allocationMode: "exact", parts: parts(100), date: "2026-09-01", note: "cena" });
+      ok("3. ciphertext under -> commit (source + intent presenti)", (await DBx.get("transactions", tOk)) != null && (await intentFor(SP1, tOk)) != null);
+
+      // ===== 4 + 9 + 10. ciphertext over -> nessun commit (zero source, zero intent) =====
+      var txBefore = await txCount(SP1);
+      var eOver = await catchErr(function(){ return SR.createExpense(SP1, { amount: 100, paidById: A, allocationMode: "exact", parts: parts(100), date: "2026-09-01", note: HUGE }); });
+      ok("4. ciphertext over -> shared-record-too-large", eOver && eOver.message === "shared-record-too-large" && eOver.reason === "ciphertext-too-large");
+      ok("9. create oversize -> zero source (txCount invariato)", (await txCount(SP1)) === txBefore);
+      ok("10. create oversize -> zero intent per il record oversize", (await DBx.list("syncOutbox", function(x){ return x && x.spaceId === SP1 && x.recordType === "transaction" && x.recordId !== tOk; })).length === 0);
+
+      // ===== 5. boundary ciphertext ESATTO (== Worker) su envelope reale clonato =====
+      var selfMem = await DBx.get("spaceMembers", A);
+      var baseEnv = await C.encryptSharedRecord("member", selfMem);   // envelope valido reale
+      function withCT(n){ var e = {}; for (var k in baseEnv) e[k] = baseEnv[k]; e.ciphertext = new Array(n + 1).join("A"); return e; }
+      ok("5a. ciphertext == MAX (49152) -> PASS", (await throwsMsg(function(){ NS._assertDeliverableEnvelope(withCT(L.MAX_CIPHERTEXT_B64)); })) === null);
+      var e5 = await catchErr(function(){ NS._assertDeliverableEnvelope(withCT(L.MAX_CIPHERTEXT_B64 + 1)); });
+      ok("5b. ciphertext == MAX+1 (49153) -> REJECT too-large", e5 && e5.message === "shared-record-too-large" && e5.reason === "ciphertext-too-large");
+
+      // ===== 6. body-byte sotto limite -> PASS (envelope normale) =====
+      ok("6. body byte under -> validator PASS", NS._envelopeBodyBytes(baseEnv) <= L.MAX_BODY_BYTES && (await throwsMsg(function(){ NS._assertDeliverableEnvelope(baseEnv); })) === null);
+
+      // ===== 7. body-byte SOPRA limite -> REJECT (branch body). Con i limiti reali un envelope valido non
+      //          puo' raggiungere 65536 (il gate ciphertext e' piu' stretto): esercito il branch body
+      //          alzando TEMPORANEAMENTE il solo mirror ciphertext (test-only), poi ripristino. =====
+      var savedCT = L.MAX_CIPHERTEXT_B64; L.MAX_CIPHERTEXT_B64 = 1e9;
+      var bodyOverEnv = withCT(70000);   // ciphertext shape ok, body > 65536
+      var e7 = await catchErr(function(){ NS._assertDeliverableEnvelope(bodyOverEnv); });
+      L.MAX_CIPHERTEXT_B64 = savedCT;
+      ok("7. body byte over -> shared-record-too-large (request-body-too-large)", e7 && e7.message === "shared-record-too-large" && e7.reason === "request-body-too-large");
+      ok("7b. limite reale ripristinato", L.MAX_CIPHERTEXT_B64 === 49152);
+
+      // ===== 8. UTF-8: la misura del body usa i BYTE, non la JS string length =====
+      var utf = {}; for (var k2 in baseEnv) utf[k2] = baseEnv[k2]; utf.deviceId = "caffeè\u{1F389}x";   // non-ASCII legalmente serializzabile
+      var jsLen = JSON.stringify(utf).length, byteLen = NS._envelopeBodyBytes(utf);
+      ok("8. body measure = byte UTF-8 (byteLength > JS length su non-ASCII)", byteLen === new TextEncoder().encode(JSON.stringify(utf)).byteLength && byteLen > jsLen);
+
+      // ===== 11-12. UPDATE oversize -> old source + old projection preservati =====
+      var oldSrc = await DBx.get("transactions", tOk), oldNote = oldSrc.note, oldVer = oldSrc.version, oldDerived = await derivedCount(SP1);
+      var eUpd = await catchErr(function(){ return SR.updateExpense(SP1, tOk, { note: HUGE }); });
+      ok("11. update oversize -> old source PRESERVATO (note+version invariati)", eUpd && eUpd.message === "shared-record-too-large" && (await DBx.get("transactions", tOk)).note === oldNote && (await DBx.get("transactions", tOk)).version === oldVer);
+      ok("12. update oversize -> old projection PRESERVATA (derived invariati)", (await derivedCount(SP1)) === oldDerived);
+
+      // ===== 13. huge note via DOMAIN API (no UI cap) rifiutata safely =====
+      var t13 = await txCount(SP1);
+      ok("13. huge note via domain createExpense -> reject + zero commit", (await throwsMsg(function(){ return SR.createExpense(SP1, { amount: 10, paidById: A, allocationMode: "exact", parts: parts(10), date: "2026-09-02", note: HUGE }); })) === "shared-record-too-large" && (await txCount(SP1)) === t13);
+
+      // ===== 14. record "import-like" (nota enorme senza cap, come legacy desc) rifiutato safely =====
+      var t14 = await txCount(SP1);
+      ok("14. import-like oversize record -> reject + zero commit", (await throwsMsg(function(){ return SR.createExpense(SP1, { amount: 10, paidById: A, allocationMode: "exact", parts: parts(10), date: "2026-09-03", note: HUGE + HUGE }); })) === "shared-record-too-large" && (await txCount(SP1)) === t14);
+
+      // ===== 15. transaction NORMALE invariata =====
+      var tN = await SR.createExpense(SP1, { amount: 30, paidById: A, allocationMode: "exact", parts: parts(30), date: "2026-09-04", note: "spesa" });
+      ok("15. normal transaction -> commit (source + intent + projection)", (await DBx.get("transactions", tN)) != null && (await intentFor(SP1, tN)) != null && (await derivedCount(SP1)) > 0);
+
+      // ===== 16. member / space / shareRule happy path invariati =====
+      var mAdd = await catchErr(function(){ return SR.addMember(SP1, { name: "Nadia" }); });
+      var rAdd = await catchErr(function(){ return SR.renameSpace(SP1, "Gate2"); });
+      var sAdd = await catchErr(function(){ return SR.setShareRule(SP1, { mode: "equal" }); });
+      ok("16. member/space/shareRule happy path invariati", mAdd === null && rAdd === null && sAdd === null);
+
+      // ===== 17. remoteInitProof intatta dopo una write oversize rifiutata =====
+      await NS._recordRemoteInitProof(SP1, "delivery-ack");
+      var proofBefore = await DBx.meta.get("remoteInitProof:" + SP1), rootBefore = await DBx.get("spaces", SP1);
+      await catchErr(function(){ return SR.createExpense(SP1, { amount: 10, paidById: A, allocationMode: "exact", parts: parts(10), date: "2026-09-05", note: HUGE }); });
+      var proofAfter = await DBx.meta.get("remoteInitProof:" + SP1), rootAfter = await DBx.get("spaces", SP1);
+      ok("17. remoteInitProof + root source intatti dopo reject oversize", proofAfter != null && proofBefore != null && proofAfter.capabilityFingerprint === proofBefore.capabilityFingerprint && rootAfter.version === rootBefore.version);
 
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
