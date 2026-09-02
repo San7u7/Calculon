@@ -6823,7 +6823,59 @@ if ("serviceWorker" in navigator){
         rep.superseded++;
       } else { await updateIntentGuarded(it.id, it.version, it.deviceId, function(r){ r.attempts = (r.attempts | 0) + 1; }); rep.pending++; }
     }
+    // F4/7G-O2b — RECOVERY DETERMINISTICA dei superseded-remote: materializza i winner remoti (una pull
+    // inbound normale per spazio, coalescata). Copre sia i supersede di questo pump sia quelli irrisolti da
+    // pump/crash precedenti (derivati, nessun nuovo stato persistente). Nessun fast-path dalla risposta PUT.
+    await recoverPendingPulls(spaceId, rep);
     return rep;
+  }
+
+  // F4/7G-O2b — un intent superseded-remote e' RECOVERED quando il winner remoto e' materializzato in locale:
+  // cursor sync >= lastSeq osservato AND il source locale non e' piu' il loser (eguaglia/domina remoteWinner).
+  function winnerMaterialized(cur, rw){
+    if (!rw) return true;
+    if (!cur) return false;                                   // source assente -> winner non materializzato
+    var cv = cur.version | 0, wv = rw.version | 0;
+    if (cv > wv) return true;                                 // superato da qualcosa di piu' nuovo
+    if (cv < wv) return false;                                // ancora indietro rispetto al winner
+    if ((cur.deleted === true) !== (rw.deleted === true)) return cur.deleted === true;   // tombstone-wins
+    return String(cur.deviceId) >= String(rw.deviceId);       // tiebreak deviceId (uguale = materializzato)
+  }
+  // Deriva gli spazi con recovery superseded IRRISOLTA (nessuno stato nuovo: intent superseded + cursor +
+  // source locale). needsPull = un pull avanzerebbe il cursore (cursor < lastSeq). Se il cursore e' gia'
+  // oltre ma il source resta loser (winner quarantinato/undecryptable), la entry resta PENDING diagnostica
+  // ma needsPull=false: un ulteriore pull non aiuta (nessun pull ridondante perpetuo).
+  async function pendingPullRecovery(spaceId){
+    var sup = await DB().list("syncOutbox", function(x){ return x && x.status === "superseded-remote" && (spaceId == null || x.spaceId === spaceId); });
+    var bySpace = {};
+    for (var i = 0; i < sup.length; i++){
+      var it = sup[i], cursor = await getSyncSeq(it.spaceId);
+      var store = SYNC_TYPES[it.recordType];
+      var cur = store ? await DB().get(store, it.recordId) : null;
+      var resolved = (cursor >= (it.lastSeq | 0)) && winnerMaterialized(cur, it.remoteWinner);
+      if (resolved) continue;
+      var e = bySpace[it.spaceId] || (bySpace[it.spaceId] = { spaceId: it.spaceId, targetSeq: 0, needsPull: false });
+      if ((it.lastSeq | 0) > e.targetSeq) e.targetSeq = it.lastSeq | 0;
+      if (cursor < (it.lastSeq | 0)) e.needsPull = true;
+    }
+    return Object.keys(bySpace).map(function(k){ return bySpace[k]; });
+  }
+  var _recovering = {};   // guardia di re-entrancy per spazio (l'apply inbound puo' pokare deliverPending)
+  // Esegue una pull inbound NORMALE per ogni spazio che ne ha bisogno (decrypt/boundary/comparator/apply/
+  // projection/cursor). Coalescata per spazio (una sola pull per spazio per ciclo). Idempotente e bounded.
+  async function recoverPendingPulls(spaceId, rep){
+    var need = await pendingPullRecovery(spaceId);
+    if (rep){ rep.recovered = 0; rep.recoveryPending = 0; }
+    for (var i = 0; i < need.length; i++){
+      var n = need[i];
+      if (n.needsPull && !_recovering[n.spaceId]){
+        _recovering[n.spaceId] = true;
+        try { await pullSpace(n.spaceId); } catch(e){} finally { delete _recovering[n.spaceId]; }   // offline/HOLD/auth -> resta derivabile
+      }
+      var still = await pendingPullRecovery(n.spaceId);
+      if (rep){ if (still.length === 0) rep.recovered++; else rep.recoveryPending++; }
+    }
+    return need.length;
   }
   // Trigger prudente fire-and-forget: una failure di rete non tocca la write gia' committata.
   function poke(spaceId){ if (_autoDeliver){ try { deliverPending(spaceId).catch(function(){}); } catch(e){} } }
@@ -7337,6 +7389,8 @@ if ("serviceWorker" in navigator){
     ensureSpaceCapability: ensureSpaceCapability,
     deliverPending: deliverPending,
     pullSpace: pullSpace,
+    pendingPullRecovery: pendingPullRecovery,   // F4/7G-O2b: diagnostica read-only (spazi con recovery irrisolta, targetSeq)
+    _recoverPendingPulls: recoverPendingPulls,   // F4/7G-O2b: hook di test
     getSyncSeq: getSyncSeq,
     setSyncSeq: setSyncSeq,
     enableAutoDelivery: function(baseUrl){ if (baseUrl) _apiBase = baseUrl; _autoDeliver = true; },
@@ -8260,6 +8314,148 @@ if ("serviceWorker" in navigator){
       await catchErr(function(){ return SR.createExpense(SP1, { amount: 10, paidById: A, allocationMode: "exact", parts: parts(10), date: "2026-09-05", note: HUGE }); });
       var proofAfter = await DBx.meta.get("remoteInitProof:" + SP1), rootAfter = await DBx.get("spaces", SP1);
       ok("17. remoteInitProof + root source intatti dopo reject oversize", proofAfter != null && proofBefore != null && proofAfter.capabilityFingerprint === proofBefore.capabilityFingerprint && rootAfter.version === rootBefore.version);
+
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    },
+
+    /* F4 · Passo 7G-O2b — SUPERSEDED-REMOTE DETERMINISTIC RECOVERY (hermetic, fetch mock del Worker).
+       Un intent dichiarato superseded-remote resta TERMINALE ma il client materializza deterministicamente
+       il winner remoto via pull inbound normale (no fast-path dalla risposta PUT), coalescato per spazio.
+       Completamento DERIVATO (cursor>=lastSeq AND source non piu' loser) -> nessuno stato nuovo, crash-safe. */
+    _testSupersededRecovery: async function(){
+      var r = [], ok = function(n, c){ r.push({ name: n, pass: !!c }); };
+      async function catchErr(fn){ try { await fn(); return null; } catch(e){ return e; } }
+      var SR = window.sharedRuntime, NS = window.nativeSync, C = window.nativeCrypto, DBx = window.calculonDB, NB = window.nativeSyncBoundary, K = window.spaceKeys;
+      function hdr(env){ return { version: env.version, deviceId: env.deviceId, deleted: env.deleted === true }; }
+      var SERVER = {}, GETS = {};   // per-space store + GET counter (per verificare una pull per spazio)
+      function srv(sid){ return SERVER[sid] || (SERVER[sid] = { seq: 0, recs: {} }); }
+      function seed(sid, rt, rid, env){ var s = srv(sid); s.seq++; s.recs[rt + ":" + rid] = { env: env, seq: s.seq }; return s.seq; }
+      function put(sid, rt, rid, env){
+        var s = srv(sid), k = rt + ":" + rid, cur = s.recs[k], inc = hdr(env);
+        var win = cur ? NB.nativeWinner(inc, hdr(cur.env)) : inc;
+        if (!cur || win === inc){ s.seq++; s.recs[k] = { env: env, seq: s.seq }; return { accepted: true, winner: hdr(env), seq: s.seq }; }
+        return { accepted: false, winner: hdr(cur.env), seq: s.seq };
+      }
+      function get(sid, since){ var s = srv(sid); GETS[sid] = (GETS[sid] | 0) + 1; var rows = Object.values(s.recs).filter(function(x){ return x.seq > since; }).sort(function(a, b){ return a.seq - b.seq; }).map(function(x){ return x.env; }); return { seq: s.seq, records: rows }; }
+      var origFetch = window.fetch;
+      window.fetch = async function(url, opts){
+        var u = new URL(url, location.origin), m = u.pathname.match(/^\/api\/space\/([^/]+)(?:\/([^/]+)\/([^/]+))?$/), sid = decodeURIComponent(m[1]);
+        if (opts && opts.method === "PUT"){ var env = JSON.parse(opts.body); return { status: 200, json: async function(){ return put(sid, decodeURIComponent(m[2]), decodeURIComponent(m[3]), env); } }; }
+        var since = parseInt(u.searchParams.get("since") || "0", 10);
+        return { status: 200, json: async function(){ return get(sid, since); } };
+      };
+      NS._setApiBase("");
+      function txRec(id, sid, A, BOB, ver, dev, amount, note){ return { id: id, spaceId: sid, type: "expense", amount: amount, paidById: A, allocations: [{ memberId: A, amount: amount / 2 }, { memberId: BOB, amount: amount / 2 }], allocationMode: "exact", fromMemberId: null, toMemberId: null, date: "2026-09-01", note: note, deleted: false, version: ver, deviceId: dev }; }
+      async function srcT(id){ return await DBx.get("transactions", id); }
+      async function intentT(sid, id){ return await DBx.get("syncOutbox", "sync:" + sid + ":transaction:" + id); }
+      async function derivedCount(sid){ return (await DBx.list("transactions", function(t){ return t && t.derived === true && t.sourceSpaceId === sid; })).length; }
+      async function intentsForRecord(id){ return (await DBx.list("syncOutbox", function(x){ return x && x.recordId === id; })).length; }
+
+      try {
+        // ===== SETUP: spazio + membri, un tx locale v1, il remote ha gia' un winner v2 (dRemote) =====
+        var s = await SR.createSpace({ kind: "ongoing", name: "Sup", selfName: "A" });
+        var SP = s.spaceId, A = s.selfMemberId, BOB = await SR.addMember(SP, { name: "Bob" });
+        var T = await SR.createExpense(SP, { amount: 100, paidById: A, allocationMode: "exact", parts: (function(){ var o = {}; o[A] = 50; o[BOB] = 50; return o; })(), date: "2026-09-01", note: "local-v1" });
+        var winnerEnv = await C.encryptSharedRecord("transaction", txRec(T, SP, A, BOB, 2, "dRemote", 200, "remote-winner"));
+        seed(SP, "transaction", T, winnerEnv);   // il remote possiede gia' il winner v2
+
+        // ===== 1-9. supersede + recovery deterministica in un solo deliverPending =====
+        ok("1. intent locale T pending prima del deliver", (await intentT(SP, T)).status === "pending");
+        var rep = await NS.deliverPending(SP);
+        ok("2/3. PUT -> winner remoto dominante -> intent superseded-remote", (await intentT(SP, T)).status === "superseded-remote" && rep.superseded >= 1);
+        ok("4/5. recovery pull -> winner materializzato (source v2/dRemote/amount 200)", rep.recovered >= 1 && (await srcT(T)).version === 2 && (await srcT(T)).deviceId === "dRemote" && (await srcT(T)).amount === 200);
+        ok("6. projection aggiornata dal winner (derived presenti)", (await derivedCount(SP)) > 0);
+        ok("7. cursor >= remote lastSeq", (await NS.getSyncSeq(SP)) >= (await intentT(SP, T)).lastSeq);
+        ok("8. loser NON re-emesso (nessun nuovo intent pending per T; resta 1 intent superseded)", (await intentsForRecord(T)) === 1 && (await intentT(SP, T)).status === "superseded-remote");
+        ok("9. superseded resta TERMINALE (non torna pending)", (await intentT(SP, T)).status === "superseded-remote");
+        ok("9b. recovery risolta -> pendingPullRecovery vuoto", (await NS.pendingPullRecovery(SP)).length === 0);
+
+        // ===== 10-11. crash dopo superseded, PRIMA della pull -> reload riprende deterministicamente =====
+        var s2 = await SR.createSpace({ kind: "ongoing", name: "Crash", selfName: "A" });
+        var SP2 = s2.spaceId, A2 = s2.selfMemberId, BOB2 = await SR.addMember(SP2, { name: "Bob" });
+        var T2 = await SR.createExpense(SP2, { amount: 100, paidById: A2, allocationMode: "exact", parts: (function(){ var o = {}; o[A2] = 50; o[BOB2] = 50; return o; })(), date: "2026-09-01", note: "loc" });
+        seed(SP2, "transaction", T2, await C.encryptSharedRecord("transaction", txRec(T2, SP2, A2, BOB2, 2, "dRemote", 200, "win2")));
+        // "crash prima della pull": la pull di recovery fallisce (offline) -> patch temporanea della GET.
+        var failGet = true; var mockFetch = window.fetch;
+        window.fetch = async function(url, opts){ if ((!opts || opts.method !== "PUT") && failGet) throw new Error("net-fail"); return mockFetch(url, opts); };
+        var repC = await NS.deliverPending(SP2);
+        window.fetch = mockFetch;
+        ok("10. crash/offline prima della pull -> superseded persistito + recovery INCOMPLETA", (await intentT(SP2, T2)).status === "superseded-remote" && repC.recoveryPending >= 1 && (await srcT(T2)).version === 1);
+        ok("10b. stato recovery DERIVABILE dopo crash (pendingPullRecovery non vuoto, needsPull)", (function(list){ return list.length === 1 && list[0].needsPull === true && list[0].targetSeq > 0; })(await NS.pendingPullRecovery(SP2)));
+        // "reload -> resume": ritrigger (deliverPending / _recoverPendingPulls) con rete disponibile
+        var repR = await NS._recoverPendingPulls(SP2, {});
+        ok("11. reload -> recovery ripresa -> winner materializzato (v2) + risolta", (await srcT(T2)).version === 2 && (await NS.pendingPullRecovery(SP2)).length === 0);
+
+        // ===== 12-13. HOLD (key mancante) durante recovery -> incompleta; import key -> retry -> completa =====
+        var s3 = await SR.createSpace({ kind: "ongoing", name: "Hold", selfName: "A" });
+        var SP3 = s3.spaceId, A3 = s3.selfMemberId, BOB3 = await SR.addMember(SP3, { name: "Bob" });
+        var T3 = await SR.createExpense(SP3, { amount: 100, paidById: A3, allocationMode: "exact", parts: (function(){ var o = {}; o[A3] = 50; o[BOB3] = 50; return o; })(), date: "2026-09-01", note: "loc" });
+        var holdKey = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
+        var rawHold = await (async function(){ var raw = await crypto.subtle.exportKey("raw", holdKey); var b = new Uint8Array(raw), o = ""; for (var i = 0; i < b.length; i++) o += String.fromCharCode(b[i]); return btoa(o).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); })();
+        seed(SP3, "transaction", T3, await C._encryptWith("transaction", txRec(T3, SP3, A3, BOB3, 2, "dRemote", 200, "held"), holdKey, 9));   // keyVersion 9 non importata -> HOLD
+        var repH = await NS.deliverPending(SP3);
+        ok("12. HOLD durante recovery -> incompleta (source v1, cursor fermo, recovery pending)", (await srcT(T3)).version === 1 && repH.recoveryPending >= 1 && (await NS.pendingPullRecovery(SP3)).length === 1);
+        await K.importSpaceKey(SP3, 9, rawHold);   // import key -> retry
+        var repH2 = await NS._recoverPendingPulls(SP3, {});
+        ok("13. import key -> retry -> winner materializzato (v2) + risolta", (await srcT(T3)).version === 2 && (await NS.pendingPullRecovery(SP3)).length === 0);
+
+        // ===== 14. QUARANTINE (wrong key) durante recovery -> diagnostica preservata, NON falso-completo =====
+        var s4 = await SR.createSpace({ kind: "ongoing", name: "Quar", selfName: "A" });
+        var SP4 = s4.spaceId, A4 = s4.selfMemberId, BOB4 = await SR.addMember(SP4, { name: "Bob" });
+        var T4 = await SR.createExpense(SP4, { amount: 100, paidById: A4, allocationMode: "exact", parts: (function(){ var o = {}; o[A4] = 50; o[BOB4] = 50; return o; })(), date: "2026-09-01", note: "loc" });
+        var wrongKey = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
+        var spKv = (await DBx.get("spaces", SP4)).keyVersion || 1;
+        seed(SP4, "transaction", T4, await C._encryptWith("transaction", txRec(T4, SP4, A4, BOB4, 2, "dRemote", 200, "poison"), wrongKey, spKv));   // key sbagliata alla keyVersion locale -> decrypt-failed -> quarantine
+        var qBefore = (await NS.listQuarantine(SP4)).length;
+        var repQ = await NS.deliverPending(SP4);
+        var recQ = await NS.pendingPullRecovery(SP4);
+        ok("14. winner quarantinato -> recovery NON falso-completa (source resta v1, entry diagnostica, needsPull=false)", (await srcT(T4)).version === 1 && (await NS.listQuarantine(SP4)).length > qBefore && recQ.length === 1 && recQ[0].needsPull === false);
+
+        // ===== 15. multipli superseded stesso spazio -> UNA sola pull =====
+        var s5 = await SR.createSpace({ kind: "ongoing", name: "Multi", selfName: "A" });
+        var SP5 = s5.spaceId, A5 = s5.selfMemberId, BOB5 = await SR.addMember(SP5, { name: "Bob" });
+        var Ta = await SR.createExpense(SP5, { amount: 100, paidById: A5, allocationMode: "exact", parts: (function(){ var o = {}; o[A5] = 50; o[BOB5] = 50; return o; })(), date: "2026-09-01", note: "a" });
+        var Tb = await SR.createExpense(SP5, { amount: 100, paidById: A5, allocationMode: "exact", parts: (function(){ var o = {}; o[A5] = 50; o[BOB5] = 50; return o; })(), date: "2026-09-02", note: "b" });
+        seed(SP5, "transaction", Ta, await C.encryptSharedRecord("transaction", txRec(Ta, SP5, A5, BOB5, 2, "dRemote", 200, "wa")));
+        seed(SP5, "transaction", Tb, await C.encryptSharedRecord("transaction", txRec(Tb, SP5, A5, BOB5, 2, "dRemote", 200, "wb")));
+        GETS[SP5] = 0;
+        var repM = await NS.deliverPending(SP5);
+        ok("15. 2 superseded stesso spazio -> UNA pull (coalescing) + entrambi materializzati", GETS[SP5] === 1 && repM.superseded >= 2 && (await srcT(Ta)).version === 2 && (await srcT(Tb)).version === 2);
+
+        // ===== 16. superseded su due spazi -> una pull per spazio =====
+        var s6 = await SR.createSpace({ kind: "ongoing", name: "SpX", selfName: "A" }); var SP6 = s6.spaceId, A6 = s6.selfMemberId, B6 = await SR.addMember(SP6, { name: "Bob" });
+        var s7 = await SR.createSpace({ kind: "ongoing", name: "SpY", selfName: "A" }); var SP7 = s7.spaceId, A7 = s7.selfMemberId, B7 = await SR.addMember(SP7, { name: "Bob" });
+        var T6 = await SR.createExpense(SP6, { amount: 100, paidById: A6, allocationMode: "exact", parts: (function(){ var o = {}; o[A6] = 50; o[B6] = 50; return o; })(), date: "2026-09-01", note: "x" });
+        var T7 = await SR.createExpense(SP7, { amount: 100, paidById: A7, allocationMode: "exact", parts: (function(){ var o = {}; o[A7] = 50; o[B7] = 50; return o; })(), date: "2026-09-01", note: "y" });
+        seed(SP6, "transaction", T6, await C.encryptSharedRecord("transaction", txRec(T6, SP6, A6, B6, 2, "dRemote", 200, "w6")));
+        seed(SP7, "transaction", T7, await C.encryptSharedRecord("transaction", txRec(T7, SP7, A7, B7, 2, "dRemote", 200, "w7")));
+        GETS[SP6] = 0; GETS[SP7] = 0;
+        var repAll = await NS.deliverPending();   // tutti gli spazi
+        ok("16. superseded su 2 spazi -> una pull per spazio + entrambi materializzati", GETS[SP6] === 1 && GETS[SP7] === 1 && (await srcT(T6)).version === 2 && (await srcT(T7)).version === 2);
+
+        // ===== 17. stale ack / delivery normale NON crea recovery =====
+        var s8 = await SR.createSpace({ kind: "ongoing", name: "Ack", selfName: "A" }); var SP8 = s8.spaceId, A8 = s8.selfMemberId, B8 = await SR.addMember(SP8, { name: "Bob" });
+        var T8 = await SR.createExpense(SP8, { amount: 100, paidById: A8, allocationMode: "exact", parts: (function(){ var o = {}; o[A8] = 50; o[B8] = 50; return o; })(), date: "2026-09-01", note: "ok" });
+        var repN = await NS.deliverPending(SP8);   // nessun winner remoto conflittuale -> accepted
+        ok("17. delivery normale (accepted) -> nessun superseded, nessuna recovery", (await intentT(SP8, T8)).status === "delivered" && (await NS.pendingPullRecovery(SP8)).length === 0 && (repN.superseded | 0) === 0);
+
+        // ===== 18-19. nuova write locale DOPO recovery -> bump dal winner corrente, nessun duplicato =====
+        var derBefore = await derivedCount(SP);
+        var T_upd = await SR.updateExpense(SP, T, { note: "post-recovery" });   // T e' a v2 (winner) dopo recovery
+        ok("18. nuova write dopo recovery -> bump dal winner (v3) + intent pending", (await srcT(T)).version === 3 && (await intentT(SP, T)).status === "pending");
+        ok("19. nessun duplicato di source/projection (un solo source T, derived coerenti)", (await DBx.list("transactions", function(t){ return t && t.id === T; })).length === 1 && (await derivedCount(SP)) === derBefore);
+
+        // ===== 20. remoteInitProof non toccata da un recovery superseded =====
+        await NS._recordRemoteInitProof(SP, "delivery-ack");
+        var proofBefore = await DBx.meta.get("remoteInitProof:" + SP);
+        var s9 = await SR.createSpace({ kind: "ongoing", name: "Proof", selfName: "A" }); var SP9 = s9.spaceId, A9 = s9.selfMemberId, B9 = await SR.addMember(SP9, { name: "Bob" });
+        var T9 = await SR.createExpense(SP9, { amount: 100, paidById: A9, allocationMode: "exact", parts: (function(){ var o = {}; o[A9] = 50; o[B9] = 50; return o; })(), date: "2026-09-01", note: "p" });
+        seed(SP9, "transaction", T9, await C.encryptSharedRecord("transaction", txRec(T9, SP9, A9, B9, 2, "dRemote", 200, "w9")));
+        await NS.deliverPending(SP9);
+        var proofAfter = await DBx.meta.get("remoteInitProof:" + SP);
+        ok("20. remoteInitProof invariata dopo recovery superseded", proofAfter != null && proofBefore != null && proofAfter.capabilityFingerprint === proofBefore.capabilityFingerprint);
+      } finally { window.fetch = origFetch; }
 
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
