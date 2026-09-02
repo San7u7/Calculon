@@ -3711,12 +3711,15 @@ if ("serviceWorker" in navigator){
 
   async function metaGet(key){ var db = await open(); return metaGetRaw(db, key); }
   async function metaSet(key, value){ var db = await open(); await metaSetRaw(db, key, value); return key; }
+  // rimozione FISICA di una chiave meta (i marker di workflow, es. selfRebuildPending, non sono record di
+  // dominio: assenza reale = "non pendente", quindi niente tombstone). L'unico uso e' cancellare marker.
+  async function metaDel(key){ var db = await open(); var tx = db.transaction("meta", "readwrite"); tx.objectStore("meta").delete(key); await txDone(tx); return key; }
 
   async function close(){ if (_db){ try { _db.close(); } catch(e){} _db = null; } }
 
   window.calculonDB = {
     open: open, get: get, put: put, del: del, list: list,
-    meta: { get: metaGet, set: metaSet },
+    meta: { get: metaGet, set: metaSet, del: metaDel },
     close: close,
     DB_NAME: DB_NAME, DB_VERSION: DB_VERSION, SCHEMA_TARGET: SCHEMA_TARGET, STORES: STORES.slice(),
     migrationIssues: async function(){ var db = await open(); return listaMeta(db, "migrationIssue:"); },
@@ -4105,6 +4108,7 @@ if ("serviceWorker" in navigator){
     if (authorityEffettiva(sp) !== "native") throw new Error("spazio non scrivibile: authority " + String(authorityEffettiva(sp)));
     if (sp.status !== "active") throw new Error("spazio non active: status " + String(sp.status));
     await verificaJoinReady(spaceId);   // F4/7F: join non ancora "ready" -> read-only
+    await verificaSelfRebuildPending(spaceId);   // F4/7G-Self2: reclaim projections incompleto -> read-only
     // F4/3C: invariante selfMemberId effettivo su ogni write nativo (unica funzione canonica, vedi verificaSelf).
     // Il self deve essere solo IDENTIFICABILE nello spazio, non partecipare alla singola transazione.
     await verificaSelf(sp);
@@ -4349,6 +4353,7 @@ if ("serviceWorker" in navigator){
     // F4/6B: modifica consentita solo con authority native (coerente con spazioScrivibile).
     if (authorityEffettiva(sp) !== "native") throw new Error("spazio non modificabile: authority " + String(authorityEffettiva(sp)));
     await verificaJoinReady(spaceId);   // F4/7F: rename/archive/restore/shareRule bloccati finche' join != ready
+    await verificaSelfRebuildPending(spaceId);   // F4/7G-Self2: reclaim projections incompleto -> read-only
     await verificaSelf(sp);             // F4/7G-Self: write Shared richiedono join ready AND self active (self-revoked)
     return sp;
   }
@@ -4369,6 +4374,15 @@ if ("serviceWorker" in navigator){
   async function verificaJoinReady(spaceId){
     var js = await db().meta.get("joinState:" + spaceId);
     if (js && js !== "ready") throw new Error("spazio non pronto: join " + js);
+  }
+  // F4/7G-Self2 — write guard di RECOVERY. Un reclaim delle Personal projections locale e' incompleto
+  // (marker selfRebuildPending:<spaceId> presente) -> Shared write bloccate con "self-rebuild-pending",
+  // ANCHE se joinState=ready e selfStatus=active (le proiezioni sono stale/incomplete finche' il rebuild
+  // non e' completato via resumeSelfRebuild). Vive in meta -> sopravvive al reload. Pull/read/decrypt/
+  // apply restano consentiti: qui si guardano SOLO le write. Precede verificaSelf perche' durante il
+  // rebuild il nuovo self e' gia' un membro attivo (selfStatus active) ma le proiezioni non lo riflettono.
+  async function verificaSelfRebuildPending(spaceId){
+    if (await db().meta.get("selfRebuildPending:" + spaceId)) throw new Error("self-rebuild-pending");
   }
   async function caricaMembro(spaceId, memberId){
     if (!memberId) throw new Error("memberId richiesto");
@@ -6762,6 +6776,16 @@ if ("serviceWorker" in navigator){
   async function getJoinState(spaceId){ return (await DB().meta.get("joinState:" + spaceId)) || null; }
   async function setJoinState(spaceId, st){ if (!JOIN_STATES[st]) throw new Error("join-state-invalido: " + st); await DB().meta.set("joinState:" + spaceId, st); return st; }
 
+  // F4/7G-Self2 — marker durevole di reclaim projection-rebuild INCOMPLETO. NON duplica lo stato revoked
+  // (che e' derivato dal membro Shared): rappresenta SOLO una transazione LOCALE di rebuild delle Personal
+  // projections ancora aperta. Presente = rebuild non completato -> Shared write bloccate. Assente = nessun
+  // reclaim projection-rebuild incompleto. Valore minimo { targetMemberId }. Vive in meta -> sopravvive al
+  // reload. NON contiene proiezioni/plaintext/key/cap/invite. E' recovery di projection, non stato identitario.
+  var SELF_REBUILD_PENDING = "selfRebuildPending:";
+  async function getSelfRebuildPending(spaceId){ return (await DB().meta.get(SELF_REBUILD_PENDING + spaceId)) || null; }
+  async function setSelfRebuildPending(spaceId, targetMemberId){ await DB().meta.set(SELF_REBUILD_PENDING + spaceId, { targetMemberId: targetMemberId }); }
+  async function clearSelfRebuildPending(spaceId){ await DB().meta.del(SELF_REBUILD_PENDING + spaceId); }
+
   function identico(local, remote){ return local && local.version === remote.version && String(local.deviceId) === String(remote.deviceId) && (local.deleted === true) === (remote.deleted === true); }
 
   // Applica UN record remoto (winner) con CAS + retry bounded. Ritorna "applied"|"local-wins"|"identical".
@@ -7149,26 +7173,65 @@ if ("serviceWorker" in navigator){
     return "active";
   }
 
+  // F4/7G-Self2 — validazione membro-target del reclaim (fail-closed): deve esistere, non tombstone, in-space,
+  // attivo. Usata sia da reclaimSelf (target nuovo) sia da resumeSelfRebuild (target pending): se il target
+  // pending e' stato revocato remotamente durante la recovery, il resume fallisce con reclaim-member-invalid
+  // e il caller sceglie un nuovo target valido via reclaimSelf (che sovrascrive il marker).
+  async function reclaimTargetValido(spaceId, memberId){
+    var m = await DB().get("spaceMembers", memberId);
+    if (!m || m.deleted === true || m.spaceId !== spaceId || m.active === false) throw new Error("reclaim-member-invalid");
+    return m;
+  }
+  // Core DURABLE condiviso (nessuna duplicazione della logica rebuild). Precondizione: marker
+  // selfRebuildPending gia' persistito col target, target gia' validato. Ordine: persist selfMemberId
+  // (LOCAL: nessun bump/deviceId/intent/delivery/modifica Shared) -> rebuild proiezioni -> SOLO dopo il
+  // successo elimina il marker. Se il rebuild fallisce, il marker resta -> write bloccate, retry idempotente.
+  async function completeSelfRebuild(spaceId, targetMemberId){
+    var sp = await DB().get("spaces", spaceId);
+    if (sp.selfMemberId !== targetMemberId){ sp.selfMemberId = targetMemberId; await DB().put("spaces", sp); }   // completa lo switch (crash boundary A)
+    await window.personalProjection.rebuildSpace(spaceId);      // idempotente; fallisce -> marker resta (retry-safe)
+    await clearSelfRebuildPending(spaceId);                     // clear SOLO dopo rebuild riuscito
+    return { spaceId: spaceId, selfMemberId: targetMemberId, state: "active" };
+  }
+
   /* reclaimSelf: dopo una revoca, il device sceglie un NUOVO membro attivo come self. Distinto da
-     claimSelf (first-join con selfMemberId == null): reclaimSelf agisce SOLO su uno stato revoked.
-     Puramente LOCALE: nessun bump version, nessun deviceId causale, nessun intent, nessuna delivery,
-     nessuna modifica al membro Shared. Poi rebuild delle proiezioni; solo dopo il rebuild lo spazio e'
-     di nuovo scrivibile (selfStatus active). Crash-safety come claimSelf: selfMemberId persistito PRIMA
-     del rebuild; se il rebuild fallisce, il resume e' re-invocare reclaimSelf con lo STESSO membro
-     (ramo idempotente sotto), che ricalcola il rebuild. Nessun marker "rebuild pending" duplicato. */
+     claimSelf (first-join con selfMemberId == null): reclaimSelf agisce SOLO su uno stato revoked (o su un
+     reclaim gia' in corso da completare/ri-targettizzare). Puramente LOCALE: nessun bump version, nessun
+     deviceId causale, nessun intent, nessuna delivery, nessuna modifica al membro Shared.
+     Ordine DURABLE (crash-safe): valida target -> persist marker(target) -> persist selfMemberId=target ->
+     rebuild -> solo dopo il successo clear marker. Marker assente = nessun reclaim projection-rebuild
+     incompleto. Il marker sovrascrive deterministicamente un eventuale target pending ormai invalido col
+     nuovo target valido scelto dal caller. Un resume dello stesso reclaim passa dallo stesso core
+     (completeSelfRebuild): nessuna duplicazione della logica rebuild. */
   async function reclaimSelf(spaceId, newMemberId){
     var sp = await DB().get("spaces", spaceId);
     if (!sp || sp.deleted === true) throw new Error("spazio inesistente: " + spaceId);
     if (!nativeBorn(sp)) throw new Error("reclaim: spazio non native-born");
     var st = await selfStatus(spaceId);
     if (st === "no-self") throw new Error("reclaim-no-self");                                   // first-join -> usa claimSelf
-    if (st === "active" && sp.selfMemberId !== newMemberId) throw new Error("reclaim-not-revoked");   // identita' sana: nessun cambio arbitrario
-    // consentito: st === "revoked" (reclaim vero) | st === "active" && selfMemberId === newMemberId (resume idempotente)
-    var m = await DB().get("spaceMembers", newMemberId);
-    if (!m || m.deleted === true || m.spaceId !== spaceId || m.active === false) throw new Error("reclaim-member-invalid");
-    if (sp.selfMemberId !== newMemberId){ sp.selfMemberId = newMemberId; await DB().put("spaces", sp); }   // LOCAL: nessun bump/intent/delivery
-    await window.personalProjection.rebuildSpace(spaceId);   // fallisce -> selfStatus resta (retry: reclaimSelf stesso membro)
-    return { spaceId: spaceId, selfMemberId: newMemberId, state: "active" };
+    var pending = await getSelfRebuildPending(spaceId);
+    // identita' sana: cambio arbitrario del self ATTIVO vietato, SALVO un rebuild gia' in corso da
+    // completare/ri-targettizzare (marker presente). consentito: revoked (reclaim vero) | active &&
+    // selfMemberId===newMemberId (resume idempotente) | marker presente (retarget/resume).
+    if (st === "active" && !pending && sp.selfMemberId !== newMemberId) throw new Error("reclaim-not-revoked");
+    await reclaimTargetValido(spaceId, newMemberId);
+    await setSelfRebuildPending(spaceId, newMemberId);   // DURABLE: marker PRIMA dello switch (sovrascrive target pending stale)
+    return await completeSelfRebuild(spaceId, newMemberId);
+  }
+
+  /* resumeSelfRebuild: resume ESPLICITO di un reclaim projection-rebuild incompleto (marker presente).
+     Idempotente. Senza marker -> no-op stabile { state: "no-pending" }. Legge il targetMemberId, verifica
+     che sia ancora un membro valido/attivo (altrimenti reclaim-member-invalid, fail-closed: il caller
+     sceglie un nuovo target via reclaimSelf), poi passa dallo stesso core (completa anche lo switch di
+     selfMemberId se il crash e' avvenuto prima della sua persistenza) e clear del marker dopo il successo. */
+  async function resumeSelfRebuild(spaceId){
+    var sp = await DB().get("spaces", spaceId);
+    if (!sp || sp.deleted === true) throw new Error("spazio inesistente: " + spaceId);
+    if (!nativeBorn(sp)) throw new Error("reclaim: spazio non native-born");
+    var pending = await getSelfRebuildPending(spaceId);
+    if (!pending) return { spaceId: spaceId, selfMemberId: sp.selfMemberId, state: "no-pending" };   // idempotente
+    await reclaimTargetValido(spaceId, pending.targetMemberId);
+    return await completeSelfRebuild(spaceId, pending.targetMemberId);
   }
 
   // joinState: superficie di sola lettura sullo stato persistente (meta). "pending" = importing|awaiting-self.
@@ -7213,6 +7276,10 @@ if ("serviceWorker" in navigator){
     claimSelf: claimSelf,
     selfStatus: selfStatus,          // F4/7G-Self: stato self derivato (no-self|active|revoked)
     reclaimSelf: reclaimSelf,        // F4/7G-Self: reclaim locale dopo revoca
+    resumeSelfRebuild: resumeSelfRebuild,   // F4/7G-Self2: resume esplicito di un rebuild projections incompleto
+    _getSelfRebuildPending: getSelfRebuildPending,   // hook di test (marker crash-safety)
+    _setSelfRebuildPending: setSelfRebuildPending,   // hook di test
+    _clearSelfRebuildPending: clearSelfRebuildPending,   // hook di test
     getJoinState: getJoinState,
     setJoinState: setJoinState,
     listQuarantine: listQuarantine,                    // F4/7G-P: diagnostica sola lettura
@@ -7775,6 +7842,123 @@ if ("serviceWorker" in navigator){
       // comportamento attuale (mitigato in-app da autoDelivery). Riportato come blocker separato.
       ok("7G-CAP KNOWN-LIMITATION: root re-update perde la prova delivered -> createInvite falso-reject [status=" + rootAfter.status + "]",
          rootAfter.status === "pending" && reg === "space-not-remotely-initialized");
+
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    },
+
+    /* F4 · Passo 7G-Self2 — RECLAIM PROJECTION CRASH SAFETY (hermetic, no rete).
+       Un crash fra la persistenza del nuovo selfMemberId e il completamento del rebuild delle Personal
+       projections NON deve poter riaprire le Shared write con proiezioni stale. Marker durevole
+       selfRebuildPending:<spaceId> -> invariante di scrittura: join ready AND self active AND no self
+       rebuild pending. Ordine durable: marker -> selfMemberId -> rebuild -> clear. */
+    _testSelfRebuildCrashSafety: async function(){
+      var r = [], ok = function(n, c){ r.push({ name: n, pass: !!c }); };
+      async function throwsMsg(fn){ try { await fn(); return null; } catch(e){ return (e && e.message) || "err"; } }
+      var SR = window.sharedRuntime, NS = window.nativeSync, C = window.nativeCrypto, DBx = window.calculonDB, PJ = window.personalProjection;
+      async function sp(sid){ return await DBx.get("spaces", sid); }
+      async function encMember(rec){ return await C.encryptSharedRecord("member", rec); }
+      async function outCount(sid){ return (await DBx.list("syncOutbox", function(x){ return x && x.spaceId === sid; })).length; }
+      async function membersFor(sid){ return (await DBx.list("spaceMembers", function(m){ return m && m.spaceId === sid; })).length; }
+      // revoca il self via winner remoto tombstone (revoca applicativa legittima, come nella suite Self)
+      async function revokeSelf(sid){ var s = await sp(sid), m = await DBx.get("spaceMembers", s.selfMemberId);
+        await NS._applyBatch(sid, s, s.selfMemberId, [ await encMember({ id: m.id, spaceId: sid, name: m.name, active: true, deleted: true, version: (m.version | 0) + 1, deviceId: "dRemote" }) ], 100); }
+      var origRb = PJ.rebuildSpace, origPut = DBx.put;
+
+      // ===== 1. marker persistito PRIMA dello switch di selfMemberId (crash boundary "A" reale) =====
+      var s1 = await SR.createSpace({ kind: "ongoing", name: "CS1", selfName: "Ada" });
+      var SP1 = s1.spaceId, ADA1 = s1.selfMemberId, BEA1 = await SR.addMember(SP1, { name: "Bea" });
+      await revokeSelf(SP1);
+      DBx.put = async function(store, rec, opts){ if (store === "spaces") throw new Error("put-sim-fail"); return origPut(store, rec, opts); };
+      var e1 = await throwsMsg(function(){ return NS.reclaimSelf(SP1, BEA1); });
+      DBx.put = origPut;
+      var pend1 = await NS._getSelfRebuildPending(SP1);
+      ok("1. marker persistito PRIMA dello switch selfMemberId", e1 === "put-sim-fail" && pend1 != null && pend1.targetMemberId === BEA1);
+      ok("1b. selfMemberId NON ancora switchato (crash boundary A)", (await sp(SP1)).selfMemberId === ADA1);
+
+      // ===== 2. crash boundary A: marker=Bea, self=Ada revoked -> resume completa switch + rebuild =====
+      ok("2. boundary A: write bloccata con marker -> self-rebuild-pending", (await throwsMsg(function(){ return SR.addMember(SP1, { name: "X" }); })) === "self-rebuild-pending");
+      var rA = await NS.resumeSelfRebuild(SP1);
+      ok("2b. boundary A resume: switch completato + selfStatus active", rA.state === "active" && (await sp(SP1)).selfMemberId === BEA1 && (await NS.selfStatus(SP1)) === "active");
+      ok("2c. boundary A resume: marker cleared", (await NS._getSelfRebuildPending(SP1)) === null);
+      ok("2d. boundary A resume: write riaperta", (await throwsMsg(function(){ return SR.addMember(SP1, { name: "Ivo" }); })) === null);
+
+      // ===== 3-4. crash boundary B: self switchato, rebuild fallito -> marker resta, write bloccata =====
+      var s3 = await SR.createSpace({ kind: "ongoing", name: "CS3", selfName: "Cora" });
+      var SP3 = s3.spaceId, DARIO3 = await SR.addMember(SP3, { name: "Dario" });
+      await revokeSelf(SP3);
+      PJ.rebuildSpace = async function(){ throw new Error("rebuild-sim-fail"); };
+      var e3 = await throwsMsg(function(){ return NS.reclaimSelf(SP3, DARIO3); });
+      PJ.rebuildSpace = origRb;
+      ok("3. boundary B: rebuild fallito -> errore propagato", e3 === "rebuild-sim-fail");
+      ok("3b. boundary B: selfMemberId switchato a Dario", (await sp(SP3)).selfMemberId === DARIO3);
+      ok("3c. boundary B: marker ANCORA presente (non cleared su fail)", (await NS._getSelfRebuildPending(SP3)) != null);
+      ok("4. write bloccata dopo reload con marker, NONOSTANTE selfStatus active", (await NS.selfStatus(SP3)) === "active" && (await throwsMsg(function(){ return SR.addMember(SP3, { name: "Y" }); })) === "self-rebuild-pending");
+
+      // ===== 5-7/9. resume: marker cleared SOLO dopo success; crash-during-rebuild retry idempotente =====
+      var membB3 = await membersFor(SP3), spVer3 = (await sp(SP3)).version;
+      PJ.rebuildSpace = async function(){ throw new Error("rebuild-sim-fail-2"); };
+      var e6 = await throwsMsg(function(){ return NS.resumeSelfRebuild(SP3); });
+      PJ.rebuildSpace = origRb;
+      ok("6. resume fallito -> marker NON cleared (clear solo dopo success)", e6 === "rebuild-sim-fail-2" && (await NS._getSelfRebuildPending(SP3)) != null);
+      var r5 = await NS.resumeSelfRebuild(SP3);
+      ok("5. resume rebuild riuscito -> active + projections consistenti (rebuild idempotente written 0)", r5.state === "active" && (await NS.selfStatus(SP3)) === "active" && (await PJ.rebuildSpace(SP3)).written === 0);
+      ok("7/9. crash-during-rebuild retry idempotente: marker cleared, no dup membri, zero version bump", (await NS._getSelfRebuildPending(SP3)) === null && (await membersFor(SP3)) === membB3 && (await sp(SP3)).version === spVer3);
+      ok("5b. write riaperta dopo resume", (await throwsMsg(function(){ return SR.addMember(SP3, { name: "Zed" }); })) === null);
+
+      // ===== 8. crash DOPO rebuild, PRIMA del clear: marker resta, retry idempotente -> clear =====
+      var s8 = await SR.createSpace({ kind: "ongoing", name: "CS8", selfName: "Ugo" });
+      var SP8 = s8.spaceId, UGO8 = s8.selfMemberId;
+      await NS._setSelfRebuildPending(SP8, UGO8);   // self attivo, projections gia' buone; crash simulato prima del clear
+      await PJ.rebuildSpace(SP8);
+      ok("8. crash dopo rebuild prima del clear: write bloccata (marker resta)", (await throwsMsg(function(){ return SR.addMember(SP8, { name: "Q" }); })) === "self-rebuild-pending");
+      var membB8 = await membersFor(SP8);
+      var r8 = await NS.resumeSelfRebuild(SP8);
+      ok("8b. retry -> stesso risultato -> marker cleared, write riaperta, no dup", r8.state === "active" && (await NS._getSelfRebuildPending(SP8)) === null && (await throwsMsg(function(){ return SR.addMember(SP8, { name: "Q2" }); })) === null && (await membersFor(SP8)) === (membB8 + 1));
+
+      // ===== 10-11. target pending revocato durante recovery -> fail-closed; nuovo target valido sostituisce =====
+      var s10 = await SR.createSpace({ kind: "ongoing", name: "CS10", selfName: "Ada" });
+      var SP10 = s10.spaceId, BEA10 = await SR.addMember(SP10, { name: "Bea" }), CARL10 = await SR.addMember(SP10, { name: "Carlo" });
+      await revokeSelf(SP10);
+      PJ.rebuildSpace = async function(){ throw new Error("rebuild-sim-fail"); };
+      await throwsMsg(function(){ return NS.reclaimSelf(SP10, BEA10); });   // marker=Bea, switch avvenuto, rebuild crash
+      PJ.rebuildSpace = origRb;
+      ok("10a. pending target Bea + write bloccata", (await NS._getSelfRebuildPending(SP10)).targetMemberId === BEA10 && (await throwsMsg(function(){ return SR.addMember(SP10, { name: "Z" }); })) === "self-rebuild-pending");
+      var beaRec = await DBx.get("spaceMembers", BEA10);
+      await NS._applyBatch(SP10, await sp(SP10), (await sp(SP10)).selfMemberId, [ await encMember({ id: BEA10, spaceId: SP10, name: beaRec.name, active: true, deleted: true, version: (beaRec.version | 0) + 1, deviceId: "dRemote" }) ], 200);
+      ok("10. resume verso target ormai revocato -> fail-closed reclaim-member-invalid", (await throwsMsg(function(){ return NS.resumeSelfRebuild(SP10); })) === "reclaim-member-invalid");
+      ok("10b. write ANCORA bloccata (marker resta, nessun auto-reclaim verso membro invalido)", (await NS._getSelfRebuildPending(SP10)) != null && (await throwsMsg(function(){ return SR.addMember(SP10, { name: "Z2" }); })) === "self-rebuild-pending");
+      var r11 = await NS.reclaimSelf(SP10, CARL10);
+      ok("11. nuovo target valido sostituisce il pending fallito -> active", r11.state === "active" && (await sp(SP10)).selfMemberId === CARL10 && (await NS._getSelfRebuildPending(SP10)) === null);
+      ok("11b. write riaperta col nuovo self", (await throwsMsg(function(){ return SR.addMember(SP10, { name: "Nia" }); })) === null);
+
+      // ===== 12-13. zero Shared side-effect: nessun intent, nessun version bump; resume no-op stabile =====
+      var s12 = await SR.createSpace({ kind: "ongoing", name: "CS12", selfName: "Ada" });
+      var SP12 = s12.spaceId, BEA12 = await SR.addMember(SP12, { name: "Bea" });
+      await revokeSelf(SP12);
+      var out12 = await outCount(SP12), ver12 = (await sp(SP12)).version;
+      await NS.reclaimSelf(SP12, BEA12);
+      var rn = await NS.resumeSelfRebuild(SP12);
+      ok("12. zero Shared intent da reclaim+resume", (await outCount(SP12)) === out12);
+      ok("13. zero version bump dello spazio da reclaim+resume", (await sp(SP12)).version === ver12);
+      ok("12b. resume senza marker (gia' completato) -> no-op stabile no-pending", rn.state === "no-pending");
+
+      // ===== 14. pull/apply inbound consentito mentre il marker e' presente =====
+      var s14 = await SR.createSpace({ kind: "ongoing", name: "CS14", selfName: "Ada" });
+      var SP14 = s14.spaceId, ADA14 = s14.selfMemberId;
+      await NS._setSelfRebuildPending(SP14, ADA14);
+      var seq14 = await NS.getSyncSeq(SP14);
+      var rp = await NS._applyBatch(SP14, await sp(SP14), ADA14, [ await encMember({ id: SP14 + ":gino", spaceId: SP14, name: "Gino", active: true, deleted: false, version: 1, deviceId: "dRemote" }) ], seq14 + 5);
+      ok("14. pull/apply inbound consentito mentre marker presente", rp.applied === 1 && (await NS.getSyncSeq(SP14)) === seq14 + 5 && (await DBx.get("spaceMembers", SP14 + ":gino")) != null);
+      await NS._clearSelfRebuildPending(SP14);
+
+      // ===== 15. restore semantics invariata: revoke->revoked (self-revoked, NO marker), restore->active =====
+      var s15 = await SR.createSpace({ kind: "ongoing", name: "CS15", selfName: "Rosa" });
+      var SP15 = s15.spaceId, ROSA15 = s15.selfMemberId, rVer = (await DBx.get("spaceMembers", ROSA15)).version;
+      await NS._applyBatch(SP15, await sp(SP15), ROSA15, [ await encMember({ id: ROSA15, spaceId: SP15, name: "Rosa", active: true, deleted: true, version: rVer + 1, deviceId: "dRemote" }) ], 5);
+      ok("15a. remote revoked -> revoked + self-revoked (NON self-rebuild-pending: nessun marker creato)", (await NS.selfStatus(SP15)) === "revoked" && (await NS._getSelfRebuildPending(SP15)) === null && (await throwsMsg(function(){ return SR.addMember(SP15, { name: "Z" }); })) === "self-revoked");
+      await NS._applyBatch(SP15, await sp(SP15), ROSA15, [ await encMember({ id: ROSA15, spaceId: SP15, name: "Rosa", active: true, deleted: false, version: rVer + 2, deviceId: "dRemote" }) ], 6);
+      ok("15. remote restore stesso self -> active automatico, nessun marker creato", (await NS.selfStatus(SP15)) === "active" && (await NS._getSelfRebuildPending(SP15)) === null && (await throwsMsg(function(){ return SR.addMember(SP15, { name: "Nia" }); })) === null);
 
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
