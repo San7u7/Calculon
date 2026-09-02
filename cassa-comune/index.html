@@ -149,6 +149,12 @@ button{cursor:pointer}
 }
 .sync[data-st="attesa"]{background:var(--sole);color:#fff}
 .sync[data-st="offline"]{background:var(--sole);color:#fff}
+/* F4/8B1 — stato Shared "problema di sincronizzazione" (riusa il token danger --rosso, contrasto su bianco) */
+.sync[data-st="problema"]{background:var(--rosso);color:#fff}
+/* F4/8B1 — riga lista con nome + tipo (Condiviso / Solo su questo dispositivo) su due righe */
+.membro-testo{display:flex;flex-direction:column;min-width:0;flex:1;gap:1px}
+.membro-testo .nome{flex:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.membro-tipo{font-size:12px;color:var(--grigio);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
 /* ---------- struttura ---------- */
 main{flex:1;display:flex;flex-direction:column;padding:8px var(--pad-pagina) 20px}
@@ -1186,6 +1192,16 @@ body.no-splash #app{animation:none}
     </section>
 
     <!-- ==== /MODULE: settings ==== -->
+
+    <!-- F4/8B1 — vista Shared minimale, read-only (nome nell'header, partecipanti, badge sync) -->
+    <section class="screen" id="s-shared" hidden>
+      <button class="btn btn-ghost w" id="btn-shared-back" type="button">← I tuoi gruppi</button>
+      <div class="sez">
+        <span class="sez-k">Partecipanti</span>
+        <div id="shared-membri" class="filo-lista"></div>
+      </div>
+      <p class="nota" id="shared-placeholder">Le spese condivise arrivano a breve.</p>
+    </section>
   </main>
 
   <!-- ==== SEAM: shell (bottom-nav) — la nav appartiene a shell ma e' fisicamente separata dall'header; non spostata -->
@@ -2095,6 +2111,7 @@ function put(path, body){
 
 /* ---------- 4.3 indicatore di stato ---------- */
 function statoSync(){
+  if (SPACE_CTX && SPACE_CTX.kind === "shared"){ aggiornaBadgeShared(SPACE_CTX.id); return; }   // F4/8B1: badge Shared
   const el = $("#sync");
   if (!el || !GID) return;
   const n = outbox().length;
@@ -2203,6 +2220,132 @@ function passaAlGruppo(gid){
   tentaSync();
 }
 
+/* ============================================================
+   F4/8B1 — SHARED (Native) SPACES — presentazione read-only
+   Solo UI/lettura: nessuna modifica al motore Shared, nessuno stato persistente.
+   ============================================================ */
+var SPACE_CTX = null;   // contesto SOLO presentazionale dello spazio Shared aperto: { id, kind:"shared" }
+
+// Elenco presentazionale degli spazi Native/Shared (read-only, campi reali del record spaces).
+async function elencaSpaziNative(){
+  try {
+    var spaces = await window.calculonDB.list("spaces", function(sp){
+      return sp && sp.deleted !== true && sp.authority === "native" && !sp.legacyGroupId && sp.id !== "personal:local";
+    });
+    return spaces.map(function(sp){ return { id: sp.id, name: sp.name || "Spazio", kind: "shared" }; });
+  } catch(e){ return []; }
+}
+
+// Lista unificata Local + Shared nel box esistente #pf-gruppi. kind e' SOLO presentazionale.
+async function renderListaSpazi(box){
+  if (!box) return;
+  var locali = tuttiIGruppi().map(function(g){ return { id: g.id, name: g.name, kind: "local", me: g.me }; });
+  var nativi = await elencaSpaziNative();
+  var elenco = locali.concat(nativi).sort(function(a, b){ return a.name.localeCompare(b.name); });
+  box.innerHTML = "";
+  if (!elenco.length){ box.innerHTML = '<p class="nota" style="margin-top:0">Non fai ancora parte di nessun gruppo su questo telefono.</p>'; return; }
+  for (var i = 0; i < elenco.length; i++){
+    var g = elenco[i];
+    var riga = document.createElement("div"); riga.className = "membro";
+    var testo = document.createElement("div"); testo.className = "membro-testo";
+    var n = document.createElement("span"); n.className = "nome";
+    n.textContent = g.name + (g.kind === "local" && !g.me ? " · non ti sei ancora scelto" : "");
+    testo.appendChild(n);
+    var tipo = document.createElement("span"); tipo.className = "membro-tipo";
+    tipo.textContent = g.kind === "shared" ? "Condiviso" : "Solo su questo dispositivo";
+    testo.appendChild(tipo);
+    riga.appendChild(testo);
+    if (g.kind === "local" && g.id === GID){
+      var t = document.createElement("span"); t.className = "io"; t.textContent = "ATTIVO"; riga.appendChild(t);
+    } else {
+      var b = document.createElement("button"); b.type = "button"; b.className = "btn btn-mini"; b.textContent = "Apri";
+      b.onclick = (g.kind === "shared") ? (function(id){ return function(){ apriSpazio(id); }; })(g.id)
+                                        : (function(id){ return function(){ passaAlGruppo(id); }; })(g.id);
+      riga.appendChild(b);
+    }
+    box.appendChild(riga);
+  }
+}
+
+// Apertura MINIMALE read-only di uno spazio Shared: header (nome + badge) + partecipanti + placeholder.
+async function apriSpazio(spaceId){
+  var sp;
+  try { sp = await window.calculonDB.get("spaces", spaceId); } catch(e){ sp = null; }
+  if (!sp || sp.deleted === true){ avviso("Non riesco ad aprire questo spazio"); return; }
+  SPACE_CTX = { id: spaceId, kind: "shared" };
+  $$(".screen").forEach(function(s){ s.hidden = true; });
+  $("#s-shared").hidden = false;
+  $("#hdr").hidden = false;
+  $("#tabs").hidden = true;
+  $("#gname").textContent = sp.name || "Spazio";
+  document.body.dataset.vista = "shared";
+  window.scrollTo(0, 0);
+  await renderSharedMembri(spaceId);
+  aggiornaBadgeShared(spaceId);
+}
+
+// Chiude la vista Shared e torna alla lista (Profilo, dove vive #pf-gruppi).
+function chiudiSpazio(){
+  SPACE_CTX = null;
+  $("#s-shared").hidden = true;
+  if (GID && D){ vaiA("profilo"); }
+  else { $("#hdr").hidden = true; vaiA("ingresso"); }
+}
+
+// Partecipanti attivi (read-only) via API di dominio esistente.
+async function renderSharedMembri(spaceId){
+  var box = $("#shared-membri"); if (!box) return;
+  box.innerHTML = "";
+  var membri = [];
+  try { membri = await window.sharedRuntime.listMembers(spaceId); } catch(e){ membri = []; }
+  membri = (membri || []).filter(function(m){ return m && m.deleted !== true && m.active !== false; });
+  if (!membri.length){ box.innerHTML = '<p class="nota" style="margin-top:0">Nessun partecipante.</p>'; return; }
+  for (var i = 0; i < membri.length; i++){
+    var m = membri[i];
+    var riga = document.createElement("div"); riga.className = "membro";
+    riga.appendChild(avatarEl(m));
+    var n = document.createElement("span"); n.className = "nome"; n.textContent = m.name || "?";
+    riga.appendChild(n);
+    box.appendChild(riga);
+  }
+}
+
+// Derivatore presentazionale UNICO dello stato sync Shared. Solo lettura: nessuna fetch/deliver/pull.
+async function syncUiState(spaceId){
+  if (navigator.onLine === false) return "OFFLINE";
+  var errs = await window.nativeSync.outboxErrors(spaceId);
+  if (errs && errs.length > 0) return "PROBLEM";
+  var pend = await window.syncOutbox.listPending(spaceId);
+  var rec = await window.nativeSync.pendingPullRecovery(spaceId);   // O2b: array (difensivo comunque)
+  var recAttiva = Array.isArray(rec) ? rec.length > 0 : !!rec;
+  if ((pend && pend.length > 0) || recAttiva) return "PENDING";
+  return "SYNCHRONIZED";
+}
+
+var _BADGE_MAP = {
+  SYNCHRONIZED: { st: "allineato", text: "Sincronizzato",     full: "Sincronizzato" },
+  PENDING:      { st: "attesa",    text: "Da sincronizzare",   full: "Da sincronizzare" },
+  OFFLINE:      { st: "offline",   text: "Offline",            full: "Offline" },
+  PROBLEM:      { st: "problema",  text: "Problema",           full: "Problema di sincronizzazione" }
+};
+// Stampa il badge Shared con guardia di race (SPACE_CTX puo' cambiare durante l'await).
+async function aggiornaBadgeShared(spaceId){
+  var state;
+  try { state = await syncUiState(spaceId); } catch(e){ return; }   // read error -> lascia il badge com'e'
+  if (!SPACE_CTX || SPACE_CTX.id !== spaceId || SPACE_CTX.kind !== "shared") return;   // race guard
+  var el = $("#sync"); if (!el) return;
+  var m = _BADGE_MAP[state] || _BADGE_MAP.SYNCHRONIZED;
+  el.dataset.st = m.st; el.textContent = m.text;
+  el.setAttribute("aria-label", "Stato sincronizzazione: " + m.full);
+}
+
+// Ricalcolo (read-only) del badge Shared su cambi di connettivita'/visibilita'. Nessun network, nessun polling.
+if (typeof window !== "undefined" && window.addEventListener){
+  window.addEventListener("online",  function(){ if (SPACE_CTX && SPACE_CTX.kind === "shared") aggiornaBadgeShared(SPACE_CTX.id); });
+  window.addEventListener("offline", function(){ if (SPACE_CTX && SPACE_CTX.kind === "shared") aggiornaBadgeShared(SPACE_CTX.id); });
+  document.addEventListener("visibilitychange", function(){ if (!document.hidden && SPACE_CTX && SPACE_CTX.kind === "shared") aggiornaBadgeShared(SPACE_CTX.id); });
+}
+
 /* Un link incollato dall'utente → URL sicuro https, o null se non è un link valido.
    Accetta "paypal.me/tizio", "https://...", "http://..."; blocca schemi strani (javascript:, ecc). */
 function normalizzaLink(raw){
@@ -2230,6 +2373,7 @@ function inputCifre(input, onChange, decimali){
    RENDER
    ============================================================ */
 function render(){
+  if (SPACE_CTX && SPACE_CTX.kind === "shared") return;   // F4/8B1: vista Shared aperta -> render legacy sospeso
   const dentro = !!(GID && D);
   if (!dentro && vista !== "ingresso" && vista !== "intro") vista = "ingresso";
   document.body.dataset.vista = vista;
@@ -2631,29 +2775,7 @@ function renderProfilo(){
   renderPersonali();
 
   const box = $("#pf-gruppi");
-  box.innerHTML = "";
-  const elenco = tuttiIGruppi().sort((a, b) => a.name.localeCompare(b.name));
-  if (!elenco.length){
-    box.innerHTML = '<p class="nota" style="margin-top:0">Non fai ancora parte di nessun gruppo su questo telefono.</p>';
-    return;
-  }
-  for (const g of elenco){
-    const riga = document.createElement("div");
-    riga.className = "membro";
-    const n = document.createElement("span"); n.className = "nome";
-    n.textContent = g.name + (g.me ? "" : " · non ti sei ancora scelto");
-    riga.appendChild(n);
-    if (g.id === GID){
-      const t = document.createElement("span"); t.className = "io"; t.textContent = "ATTIVO";
-      riga.appendChild(t);
-    } else {
-      const b = document.createElement("button");
-      b.type = "button"; b.className = "btn btn-mini"; b.textContent = "Apri";
-      b.onclick = () => passaAlGruppo(g.id);
-      riga.appendChild(b);
-    }
-    box.appendChild(riga);
-  }
+  renderListaSpazi(box);   // F4/8B1: lista unificata Local + Shared (async, read-only)
 }
 
 function renderPersonali(){
@@ -3176,7 +3298,22 @@ $("#btn-esci").onclick = () => {
 $("#btn-nuovo-gruppo").onclick = () => vaiA("ingresso");
 $("#btn-annulla-ingresso").onclick = () => vaiA(ME ? "spese" : "chi");
 
-$("#sync").onclick = () => { pullOk = false; statoSync(); tentaSync(); };
+$("#sync").onclick = async () => {
+  if (SPACE_CTX && SPACE_CTX.kind === "shared"){   // F4/8B1: tap badge Shared (nessun blind repair)
+    var id = SPACE_CTX.id, state;
+    try { state = await syncUiState(id); } catch(e){ avviso("Non riesco a sincronizzare ora"); return; }
+    if (!SPACE_CTX || SPACE_CTX.id !== id) return;   // race guard
+    if (state === "OFFLINE"){ avviso("Sei offline"); return; }
+    if (state === "PROBLEM"){ avviso("C'è un problema di sincronizzazione"); return; }
+    if (state === "SYNCHRONIZED"){ avviso("Tutto sincronizzato"); return; }
+    // PENDING -> delivery esplicito (O2b esegue la propria recovery nel path di delivery), poi ri-deriva
+    try { await window.nativeSync.deliverPending(id); } catch(e){ avviso("Non riesco a sincronizzare ora"); }
+    if (SPACE_CTX && SPACE_CTX.id === id) aggiornaBadgeShared(id);
+    return;
+  }
+  pullOk = false; statoSync(); tentaSync();   // legacy invariato
+};
+if ($("#btn-shared-back")) $("#btn-shared-back").onclick = () => chiudiSpazio();
 $$("#tabs button").forEach(b => { b.onclick = () => vaiA(b.dataset.go); });
 
 /* ============================================================
