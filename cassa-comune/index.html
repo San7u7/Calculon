@@ -6795,7 +6795,7 @@ if ("serviceWorker" in navigator){
   // DELIVERY PUMP: consegna gli intent pending al Worker. NON ricifra (usa l'envelope gia' persistito).
   async function deliverPending(spaceId){
     var pend = await window.syncOutbox.listPending(spaceId);
-    var rep = { total: pend.length, delivered: 0, superseded: 0, pending: 0, authError: 0, quarantined: 0 };
+    var rep = { total: pend.length, delivered: 0, superseded: 0, pending: 0, authError: 0, errored: 0 };
     for (var i = 0; i < pend.length; i++){
       var it = pend[i];
       var cap = await getSpaceCapability(it.spaceId);
@@ -6805,7 +6805,22 @@ if ("serviceWorker" in navigator){
       try { res = await fetch(url, { method: "PUT", headers: { "Authorization": "Bearer " + cap, "Content-Type": "application/json" }, body: JSON.stringify(it.envelope) }); }
       catch(e){ rep.pending++; continue; }                                   // offline/fetch fail -> resta pending
       if (res.status === 401 || res.status === 403){ rep.authError++; continue; }   // auth: niente markDelivered, resta pending
-      if (res.status === 400 || res.status === 413){ await updateIntentGuarded(it.id, it.version, it.deviceId, function(r){ r.status = "error"; }); rep.quarantined++; continue; }   // errore permanente
+      if (res.status === 400 || res.status === 413){
+        // F4/7G-O3 — TERMINAL OUTBOUND ERROR (payload staticamente invalido/troppo grande). Diagnostica
+        // persistente sull'intent (nessun nuovo store). httpStatus = autorita' numerica; errorClass/reason
+        // stabili e derivati dallo status (nessuna dipendenza fragile dalle stringhe del server). Mai
+        // plaintext/key/cap/invite: l'envelope cifrato resta invariato, qui si aggiunge solo metadata.
+        var _cls = res.status === 413 ? "terminal-local-too-large" : "terminal-local-invalid";
+        var _reason = res.status === 413 ? "request-body-too-large" : "envelope-invalid";
+        var _now = Date.now();
+        await updateIntentGuarded(it.id, it.version, it.deviceId, function(r){
+          r.status = "error"; r.errorClass = _cls; r.httpStatus = res.status; r.reason = _reason;
+          r.attempts = (r.attempts | 0) + 1;                          // il PUT ha raggiunto il Worker: conta il tentativo
+          if (r.firstFailedAt == null) r.firstFailedAt = _now;         // solo al primo terminal failure
+          r.lastFailedAt = _now;                                       // ultimo terminal failure
+        });
+        rep.errored++; continue;
+      }
       if (res.status !== 200){ await updateIntentGuarded(it.id, it.version, it.deviceId, function(r){ r.attempts = (r.attempts | 0) + 1; }); rep.pending++; continue; }   // 5xx/altro -> pending+attempts
       var body = null; try { body = await res.json(); } catch(e){}
       var w = body && body.winner;
@@ -6876,6 +6891,45 @@ if ("serviceWorker" in navigator){
       if (rep){ if (still.length === 0) rep.recovered++; else rep.recoveryPending++; }
     }
     return need.length;
+  }
+  // F4/7G-O3 — superficie READ-ONLY dei terminal outbound error (status==="error"). Espone SOLO metadata
+  // sicuri: nessun envelope, nessun plaintext/ciphertext/key/cap/invite. httpStatus e' l'autorita' numerica.
+  async function outboxErrors(spaceId){
+    var errs = await DB().list("syncOutbox", function(x){ return x && x.status === "error" && (spaceId == null || x.spaceId === spaceId); });
+    return errs.map(function(e){ return {
+      spaceId: e.spaceId, recordType: e.recordType, recordId: e.recordId,
+      version: e.version, deviceId: e.deviceId, deleted: e.deleted === true, status: "error",
+      errorClass: e.errorClass || null, httpStatus: e.httpStatus || null, reason: e.reason || null,
+      attempts: e.attempts | 0, firstFailedAt: e.firstFailedAt || null, lastFailedAt: e.lastFailedAt || null
+    }; });
+  }
+  // F4/7G-O3 — RE-EMIT guarded (transport repair, NON "error -> pending" cieco). Ricostruisce la verita' dal
+  // SOURCE Shared CORRENTE col serializer/crypto correnti, passa il preflight 7G-O2a, poi rimpiazza lo slot
+  // error con un pending fresco. Zero mutazione del source/projections. nativeWinner/O2b restano l'unica
+  // conflict policy: se lo spazio ha una recovery pull pendente, delega a O2b (needs-pull), niente loser.
+  async function reEmit(spaceId, recordType, recordId){
+    if (!SYNC_TYPES[recordType]) throw new Error("reemit-recordType-invalid");
+    var id = "sync:" + spaceId + ":" + recordType + ":" + recordId;
+    var intent = await DB().get("syncOutbox", id);
+    if (!intent || intent.status !== "error") throw new Error("reemit-not-error");          // solo terminal error
+    var store = SYNC_TYPES[recordType];
+    var cur = await DB().get(store, recordId);
+    if (!cur) throw new Error("reemit-source-absent");                                       // fail-closed: nessun source
+    // O2b delega: winner remoto non ancora materializzato -> non re-emettere un potenziale loser.
+    var pend = await pendingPullRecovery(spaceId);
+    if (pend.length) return { spaceId: spaceId, recordType: recordType, recordId: recordId, status: "needs-pull", targetSeq: pend[0].targetSeq };
+    // ricostruisci dal source corrente (mai riusare il vecchio ciphertext). encryptSharedRecord fail-closed
+    // se il source viola invarianti correnti (version/deviceId) o manca la key.
+    var env = await window.nativeCrypto.encryptSharedRecord(recordType, cur);
+    assertDeliverableEnvelope(env);   // 7G-O2a: se ancora oversize -> throw shared-record-too-large, l'error resta
+    var slot = await DB().get("syncOutbox", id);
+    if (!slot || slot.status !== "error") return { spaceId: spaceId, recordType: recordType, recordId: recordId, status: "already-superseded" };   // concorrenza: gia' rimpiazzato da una write piu' nuova
+    var now = Date.now();
+    await DB().put("syncOutbox", { id: id, spaceId: spaceId, recordType: recordType, recordId: recordId,
+      version: env.version, deviceId: env.deviceId, keyVersion: env.keyVersion, deleted: env.deleted === true,
+      envelope: env, status: "pending", attempts: 0, createdAt: (slot.createdAt != null ? slot.createdAt : now), updatedAt: now });
+    poke(spaceId);   // trigger delivery (gated su _autoDeliver)
+    return { spaceId: spaceId, recordType: recordType, recordId: recordId, status: "pending", version: env.version };
   }
   // Trigger prudente fire-and-forget: una failure di rete non tocca la write gia' committata.
   function poke(spaceId){ if (_autoDeliver){ try { deliverPending(spaceId).catch(function(){}); } catch(e){} } }
@@ -7391,6 +7445,8 @@ if ("serviceWorker" in navigator){
     pullSpace: pullSpace,
     pendingPullRecovery: pendingPullRecovery,   // F4/7G-O2b: diagnostica read-only (spazi con recovery irrisolta, targetSeq)
     _recoverPendingPulls: recoverPendingPulls,   // F4/7G-O2b: hook di test
+    outboxErrors: outboxErrors,   // F4/7G-O3: diagnostica read-only dei terminal outbound error (no envelope/segreti)
+    reEmit: reEmit,               // F4/7G-O3: transport repair guarded (rebuild dal source corrente + O2a preflight)
     getSyncSeq: getSyncSeq,
     setSyncSeq: setSyncSeq,
     enableAutoDelivery: function(baseUrl){ if (baseUrl) _apiBase = baseUrl; _autoDeliver = true; },
@@ -8455,6 +8511,146 @@ if ("serviceWorker" in navigator){
         await NS.deliverPending(SP9);
         var proofAfter = await DBx.meta.get("remoteInitProof:" + SP);
         ok("20. remoteInitProof invariata dopo recovery superseded", proofAfter != null && proofBefore != null && proofAfter.capabilityFingerprint === proofBefore.capabilityFingerprint);
+      } finally { window.fetch = origFetch; }
+
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    },
+
+    /* F4 · Passo 7G-O3 — TERMINAL OUTBOUND ERROR DIAGNOSTICS + GUARDED RE-EMIT (hermetic, fetch mock).
+       400/413 -> terminal error diagnosticabile (metadata sicuri sull'intent). reEmit = transport repair
+       causally-safe: ricostruisce dal source corrente, O2a preflight, pending. 401/403/net/5xx NON error. */
+    _testOutboxErrorReemit: async function(){
+      var r = [], ok = function(n, c){ r.push({ name: n, pass: !!c }); };
+      async function catchErr(fn){ try { await fn(); return null; } catch(e){ return e; } }
+      var SR = window.sharedRuntime, NS = window.nativeSync, C = window.nativeCrypto, DBx = window.calculonDB;
+      var NET = { mode: "ok" }, SEQ = {};
+      var origFetch = window.fetch;
+      window.fetch = async function(url, opts){
+        var u = new URL(url, location.origin), m = u.pathname.match(/^\/api\/space\/([^/]+)(?:\/([^/]+)\/([^/]+))?$/), sid = decodeURIComponent(m[1]);
+        if (opts && opts.method === "PUT"){
+          if (NET.mode === "throw") throw new Error("net-fail");
+          if (NET.mode === "401") return { status: 401, json: async function(){ return { error: "capability mancante" }; } };
+          if (NET.mode === "403") return { status: 403, json: async function(){ return { error: "forbidden" }; } };
+          if (NET.mode === "5xx") return { status: 503, json: async function(){ return {}; } };
+          if (NET.mode === "400") return { status: 400, json: async function(){ return { error: "envelope invalido: ciphertext" }; } };
+          if (NET.mode === "413") return { status: 413, json: async function(){ return { error: "envelope troppo grande" }; } };
+          var env = JSON.parse(opts.body);
+          if (NET.mode === "supersede") return { status: 200, json: async function(){ return { accepted: false, winner: { version: (env.version | 0) + 1, deviceId: "zRemote", deleted: false }, seq: (SEQ[sid] = (SEQ[sid] | 0) + 1) }; } };
+          return { status: 200, json: async function(){ return { accepted: true, winner: { version: env.version, deviceId: env.deviceId, deleted: env.deleted === true }, seq: (SEQ[sid] = (SEQ[sid] | 0) + 1) }; } };
+        }
+        return { status: 200, json: async function(){ return { seq: SEQ[sid] | 0, records: [] }; } };
+      };
+      NS._setApiBase("");
+      function mkParts(A, BOB){ var o = {}; o[A] = 50; o[BOB] = 50; return o; }
+      async function intent(sid, rt, rid){ return await DBx.get("syncOutbox", "sync:" + sid + ":" + rt + ":" + rid); }
+      async function derivedCount(sid){ return (await DBx.list("transactions", function(t){ return t && t.derived === true && t.sourceSpaceId === sid; })).length; }
+
+      try {
+        // ===== SETUP: SP con space/member gia' delivered (NET ok) =====
+        NET.mode = "ok";
+        var s = await SR.createSpace({ kind: "ongoing", name: "Err", selfName: "A" });
+        var SP = s.spaceId, A = s.selfMemberId, BOB = await SR.addMember(SP, { name: "Bob" });
+        await NS.deliverPending(SP);   // space + membri delivered
+
+        // ===== 1-5. Worker 400 -> terminal error + diagnostica =====
+        var T = await SR.createExpense(SP, { amount: 100, paidById: A, allocationMode: "exact", parts: mkParts(A, BOB), date: "2026-09-01", note: "n" });
+        NET.mode = "400"; var rep = await NS.deliverPending(SP); NET.mode = "ok";
+        var eT = await intent(SP, "transaction", T);
+        ok("1. Worker 400 -> status error", eT.status === "error" && (rep.errored | 0) >= 1);
+        ok("2. diagnostics httpStatus=400 + errorClass", eT.httpStatus === 400 && eT.errorClass === "terminal-local-invalid");
+        ok("3. reason stabile/safe", eT.reason === "envelope-invalid");
+        ok("4. firstFailedAt/lastFailedAt", eT.firstFailedAt > 0 && eT.lastFailedAt >= eT.firstFailedAt);
+        ok("5. attempts accounting (>=1)", (eT.attempts | 0) >= 1);
+
+        // ===== 6. Worker 413 -> terminal-too-large =====
+        var T413 = await SR.createExpense(SP, { amount: 100, paidById: A, allocationMode: "exact", parts: mkParts(A, BOB), date: "2026-09-02", note: "n2" });
+        NET.mode = "413"; await NS.deliverPending(SP); NET.mode = "ok";
+        var e413 = await intent(SP, "transaction", T413);
+        ok("6. Worker 413 -> terminal-local-too-large", e413.status === "error" && e413.httpStatus === 413 && e413.errorClass === "terminal-local-too-large" && e413.reason === "request-body-too-large");
+
+        // ===== 7. outboxErrors: solo metadata sicuri, NIENTE envelope/segreti =====
+        var errs = await NS.outboxErrors(SP), eo = errs.filter(function(x){ return x.recordId === T; })[0];
+        ok("7. outboxErrors esclude envelope/segreti, metadata sicuri", errs.length === 2 && eo && !("envelope" in eo) && !("ciphertext" in eo) && !("iv" in eo) && eo.httpStatus === 400 && typeof eo.reason === "string");
+
+        // ===== 8-11. auth/network NON terminal (restano pending, fuori da outboxErrors) =====
+        var sa = await SR.createSpace({ kind: "ongoing", name: "Auth", selfName: "A" });
+        var SPa = sa.spaceId, Aa = sa.selfMemberId, Ba = await SR.addMember(SPa, { name: "Bob" });
+        var Ta = await SR.createExpense(SPa, { amount: 100, paidById: Aa, allocationMode: "exact", parts: mkParts(Aa, Ba), date: "2026-09-01", note: "a" });
+        NET.mode = "401"; await NS.deliverPending(SPa);
+        ok("8. 401 -> resta pending, non error", (await intent(SPa, "transaction", Ta)).status === "pending");
+        NET.mode = "403"; await NS.deliverPending(SPa);
+        ok("9. 403 -> resta pending, non error", (await intent(SPa, "transaction", Ta)).status === "pending");
+        NET.mode = "throw"; await NS.deliverPending(SPa);
+        ok("10. network fail -> resta pending", (await intent(SPa, "transaction", Ta)).status === "pending");
+        NET.mode = "5xx"; await NS.deliverPending(SPa); NET.mode = "ok";
+        var ta5 = await intent(SPa, "transaction", Ta);
+        ok("11. 5xx -> resta pending (+attempts), MAI error; outboxErrors vuoto", ta5.status === "pending" && (ta5.attempts | 0) >= 1 && ta5.errorClass == null && (await NS.outboxErrors(SPa)).length === 0);
+
+        // ===== 12 + 19. superseded escluso da errors; reEmit delega a needs-pull =====
+        var ss = await SR.createSpace({ kind: "ongoing", name: "Sup3", selfName: "A" });
+        var SPs = ss.spaceId, As = ss.selfMemberId, Bs = await SR.addMember(SPs, { name: "Bob" });
+        await NS.deliverPending(SPs);   // space+membri ok
+        var Ts = await SR.createExpense(SPs, { amount: 100, paidById: As, allocationMode: "exact", parts: mkParts(As, Bs), date: "2026-09-01", note: "s" });
+        NET.mode = "supersede"; await NS.deliverPending(SPs); NET.mode = "ok";
+        ok("12. superseded-remote NON compare in outboxErrors", (await intent(SPs, "transaction", Ts)).status === "superseded-remote" && (await NS.outboxErrors(SPs)).filter(function(x){ return x.recordId === Ts; }).length === 0);
+        var Te = await SR.createExpense(SPs, { amount: 100, paidById: As, allocationMode: "exact", parts: mkParts(As, Bs), date: "2026-09-02", note: "e" });
+        NET.mode = "400"; await NS.deliverPending(SPs); NET.mode = "ok";
+        var reNP = await NS.reEmit(SPs, "transaction", Te);
+        ok("19. reEmit con recovery pull pendente -> needs-pull (loser non re-emesso)", reNP.status === "needs-pull" && (await intent(SPs, "transaction", Te)).status === "error");
+
+        // ===== 13-17 + 22-23. reEmit da source valido (repair) =====
+        var derBefore = await derivedCount(SP);
+        var oldCT = (await intent(SP, "transaction", T)).envelope.ciphertext;
+        var srcBefore = await DBx.get("transactions", T);
+        var re = await NS.reEmit(SP, "transaction", T);
+        var nT = await intent(SP, "transaction", T);
+        ok("13. reEmit -> nuovo pending dal source valido", re.status === "pending" && nT.status === "pending");
+        ok("14. nuovo envelope != vecchio (re-encrypt, no blind reuse)", nT.envelope.ciphertext !== oldCT);
+        ok("15. source.version invariata", (await DBx.get("transactions", T)).version === srcBefore.version);
+        ok("16. source.deviceId invariato", (await DBx.get("transactions", T)).deviceId === srcBefore.deviceId);
+        ok("17. projections invariate", (await derivedCount(SP)) === derBefore);
+        ok("22. reEmit riusa il preflight O2a (envelope validato)", nT.envelope.ciphertext.length <= NS._deliverLimits.MAX_CIPHERTEXT_B64);
+        NET.mode = "ok"; var repD = await NS.deliverPending(SP);
+        ok("23. pending riparato consegna normalmente", (await intent(SP, "transaction", T)).status === "delivered" && (repD.delivered | 0) >= 1);
+
+        // ===== 18. source piu' nuovo dell'error -> reEmit costruisce il winner corrente =====
+        var T18 = await SR.createExpense(SP, { amount: 100, paidById: A, allocationMode: "exact", parts: mkParts(A, BOB), date: "2026-09-03", note: "v1" });
+        NET.mode = "400"; await NS.deliverPending(SP); NET.mode = "ok";
+        var src18 = await DBx.get("transactions", T18); src18.version = 2; src18.note = "v2-inbound"; await DBx.put("transactions", src18, { preserveMeta: true });   // simula inbound: source materializzato a v2
+        var re18 = await NS.reEmit(SP, "transaction", T18);
+        ok("18. source v2 > error v1 -> reEmit produce v2 (loser storico non re-emesso)", re18.status === "pending" && re18.version === 2 && (await intent(SP, "transaction", T18)).version === 2);
+
+        // ===== 20-21 + 25. historical oversize (iniettato) -> reEmit reject; source ridotto -> pending =====
+        var so = await SR.createSpace({ kind: "ongoing", name: "Big", selfName: "A" });
+        var SPo = so.spaceId, Ao = so.selfMemberId, Bo = await SR.addMember(SPo, { name: "Bob" });
+        var HUGE = new Array(40001).join("x");
+        var TOID = SPo + ":oldbig";
+        await DBx.put("transactions", { id: TOID, spaceId: SPo, type: "expense", amount: 100, paidById: Ao, allocations: [{ memberId: Ao, amount: 50 }, { memberId: Bo, amount: 50 }], allocationMode: "exact", fromMemberId: null, toMemberId: null, date: "2026-09-01", note: HUGE, deleted: false, version: 1, deviceId: "local" }, { preserveMeta: true });
+        await DBx.put("syncOutbox", { id: "sync:" + SPo + ":transaction:" + TOID, spaceId: SPo, recordType: "transaction", recordId: TOID, version: 1, deviceId: "local", keyVersion: 1, deleted: false, envelope: { protocolVersion: 1, spaceId: SPo, recordId: TOID, recordType: "transaction", version: 1, deviceId: "local", keyVersion: 1, deleted: false, iv: "AAAAAAAAAAAAAAAA", ciphertext: "STALE" }, status: "error", errorClass: "terminal-local-too-large", httpStatus: 413, reason: "request-body-too-large", attempts: 1, firstFailedAt: 1, lastFailedAt: 1 });
+        var e20 = await catchErr(function(){ return NS.reEmit(SPo, "transaction", TOID); });
+        ok("20/22/25. historical oversize -> reEmit reject (shared-record-too-large, O2a) + error INVARIATO", e20 && e20.message === "shared-record-too-large" && (await intent(SPo, "transaction", TOID)).status === "error");
+        var srcO = await DBx.get("transactions", TOID); srcO.note = "small"; await DBx.put("transactions", srcO, { preserveMeta: true });   // source ridotto
+        var re21 = await NS.reEmit(SPo, "transaction", TOID);
+        ok("21. source ridotto -> reEmit passa O2a -> pending", re21.status === "pending" && (await intent(SPo, "transaction", TOID)).status === "pending");
+
+        // ===== 24 + 26. diagnostica durevole (re-read store) / pending riparato durevole =====
+        ok("24. terminal diagnostic durevole nello store (re-read)", (await DBx.get("syncOutbox", "sync:" + SP + ":transaction:" + T413)).httpStatus === 413);
+        ok("26. pending riparato durevole (re-read -> deliver riprende)", (await DBx.get("syncOutbox", "sync:" + SPo + ":transaction:" + TOID)).status === "pending");
+
+        // ===== 27. remoteInitProof: root error -> nessuna proof; solo un ACK genuino la stampa =====
+        var sr2 = await SR.createSpace({ kind: "ongoing", name: "RootErr", selfName: "A" });
+        var SPr = sr2.spaceId;
+        NET.mode = "400"; await NS.deliverPending(SPr);   // root PUT -> 400 -> error, nessun ACK
+        var proofErr = await DBx.meta.get("remoteInitProof:" + SPr);
+        var reR = await NS.reEmit(SPr, "space", SPr);   // reEmit root -> pending (NON stampa proof)
+        var proofAfterReemit = await DBx.meta.get("remoteInitProof:" + SPr);
+        NET.mode = "ok"; await NS.deliverPending(SPr);   // ACK genuino -> proof stampata
+        var proofAfterAck = await DBx.meta.get("remoteInitProof:" + SPr);
+        ok("27. remoteInitProof: assente su error/reEmit, presente SOLO dopo ACK genuino", proofErr == null && proofAfterReemit == null && reR.status === "pending" && proofAfterAck != null);
+
+        // ===== 28. inbound quarantine intatta (dominio separato) =====
+        ok("28. syncQuarantine (inbound) non toccata dagli outbound error", (await NS.listQuarantine(SP)).length === 0);
       } finally { window.fetch = origFetch; }
 
       var fails = r.filter(function(x){ return !x.pass; });
