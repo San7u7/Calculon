@@ -6715,6 +6715,33 @@ if ("serviceWorker" in navigator){
   }
   async function ensureSpaceCapability(spaceId){ var ex = await getSpaceCapability(spaceId); return ex ? ex : await setSpaceCapability(spaceId, nuovaCapability()); }
 
+  /* F4/7G-Cap2 — STICKY REMOTE INITIALIZATION PROOF (cap-bound).
+     Il gate di createInvite non deve piu' derivare la prova di remote-init dallo status CORRENTE
+     dell'intent space-root (falso-negativo: root v1 delivered -> root v2 update -> intent pending ->
+     falso reject). Introduce una proof persistente e STICKY, legata alla capability corrente:
+       remoteInitProof:<spaceId> = { capabilityFingerprint, observedAt, source }
+     capabilityFingerprint = derivazione ONE-WAY (SHA-256 domain-separated) della capability corrente.
+     NON e' un sostituto della capability per autenticare richieste, NON duplica la raw capability:
+     e' solo un legame verificabile localmente fra la proof e la remote identity corrente. Se la cap
+     cambia, il fingerprint non combacia piu' -> vecchia proof inutilizzabile finche' non se ne acquisisce
+     una nuova per il nuovo remote (nessun accumulo di ambiguita': una sola chiave per spazio). */
+  async function capabilityFingerprint(cap){ return "cf1:" + (await sha256hex("cc/remote-init/v1|" + String(cap))); }
+  async function getRemoteInitProof(spaceId){ return (await DB().meta.get("remoteInitProof:" + spaceId)) || null; }
+  // Persiste (idempotente) la proof sticky legata alla capability CORRENTE. Chiamata SOLO da eventi FORTI:
+  // ACK remoto del root (delivery pump) | root autenticato+boundary-valido ricevuto dal remote (inbound).
+  // Nessun intent, nessun bump Shared, nessun side effect remoto. Senza cap corrente -> nessuna proof
+  // (non si inventa da eventi deboli). Idempotente: se il fingerprint combacia, NON riscrive (no drift).
+  async function recordRemoteInitProof(spaceId, source){
+    var cap = await getSpaceCapability(spaceId);
+    if (!cap) return null;                                            // nessuna cap -> nessuna proof possibile
+    var fp = await capabilityFingerprint(cap);
+    var ex = await DB().meta.get("remoteInitProof:" + spaceId);
+    if (ex && ex.capabilityFingerprint === fp) return ex;            // idempotente: stessa cap gia' provata
+    var proof = { capabilityFingerprint: fp, observedAt: Date.now(), source: String(source || "unknown") };
+    await DB().meta.set("remoteInitProof:" + spaceId, proof);
+    return proof;
+  }
+
   // Aggiorna un intent SOLO se rappresenta ancora la versione che stavamo consegnando (protezione concorrenza).
   async function updateIntentGuarded(id, expVer, expDev, mutate){
     var rec = await DB().get("syncOutbox", id);
@@ -6744,7 +6771,12 @@ if ("serviceWorker" in navigator){
       var w = body && body.winner;
       if (w && w.version === it.version && String(w.deviceId) === String(it.deviceId) && (w.deleted === true) === (it.envelope.deleted === true)){
         var done = await window.syncOutbox.markDelivered(it.id, it.version, it.deviceId);   // guarded: se v(n+1) ha rimpiazzato, false -> resta pending
-        if (done) rep.delivered++; else rep.pending++;
+        if (done){
+          rep.delivered++;
+          // F4/7G-Cap2 — ACK remoto guardato del ROOT (recordType space, recordId===spaceId) = prova FORTE
+          // di remote-init per la cap usata da questa delivery -> proof sticky (idempotente).
+          if (it.recordType === "space" && it.recordId === it.spaceId) await recordRemoteInitProof(it.spaceId, "delivery-ack");
+        } else rep.pending++;
       } else if (w){
         // winner remoto diverso/piu' nuovo: NON applicare (inbound = passo successivo). Stop retry di questa versione.
         await updateIntentGuarded(it.id, it.version, it.deviceId, function(r){ r.status = "superseded-remote"; r.remoteWinner = { version: w.version, deviceId: w.deviceId, deleted: w.deleted === true }; r.lastSeq = body.seq; });
@@ -6928,6 +6960,11 @@ if ("serviceWorker" in navigator){
     toApply.sort(function(a, b){ return TYPE_ORDER[a.recordType] - TYPE_ORDER[b.recordType]; });
     var applied = 0;
     for (var j = 0; j < toApply.length; j++){ var res = await applyOne(space, self, toApply[j].recordType, toApply[j].rec, opts); if (res === "applied") applied++; }
+    // F4/7G-Cap2 — se il batch conteneva uno space-root AUTENTICATO (decrypt OK + boundary/schema valido:
+    // stessa prova forte di evaluateJoinRoot) per questo spazio, il remote e' inizializzato sotto la cap
+    // corrente -> proof sticky (idempotente). Copre join first-pull e full-recovery (recovery deterministico
+    // della proof, cfr. crash-safety). HOLD/quarantine/wrong-key root NON entrano in toApply -> nessuna proof.
+    for (var p = 0; p < toApply.length; p++){ if (toApply[p].recordType === "space" && isValidJoinSpaceRoot(spaceId, toApply[p].rec)){ await recordRemoteInitProof(spaceId, "inbound-root"); break; } }
     // 3) cursor: fermo se HELD; altrimenti avanza (i quarantined sono gia' durable -> non bloccano)
     if (held) return { ok: true, seq: await getSyncSeq(spaceId), held: true, heldKeyVersion: held.keyVersion, applied: applied, quarantined: quarantined.length, quarantinedIds: qids, records: records.length };
     await setSyncSeq(spaceId, serverSeq);
@@ -7004,15 +7041,16 @@ if ("serviceWorker" in navigator){
     var sp = await DB().get("spaces", spaceId);
     if (!sp || sp.deleted === true) throw new Error("spazio inesistente: " + spaceId);
     if (!nativeBorn(sp)) throw new Error("invito solo su spazi native-born");
-    // F4/7G-Cap — INVARIANTE remote-init: un invito nativo puo' nascere SOLO quando lo Shared space-root
-    // e' stato consegnato e riconosciuto dal remote. Prova di delivery = intent space-root con status
-    // "delivered" (autorita' ESISTENTE della syncOutbox: markDelivered scatta solo su ack guardato del
-    // Worker; presenza/pending/error NON bastano -> nessun falso positivo, cfr. sezione 9). Nessun nuovo
-    // flag persistente. Gate fail-closed e side-effect free: SOLO lettura, PRIMA di ensureSpaceCapability,
-    // cosi' il path di rifiuto non produce token, non minta cap, non tocca key, non fa delivery implicita.
-    var rootIntent = await DB().get("syncOutbox", "sync:" + spaceId + ":space:" + spaceId);
-    if (!rootIntent || rootIntent.status !== "delivered") throw new Error("space-not-remotely-initialized");
-    var cap = await ensureSpaceCapability(spaceId);                       // idempotente
+    // F4/7G-Cap2 — INVARIANTE remote-init: un invito nativo puo' nascere SOLO quando lo Shared space-root
+    // e' stato inizializzato sul remote per la capability CORRENTE. La prova NON e' piu' lo status corrente
+    // dell'intent (falso-negativo su root update: v1 delivered -> v2 pending), ma la remoteInitProof
+    // STICKY cap-bound, acquisita da eventi forti (ACK root delivery | root autenticato ricevuto). Gate
+    // fail-closed e side-effect free: SOLO lettura (getSpaceCapability + getRemoteInitProof), cosi' il path
+    // di rifiuto non produce token, non minta cap, non tocca key, non fa delivery. La cap esiste gia' dalla
+    // nascita dello spazio (bootstrapSpace); assenza cap -> nessuna proof possibile -> reject.
+    var cap = await getSpaceCapability(spaceId);
+    var proof = cap ? await getRemoteInitProof(spaceId) : null;
+    if (!proof || proof.capabilityFingerprint !== (await capabilityFingerprint(cap))) throw new Error("space-not-remotely-initialized");
     var kv = Number.isInteger(sp.keyVersion) ? sp.keyVersion : 1;
     var keyRaw = await window.spaceKeys.exportSpaceKey(spaceId, kv);      // throws missing-space-key (fail-closed)
     return inviteEncode({ v: 1, s: spaceId, c: cap, k: keyRaw, kv: kv });
@@ -7271,6 +7309,9 @@ if ("serviceWorker" in navigator){
     _intentItemFromEnvelope: intentItemFromEnvelope,
     createInvite: createInvite,
     parseInvite: parseInvite,
+    _getRemoteInitProof: getRemoteInitProof,          // F4/7G-Cap2: proof sticky (hook di test / diagnostica RO)
+    _recordRemoteInitProof: recordRemoteInitProof,    // F4/7G-Cap2: hook di test (equivalente all'ACK root della pump)
+    _capabilityFingerprint: capabilityFingerprint,    // F4/7G-Cap2: hook di test (fingerprint one-way della cap)
     joinSpace: joinSpace,
     joinPull: joinPull,
     claimSelf: claimSelf,
@@ -7826,22 +7867,19 @@ if ("serviceWorker" in navigator){
       var resQ = await NS._applyBatch(SPh, await sp(SPh), HERA, [tampered], 51);
       ok("28. QUARANTINE (decrypt-failed) invariata: entry durevole, cursor avanza", resQ.quarantined === 1 && (await quarFor(SPh)) >= 1 && (await NS.getSyncSeq(SPh)) === 51);
 
-      // ===== REGRESSIONE 7G-CAP: root gia' delivered -> successivo update root pending =====
+      // ===== REGRESSIONE 7G-CAP -> 7G-Cap2 FIX: la proof sticky cap-bound sopravvive a un root update =====
       var sg = await SR.createSpace({ kind: "ongoing", name: "CapReg", selfName: "Gaia" });
       var GID = sg.spaceId, gRoot = "sync:" + GID + ":space:" + GID;
+      ok("7G-CAP: prima della delivery -> reject", (await throwsMsg(function(){ return NS.createInvite(GID); })) === "space-not-remotely-initialized");
       var gi = await DBx.get("syncOutbox", gRoot); await OB.markDelivered(gRoot, gi.version, gi.deviceId);
-      var inv1 = await throwsMsg(async function(){ return await NS.createInvite(GID); });
-      ok("7G-CAP: invite dopo delivery -> ok", inv1 === null);
+      await NS._recordRemoteInitProof(GID, "delivery-ack");   // proof cap-bound (equivalente all'hook della pump su ACK root)
+      ok("7G-CAP: invite dopo delivery+proof -> ok", (await throwsMsg(function(){ return NS.createInvite(GID); })) === null);
       await SR.renameSpace(GID, "CapReg2");   // update del root -> nuovo intent pending (sovrascrive delivered)
       var rootAfter = await DBx.get("syncOutbox", gRoot);
-      var reg = null; try { await NS.createInvite(GID); reg = "ok"; } catch(e){ reg = e.message; }
-      // KNOWN-LIMITATION-7GCAP (sez.16, NON fixato qui): un update legittimo del root (rename/archive) fra
-      // delivery e createInvite sovrascrive l'intent "delivered" con un nuovo "pending" (version 2), e la
-      // prova di delivery viene persa -> FALSO reject "space-not-remotely-initialized". createInvite guarda
-      // solo lo status dell'intent corrente, non "consegnato almeno una volta". Caratterizzazione del
-      // comportamento attuale (mitigato in-app da autoDelivery). Riportato come blocker separato.
-      ok("7G-CAP KNOWN-LIMITATION: root re-update perde la prova delivered -> createInvite falso-reject [status=" + rootAfter.status + "]",
-         rootAfter.status === "pending" && reg === "space-not-remotely-initialized");
+      // 7G-Cap2: la proof storica cap-bound NON viene persa da un root update legittimo (rename/archive):
+      // remote gia' inizializzato -> createInvite resta SUCCESS anche con intent corrente pending. Bug chiuso.
+      ok("7G-Cap2 FIX: root update (intent pending) NON perde la prova -> createInvite STILL SUCCESS [status=" + rootAfter.status + "]",
+         rootAfter.status === "pending" && (await throwsMsg(function(){ return NS.createInvite(GID); })) === null);
 
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
@@ -7962,6 +8000,127 @@ if ("serviceWorker" in navigator){
 
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    },
+
+    /* F4 · Passo 7G-Cap2 — STICKY CAPABILITY-BOUND REMOTE INIT PROOF (hermetic, fetch FAKE, no rete).
+       Il gate di createInvite non deriva piu' da intent.status==="delivered" (falso-negativo su root update)
+       ma da una remoteInitProof STICKY legata alla capability corrente, acquisita SOLO da eventi forti
+       (ACK root delivery via pump | root autenticato+boundary-valido ricevuto dal remote). */
+    _testRemoteInitProof: async function(){
+      var r = [], ok = function(n, c){ r.push({ name: n, pass: !!c }); };
+      async function throwsMsg(fn){ try { await fn(); return null; } catch(e){ return (e && e.message) || "err"; } }
+      var SR = window.sharedRuntime, NS = window.nativeSync, C = window.nativeCrypto, DBx = window.calculonDB, OB = window.syncOutbox;
+      function b64url32(bytes){ var s = ""; for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); }
+      function capRnd(){ return b64url32(crypto.getRandomValues(new Uint8Array(32))); }   // 43 char base64url
+      async function freshKey(){ return await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]); }
+      async function exportRaw(key){ return b64url32(new Uint8Array(await crypto.subtle.exportKey("raw", key))); }
+      function spaceRec(sid, ver){ return { id: sid, spaceId: sid, name: "Joined", kind: "experience", status: "active", currency: "EUR", version: ver, deviceId: "dRemote", keyVersion: 1, deleted: false, authority: "native", legacyGroupId: null, selfMemberId: null }; }
+      function memberRec(sid, mid){ return { id: mid, spaceId: sid, name: "Ada", active: true, deleted: false, version: 1, deviceId: "dRemote" }; }
+      async function proofOf(sid){ return await DBx.meta.get("remoteInitProof:" + sid); }
+      async function fpOf(sid){ return await NS._capabilityFingerprint(await NS.getSpaceCapability(sid)); }
+      async function outCount(sid){ return (await DBx.list("syncOutbox", function(x){ return x && x.spaceId === sid; })).length; }
+      // FAKE fetch: PUT (delivery pump) echeggia il winner combaciante -> markDelivered; GET (pull/join) -> FAKE.body.
+      var FAKE = { status: 200, body: { seq: 0, records: [] } };
+      var origFetch = window.fetch;
+      window.fetch = async function(url, opts){
+        if (opts && opts.method === "PUT"){ var env = JSON.parse(opts.body); return { status: 200, json: async function(){ return { seq: 1, winner: { version: env.version, deviceId: env.deviceId, deleted: env.deleted === true } }; } }; }
+        return { status: FAKE.status, json: async function(){ return FAKE.body; } };
+      };
+      try {
+        var suffix = "";
+
+        // ===== 1-6. CREATOR via DELIVERY (path A, pump reale) =====
+        var s1 = await SR.createSpace({ kind: "ongoing", name: "P1", selfName: "A" });
+        var SP1 = s1.spaceId, rootId1 = "sync:" + SP1 + ":space:" + SP1; suffix = SP1.slice(-4);
+        ok("1. createSpace -> no proof", (await proofOf(SP1)) == null);
+        ok("2. createInvite prima della delivery -> reject", (await throwsMsg(function(){ return NS.createInvite(SP1); })) === "space-not-remotely-initialized");
+        ok("3. root intent pending -> no proof", (await DBx.get("syncOutbox", rootId1)).status === "pending" && (await proofOf(SP1)) == null);
+        await NS.deliverPending(SP1);   // pump reale: PUT root -> ack -> markDelivered -> proof
+        ok("4. root delivered (pump) -> proof created", (await proofOf(SP1)) != null && (await DBx.get("syncOutbox", rootId1)).status === "delivered");
+        ok("5. proof.capabilityFingerprint == fingerprint(cap corrente)", (await proofOf(SP1)).capabilityFingerprint === (await fpOf(SP1)));
+        ok("6. createInvite dopo delivery -> success", typeof (await NS.createInvite(SP1)) === "string");
+
+        // ===== 7-9. ROOT UPDATE non perde la prova (bug 7G-CAP chiuso) =====
+        await SR.renameSpace(SP1, "P1b");   // root update -> nuovo intent pending
+        ok("7. root update -> intent pending", (await DBx.get("syncOutbox", rootId1)).status === "pending");
+        ok("8. proof resta valida dopo root update", (await proofOf(SP1)) != null && (await proofOf(SP1)).capabilityFingerprint === (await fpOf(SP1)));
+        ok("9. createInvite con root pending -> SUCCESS (7G-CAP fix)", typeof (await NS.createInvite(SP1)) === "string");
+
+        // ===== 10. root intent ERROR dopo init -> proof resta valida =====
+        var re = await DBx.get("syncOutbox", rootId1); re.status = "error"; await DBx.put("syncOutbox", re);
+        ok("10. root intent error dopo init -> proof valida + createInvite SUCCESS", (await proofOf(SP1)) != null && typeof (await NS.createInvite(SP1)) === "string");
+
+        // ===== 11-12. CAP CHANGE invalida la vecchia proof =====
+        var oldProof = await proofOf(SP1), newCap = capRnd();
+        await NS.setSpaceCapability(SP1, newCap);
+        ok("11. cap cambiata -> vecchia proof non combacia col nuovo fingerprint", oldProof.capabilityFingerprint !== (await NS._capabilityFingerprint(newCap)));
+        ok("12. createInvite con cap diversa (proof stale) -> reject", (await throwsMsg(function(){ return NS.createInvite(SP1); })) === "space-not-remotely-initialized");
+
+        // ===== 13. WRONG-CAP join (remote vuoto) -> no proof =====
+        var sidW = "space:rip-wcap-" + suffix;
+        FAKE.status = 200; FAKE.body = { seq: 0, records: [] };
+        var eW = await throwsMsg(function(){ return NS.joinSpace(inviteEncode({ v: 1, s: sidW, c: capRnd(), k: (function(){ return b64url32(crypto.getRandomValues(new Uint8Array(32))); })(), kv: 1 })); });
+        ok("13. wrong-cap join (remote vuoto) -> capability-mismatch + no proof", eW === "capability-mismatch" && (await proofOf(sidW)) == null);
+
+        // ===== 14. WRONG-KEY join -> no proof =====
+        var sidK = "space:rip-wkey-" + suffix, goodK = await freshKey(), wrongKraw = await exportRaw(await freshKey());
+        FAKE.body = { seq: 2, records: [ await C._encryptWith("space", spaceRec(sidK, 1), goodK, 1) ] };
+        var eK = await throwsMsg(function(){ return NS.joinSpace(inviteEncode({ v: 1, s: sidK, c: capRnd(), k: wrongKraw, kv: 1 })); });
+        ok("14. wrong-key join -> bootstrap-decrypt-failed + no proof", eK === "bootstrap-decrypt-failed" && (await proofOf(sidK)) == null);
+
+        // ===== 15. HOLD root (keyVersion mai importata) -> no proof =====
+        var sidH = "space:rip-hold-" + suffix, holdK = await freshKey();
+        FAKE.body = { seq: 2, records: [ await C._encryptWith("space", spaceRec(sidH, 1), holdK, 9) ] };   // root a keyVersion 9, invite porta kv 1
+        var invH = inviteEncode({ v: 1, s: sidH, c: capRnd(), k: await exportRaw(holdK), kv: 1 });
+        var eH = await throwsMsg(function(){ return NS.joinSpace(invH); });
+        ok("15. HOLD root (keyVersion assente) -> space-needs-key + no proof", eH === "space-needs-key" && (await proofOf(sidH)) == null);
+
+        // ===== 16. QUARANTINED root (poisoned: ciphertext manomesso -> decrypt-failed) -> no proof =====
+        var sidQ = "space:rip-quar-" + suffix, qK = await freshKey();
+        var goodRootEnv = await C._encryptWith("space", spaceRec(sidQ, 1), qK, 1);
+        var poisoned = Object.assign({}, goodRootEnv); var qct = goodRootEnv.ciphertext;
+        poisoned.ciphertext = qct.slice(0, -2) + (qct.slice(-2) === "AA" ? "BB" : "AA");   // tag/ciphertext rotto
+        FAKE.body = { seq: 2, records: [ poisoned ] };
+        var invQ = inviteEncode({ v: 1, s: sidQ, c: capRnd(), k: await exportRaw(qK), kv: 1 });
+        var eQ = await throwsMsg(function(){ return NS.joinSpace(invQ); });
+        ok("16. root poisoned/quarantinato (decrypt-failed) -> gate reject + no proof", eQ != null && (await proofOf(sidQ)) == null);
+
+        // ===== 17-18. CORRECT authenticated join -> proof + joined device puo' createInvite =====
+        var sidJ = "space:rip-join-" + suffix, jK = await freshKey(), jCap = capRnd();
+        FAKE.body = { seq: 2, records: [ await C._encryptWith("space", spaceRec(sidJ, 1), jK, 1), await C._encryptWith("member", memberRec(sidJ, sidJ + ":m1"), jK, 1) ] };
+        var joined = await NS.joinSpace(inviteEncode({ v: 1, s: sidJ, c: jCap, k: await exportRaw(jK), kv: 1 }));
+        ok("17. correct authenticated join -> awaiting-self + proof created", joined.state === "awaiting-self" && (await proofOf(sidJ)) != null);
+        ok("17b. proof cap-bound al cap del join", (await proofOf(sidJ)).capabilityFingerprint === (await fpOf(sidJ)));
+        await NS.claimSelf(sidJ, sidJ + ":m1");   // -> ready
+        var jTok = await NS.createInvite(sidJ);
+        ok("18. joined device createInvite usando la proof -> success (no root re-delivery)", typeof jTok === "string" && jTok.indexOf(INVITE_PREFIX) === 0);
+
+        // ===== 19. proof PERSISTENTE in meta (durevole al reload) =====
+        var persisted = await DBx.meta.get("remoteInitProof:" + sidJ);
+        ok("19. proof persistente in meta (durevole al reload)", persisted != null && persisted.capabilityFingerprint === (await proofOf(sidJ)).capabilityFingerprint);
+
+        // ===== 20-22. IDEMPOTENCY + zero Shared side-effect =====
+        var s20 = await SR.createSpace({ kind: "ongoing", name: "P20", selfName: "A" });
+        var SP20 = s20.spaceId, ver20a = (await DBx.get("spaces", SP20)).version;
+        await NS.deliverPending(SP20);
+        var out20a = await outCount(SP20), p20a = await proofOf(SP20);
+        await NS._recordRemoteInitProof(SP20, "delivery-ack");   // ripetizioni
+        await NS._recordRemoteInitProof(SP20, "inbound-root");
+        await NS.deliverPending(SP20);
+        var p20b = await proofOf(SP20);
+        ok("20. proof acquisition ripetuta -> idempotente (observedAt/fingerprint stabili)", p20a && p20b && p20a.observedAt === p20b.observedAt && p20a.capabilityFingerprint === p20b.capabilityFingerprint);
+        ok("21. proof creation -> zero Shared intent aggiuntivo", (await outCount(SP20)) === out20a);
+        ok("22. proof creation -> zero version bump dello spazio", (await DBx.get("spaces", SP20)).version === ver20a);
+
+        // ===== SECURITY (sez.13): niente raw cap/key/invite nella proof; fingerprint one-way =====
+        var secProof = await proofOf(sidJ), sec = JSON.stringify(secProof);
+        ok("SEC1. proof: nessuna raw capability duplicata", sec.indexOf(jCap) < 0);
+        ok("SEC2. proof: fingerprint one-way (cf1:<sha256hex>, no plaintext cap)", /^cf1:[0-9a-f]{64}$/.test(secProof.capabilityFingerprint));
+        ok("SEC3. proof: SOLO chiavi minime (capabilityFingerprint/observedAt/source)", JSON.stringify(Object.keys(secProof).sort()) === JSON.stringify(["capabilityFingerprint", "observedAt", "source"]));
+      } finally { window.fetch = origFetch; }
+
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
     }
   };
 
@@ -7977,11 +8136,12 @@ if ("serviceWorker" in navigator){
       // --- roundtrip createInvite -> parseInvite su spazio nativo reale ---
       var made = await SR.createSpace({ kind: "experience", name: "Invito7F", selfName: "A" });
       var S = made.spaceId;
-      // F4/7G-Cap — createInvite ora esige il remote-init (space-root consegnato). Qui, offline, si simula
-      // la delivery marcando "delivered" l'intent space-root con la SUA versione (la stessa API guardata
-      // usata dalla delivery pump). Senza questo, createInvite rifiuta con space-not-remotely-initialized.
+      // F4/7G-Cap2 — createInvite esige la remoteInitProof sticky cap-bound. Qui, offline, si simula la
+      // delivery marcando "delivered" l'intent space-root e stampando la proof (equivalente all'hook che la
+      // delivery pump esegue sull'ACK del root). Senza proof, createInvite rifiuta space-not-remotely-initialized.
       var _riJ = "sync:" + S + ":space:" + S, _rootJ = await DBx.get("syncOutbox", _riJ);
       await window.syncOutbox.markDelivered(_riJ, _rootJ.version, _rootJ.deviceId);
+      await window.nativeSync._recordRemoteInitProof(S, "delivery-ack");
       var token = await createInvite(S);
       ok("token ha prefisso invito", typeof token === "string" && token.indexOf(INVITE_PREFIX) === 0);
       var inv = parseInvite(token);
@@ -8111,8 +8271,9 @@ if ("serviceWorker" in navigator){
         var ge = await DBx.get("syncOutbox", gRootId); ge.status = "error"; await DBx.put("syncOutbox", ge);
         ok("4. root pending/error NON abilita invite (no falso positivo sez.9)", (await throwsMsg(function(){ return createInvite(GID); })) === "space-not-remotely-initialized");
         var gr = await DBx.get("syncOutbox", gRootId); await OB.markDelivered(gRootId, gr.version, gr.deviceId);
+        await NS._recordRemoteInitProof(GID, "delivery-ack");   // 7G-Cap2: proof cap-bound (equivalente all'ACK root della pump)
         var gTok = await createInvite(GID);
-        ok("5. root delivered abilita invite (token valido)", typeof gTok === "string" && gTok.indexOf(INVITE_PREFIX) === 0);
+        ok("5. root delivered (proof cap-bound) abilita invite (token valido)", typeof gTok === "string" && gTok.indexOf(INVITE_PREFIX) === 0);
 
         // ===== WRONG CAP -> EMPTY REMOTE (sez. 4,5A) =====
         var sidW = "space:wcap-" + (++n) + "-" + suffix, keyW = await freshKey();
