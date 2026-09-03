@@ -1208,9 +1208,19 @@ body.no-splash #app{animation:none}
     <!-- F4/8B1 — vista Shared minimale, read-only (nome nell'header, partecipanti, badge sync) -->
     <section class="screen" id="s-shared" hidden>
       <button class="btn btn-ghost w" id="btn-shared-back" type="button">← I tuoi gruppi</button>
-      <div class="sez">
+      <div class="sez" id="shared-membri-sez">
         <span class="sez-k">Partecipanti</span>
         <div id="shared-membri" class="filo-lista"></div>
+      </div>
+      <!-- F4/8B3 — claim self (stato awaiting-self): scegli il tuo partecipante -->
+      <div class="sez" id="shared-claim-sez" hidden>
+        <span class="sez-k">Chi sei in questo spazio?</span>
+        <div id="shared-claim-lista" class="filo-lista"></div>
+        <div id="shared-claim-empty" hidden>
+          <p class="nota" style="margin-top:0">Nessun partecipante disponibile</p>
+          <button class="btn btn-ghost w" id="btn-claim-refresh" type="button">Aggiorna</button>
+        </div>
+        <p class="err" id="shared-claim-err" role="alert" hidden></p>
       </div>
       <!-- F4/8B2 — condivisione (mostrato solo con self attivo) -->
       <div class="sez" id="shared-condividi-sez" hidden>
@@ -1255,6 +1265,18 @@ body.no-splash #app{animation:none}
       <button class="btn btn-primary" id="share-do" type="button">Condividi</button>
     </div>
     <button class="btn btn-ghost w" id="share-close" type="button" style="margin-top:10px">Chiudi</button>
+  </div>
+</div>
+
+<!-- F4/8B3 — invite consumer sheet (nessun token/secret nel DOM; il token vive solo nel fragment URL) -->
+<div class="velo" id="velo-invite" hidden>
+  <div class="popup" role="dialog" aria-modal="true" aria-labelledby="invite-tit">
+    <h2 class="pop-tit" id="invite-tit">Invito a uno spazio condiviso</h2>
+    <p class="pop-testo" id="invite-msg" role="status">Vuoi entrare in questo spazio condiviso?</p>
+    <div class="due" id="invite-actions">
+      <button class="btn btn-ghost" id="invite-annulla" type="button">Annulla</button>
+      <button class="btn btn-primary" id="invite-entra" type="button">Entra</button>
+    </div>
   </div>
 </div>
 
@@ -2311,12 +2333,17 @@ async function apriSpazio(spaceId){
   window.scrollTo(0, 0);
   await renderSharedMembri(spaceId);
   aggiornaBadgeShared(spaceId);
-  // F4/8B2 — "Condividi spazio" solo con self attivo (read-only guard; ri-verificato anche al click)
+  // F4/8B3 — routing self: no-self => superficie di claim ("Sono io"); active => vista 8B1 normale;
+  // revoked => read-only senza claim (il reclaim resta 8B4). selfStatus e' derivato (read-only).
+  var st = null; try { st = await window.nativeSync.selfStatus(spaceId); } catch(e){}
+  if (!SPACE_CTX || SPACE_CTX.id !== spaceId) return;   // race guard: contesto cambiato durante l'await
+  var claiming = (st === "no-self");
+  var membriSez = $("#shared-membri-sez"); if (membriSez) membriSez.hidden = claiming;
+  var placeholder = $("#shared-placeholder"); if (placeholder) placeholder.hidden = claiming;
+  var claimSez = $("#shared-claim-sez"); if (claimSez) claimSez.hidden = !claiming;
   var sec = $("#shared-condividi-sez");
-  if (sec){
-    var st = null; try { st = await window.nativeSync.selfStatus(spaceId); } catch(e){}
-    if (SPACE_CTX && SPACE_CTX.id === spaceId) sec.hidden = (st !== "active");
-  }
+  if (sec) sec.hidden = (st !== "active");   // F4/8B2 — condividi solo con self attivo
+  if (claiming && window.calculonClaim) await window.calculonClaim.render(spaceId);
 }
 
 // Chiude la vista Shared e torna alla lista (Profilo, dove vive #pf-gruppi).
@@ -12097,6 +12124,239 @@ if ("serviceWorker" in navigator){
   goHome();
 })();
 /* F1P12-HOME-END */
+</script>
+
+<script>
+"use strict";
+/* F4/8B3-INVITE-JOIN-CLAIM-START */
+/* F4 · Passo 8B3 — Invite consumer / Join esplicito / claim awaiting-self (SOLO UI).
+   Consuma le API canoniche del motore native (window.nativeSync): parseInvite (read-only),
+   joinSpace (mutazione SOLO su [Entra] esplicito), joinPull (token-free), claimSelf, selfStatus.
+   Nessun tocco a motore/worker/schema. Il token d'invito vive SOLO nel fragment URL: mai in console,
+   DOM, storage o testo d'errore. Navigazione (boot/hashchange/back-forward) = SOLO lettura: non chiama
+   MAI joinSpace/claimSelf. */
+(function(){
+  var NS = window.nativeSync;
+  if (!NS || !NS.parseInvite || !NS.joinSpace || !NS.claimSelf || !NS.selfStatus) return;
+  var doc = document;
+  function el(id){ return doc.getElementById(id); }
+
+  var INVITE_PREFIX = "CALCULON-INVITE-1.";   // stesso formato wire del produttore (createInvite)
+
+  // ---- hash lifecycle: il fragment URL E' l'unico store del token. Strip = replaceState (silenzioso:
+  // NON emette hashchange), quindi nessun ciclo di detection spurio. ----
+  function hashLooksInvite(){
+    var h = location.hash || "";
+    return h.indexOf("invite=") >= 0 || h.indexOf(INVITE_PREFIX) >= 0;
+  }
+  function stripHash(){
+    try { history.replaceState(null, "", location.pathname + location.search); }
+    catch(e){ location.hash = ""; }
+  }
+
+  // ---- stato modale invito ----
+  var _inviteState = null;   // "preview" | "invalid" | "pending" | "failed" | null(chiusa)
+  var _inviteStr   = null;   // sorgente di parse corrente (dal fragment); MAI persistita altrove
+  var _joining     = false;  // single-flight join
+  var _lastFocus   = null;
+
+  function openInvite(){
+    var v = el("velo-invite"); if (!v) return;
+    if (v.hidden) _lastFocus = doc.activeElement;
+    v.hidden = false;
+  }
+  function closeInvite(){
+    var v = el("velo-invite"); if (v) v.hidden = true;
+    _inviteState = null; _inviteStr = null;
+    try { if (_lastFocus && _lastFocus.focus) _lastFocus.focus(); } catch(e){}
+  }
+  function focusSoon(node){ setTimeout(function(){ try { node.focus(); } catch(e){} }, 30); }
+
+  function setInviteState(state){
+    _inviteState = state;
+    var tit = el("invite-tit"), msg = el("invite-msg"), entra = el("invite-entra"),
+        annulla = el("invite-annulla"), pop = doc.querySelector("#velo-invite .popup");
+    if (pop) pop.removeAttribute("aria-busy");
+    if (state === "preview"){
+      tit.textContent = "Invito a uno spazio condiviso";
+      msg.textContent = "Vuoi entrare in questo spazio condiviso?";
+      entra.hidden = false; entra.disabled = false; entra.textContent = "Entra";
+      annulla.hidden = false; annulla.disabled = false; annulla.textContent = "Annulla";
+      focusSoon(entra);
+    } else if (state === "pending"){
+      msg.textContent = "Sto entrando…";
+      if (pop) pop.setAttribute("aria-busy", "true");
+      entra.disabled = true; annulla.disabled = true;
+    } else if (state === "invalid"){
+      tit.textContent = "Invito non valido";
+      msg.textContent = "";                 // mai il token grezzo o il codice d'errore del parser
+      entra.hidden = true;
+      annulla.hidden = false; annulla.disabled = false; annulla.textContent = "Chiudi";
+      focusSoon(annulla);
+    } else if (state === "failed"){
+      tit.textContent = "Invito a uno spazio condiviso";
+      msg.textContent = "Non riesco a farti entrare adesso.";   // friendly, nessun segreto
+      entra.hidden = false; entra.disabled = false; entra.textContent = "Riprova";
+      annulla.hidden = false; annulla.disabled = false; annulla.textContent = "Annulla";
+      focusSoon(entra);
+    }
+  }
+
+  // ---- consumer READ-ONLY: boot + hashchange. Non muta MAI l'appartenenza. ----
+  function detectInvite(){
+    if (_joining) return;                       // join in corso: non toccare la modale
+    if (!hashLooksInvite()){
+      if (_inviteState === "preview") closeInvite();   // fragment sparito durante una preview read-only
+      return;
+    }
+    try {
+      NS.parseInvite(location.hash);            // SOLO validazione forma+cripto; nessuna mutazione
+      _inviteStr = location.hash;
+      setInviteState("preview");                // KEEP hash
+      openInvite();
+    } catch(e){
+      _inviteStr = null;
+      setInviteState("invalid");
+      openInvite();
+      stripHash();                              // INVITE_INVALID => STRIP
+    }
+  }
+
+  // ---- join esplicito (single-flight). SOLO da click [Entra]/[Riprova]. ----
+  async function doJoin(){
+    if (_joining) return;                       // doppia attivazione: nessun secondo join concorrente
+    if (!_inviteStr) return;
+    _joining = true;
+    setInviteState("pending");                  // KEEP hash per tutto il tentativo
+    var invite = _inviteStr;
+    try {
+      var res = await NS.joinSpace(invite);     // unica mutazione
+      _joining = false;
+      stripHash();                              // STRIP solo dopo settle riuscito (awaiting-self persistito)
+      closeInvite();
+      await openJoinedSpace(res && res.spaceId);
+    } catch(e){
+      _joining = false;
+      if (e && e.message === "gia-membro"){      // JOIN_ALREADY_MEMBER: apre lo spazio esistente, nessun duplicato
+        stripHash();
+        var sid = null; try { sid = NS.parseInvite(invite).spaceId; } catch(_){}
+        closeInvite();
+        if (sid) await openJoinedSpace(sid);
+        return;
+      }
+      setInviteState("failed");                 // JOIN_FAILED: KEEP hash, errore + [Riprova]
+    }
+  }
+
+  async function openJoinedSpace(spaceId){
+    if (!spaceId) return;
+    try { if (window.calculonHome && window.calculonHome.hide) window.calculonHome.hide(); } catch(e){}
+    try { await window.apriSpazio(spaceId); } catch(e){}   // routing self: awaiting-self => claim, active => 8B1
+  }
+
+  // ---- wiring modale invito ----
+  if (el("invite-entra")) el("invite-entra").onclick = function(){
+    if (_inviteState === "preview" || _inviteState === "failed") doJoin();
+  };
+  if (el("invite-annulla")) el("invite-annulla").onclick = function(){
+    if (_inviteState === "preview" || _inviteState === "failed"){ stripHash(); closeInvite(); }
+    else { closeInvite(); }                     // invalid: hash gia' strippato
+  };
+  if (el("velo-invite")) el("velo-invite").addEventListener("click", function(ev){
+    if (ev.target !== el("velo-invite") || _inviteState === "pending") return;   // mai interrompere un join
+    if (_inviteState === "preview" || _inviteState === "failed") stripHash();
+    closeInvite();
+  });
+  doc.addEventListener("keydown", function(ev){
+    if (ev.key !== "Escape") return;
+    var v = el("velo-invite"); if (!v || v.hidden || _inviteState === "pending") return;
+    if (_inviteState === "preview" || _inviteState === "failed") stripHash();
+    closeInvite();
+  });
+
+  // ================= superficie di CLAIM (awaiting-self), riusa #s-shared =================
+  var _claiming = false;   // single-flight claim
+
+  function claimBusy(on){
+    var lista = el("shared-claim-lista");
+    if (lista) Array.prototype.forEach.call(lista.querySelectorAll("button"), function(b){ b.disabled = on; });
+    var refresh = el("btn-claim-refresh"); if (refresh) refresh.disabled = on;
+  }
+  function claimError(msg){
+    var err = el("shared-claim-err"); if (!err) return;
+    if (msg){ err.textContent = msg; err.hidden = false; } else { err.hidden = true; }
+  }
+  function mapClaimError(e){
+    var m = e && e.message;
+    if (m === "existing-self-conflict") return "Hai già scelto un altro partecipante in questo spazio";
+    if (m === "claim-member-invalid")   return "Questo partecipante non è più disponibile.";
+    return "Non riesco a completare adesso. Riprova.";
+  }
+
+  // Rende i candidati (membri attivi) come scelte "Sono io", o lo stato NO_CANDIDATE con [Aggiorna].
+  async function renderClaim(spaceId){
+    var lista = el("shared-claim-lista"), empty = el("shared-claim-empty");
+    if (!lista) return;
+    claimError(null);
+    lista.innerHTML = "";
+    var membri = [];
+    try { membri = await window.sharedRuntime.listMembers(spaceId); } catch(e){ membri = []; }
+    membri = (membri || []).filter(function(m){ return m && m.deleted !== true && m.active !== false; });
+    if (!window.SPACE_CTX || window.SPACE_CTX.id !== spaceId) return;   // race guard
+    if (!membri.length){                                                // NO_CANDIDATE
+      if (empty) empty.hidden = false;
+      lista.hidden = true;
+      return;
+    }
+    if (empty) empty.hidden = true;
+    lista.hidden = false;
+    membri.forEach(function(m){                                         // UNCLAIMED_SELF_AVAILABLE
+      var b = doc.createElement("button");
+      b.type = "button"; b.className = "scelta";
+      b.appendChild(window.avatarEl(m));
+      var n = doc.createElement("span"); n.className = "nome-sc"; n.textContent = m.name || "?";
+      b.appendChild(n);
+      var cta = doc.createElement("span"); cta.className = "nota"; cta.style.marginLeft = "auto"; cta.textContent = "Sono io";
+      b.appendChild(cta);
+      b.setAttribute("aria-label", "Sono io: " + (m.name || "partecipante"));
+      b.onclick = function(){ claimSelf(spaceId, m.id); };
+      lista.appendChild(b);
+    });
+  }
+
+  async function claimSelf(spaceId, memberId){
+    if (_claiming) return;                       // single-flight
+    _claiming = true;
+    claimError(null); claimBusy(true);
+    try {
+      await NS.claimSelf(spaceId, memberId);     // idempotente lato motore
+      _claiming = false;
+      if (window.SPACE_CTX && window.SPACE_CTX.id === spaceId) await window.apriSpazio(spaceId);  // => active => 8B1
+    } catch(e){
+      _claiming = false; claimBusy(false);
+      claimError(mapClaimError(e));              // il join resta veritiero/recuperabile; retry esplicito
+    }
+  }
+
+  async function refreshCandidates(spaceId){
+    var btn = el("btn-claim-refresh");
+    if (btn){ btn.disabled = true; btn.setAttribute("aria-busy", "true"); }
+    try { await NS.joinPull(spaceId); } catch(e){}   // token-free: usa cap/key persistiti
+    if (btn){ btn.disabled = false; btn.removeAttribute("aria-busy"); }
+    if (window.SPACE_CTX && window.SPACE_CTX.id === spaceId) await renderClaim(spaceId);
+  }
+
+  if (el("btn-claim-refresh")) el("btn-claim-refresh").onclick = function(){
+    if (window.SPACE_CTX && window.SPACE_CTX.kind === "shared") refreshCandidates(window.SPACE_CTX.id);
+  };
+
+  window.calculonClaim = { render: renderClaim };
+
+  // ---- boot + hashchange (READ-ONLY): back/forward/boot non fanno MAI auto-join ----
+  window.addEventListener("hashchange", detectInvite);
+  detectInvite();
+  /* F4/8B3-INVITE-JOIN-CLAIM-END */
+})();
 </script>
 
 <!-- Segnaposto vuoti per le fasi successive (nessun codice, solo confine di sezione). -->
