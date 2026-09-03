@@ -155,6 +155,13 @@ button{cursor:pointer}
 .membro-testo{display:flex;flex-direction:column;min-width:0;flex:1;gap:1px}
 .membro-testo .nome{flex:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .membro-tipo{font-size:12px;color:var(--grigio);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* F4/8B2 — controllo binario Local/Shared nel form di creazione (segmented, testuale) */
+.crea-mode{display:flex;gap:6px;margin:0 0 14px;background:rgba(255,255,255,.5);border-radius:99px;padding:4px}
+.crea-mode-opt{flex:1;border:0;background:transparent;border-radius:99px;padding:10px 8px;min-height:44px;
+  font-family:inherit;font-weight:700;font-size:13px;color:var(--grigio);cursor:pointer;line-height:1.2;
+  transition:background-color .2s ease,color .2s ease}
+.crea-mode-opt[aria-checked="true"]{background:var(--inchiostro);color:var(--foglio)}
+.crea-mode-opt:focus-visible{outline:2px solid var(--inchiostro);outline-offset:2px}
 
 /* ---------- struttura ---------- */
 main{flex:1;display:flex;flex-direction:column;padding:8px var(--pad-pagina) 20px}
@@ -941,9 +948,14 @@ body.no-splash #app{animation:none}
 
       <div class="sez">
         <span class="sez-k">Crea un gruppo</span>
+        <!-- F4/8B2 — tipo di spazio: default Local (comportamento storico invariato) -->
+        <div class="crea-mode" role="radiogroup" aria-label="Tipo di spazio">
+          <button type="button" class="crea-mode-opt" id="mode-local" role="radio" aria-checked="true" tabindex="0">Solo su questo dispositivo</button>
+          <button type="button" class="crea-mode-opt" id="mode-shared" role="radio" aria-checked="false" tabindex="-1">Condiviso</button>
+        </div>
         <label class="campo"><span class="lbl">Come si chiama</span>
           <input id="in-name" type="text" placeholder="Estate Tropeana" autocomplete="off"></label>
-        <span class="lbl">Chi c'è</span>
+        <span class="lbl" id="crea-membri-lbl">Chi c'è</span>
         <div id="new-membri" class="filo-lista"></div>
         <button class="btn btn-ghost btn-mini" id="btn-addm" type="button">+ Aggiungi partecipante</button>
         <button class="btn btn-primary w" id="btn-crea">Crea il gruppo</button>
@@ -1200,6 +1212,10 @@ body.no-splash #app{animation:none}
         <span class="sez-k">Partecipanti</span>
         <div id="shared-membri" class="filo-lista"></div>
       </div>
+      <!-- F4/8B2 — condivisione (mostrato solo con self attivo) -->
+      <div class="sez" id="shared-condividi-sez" hidden>
+        <button class="btn btn-primary w" id="btn-condividi-spazio" type="button">Condividi spazio</button>
+      </div>
       <p class="nota" id="shared-placeholder">Le spese condivise arrivano a breve.</p>
     </section>
   </main>
@@ -1226,6 +1242,19 @@ body.no-splash #app{animation:none}
       <button class="btn btn-ghost" id="pop-annulla" type="button">Annulla</button>
       <button class="btn btn-rosso" id="pop-conferma" type="button" disabled>Elimina</button>
     </div>
+  </div>
+</div>
+
+<!-- F4/8B2 — share sheet (nessun token/secret nel DOM; il link vive solo in memoria) -->
+<div class="velo" id="velo-share" hidden>
+  <div class="popup" role="dialog" aria-modal="true" aria-labelledby="share-tit">
+    <h2 class="pop-tit" id="share-tit">Condividi spazio</h2>
+    <p class="pop-testo" id="share-msg" role="status">Chiunque abbia questo link può entrare nello spazio.</p>
+    <div class="due" id="share-actions">
+      <button class="btn btn-ghost" id="share-copy" type="button">Copia link</button>
+      <button class="btn btn-primary" id="share-do" type="button">Condividi</button>
+    </div>
+    <button class="btn btn-ghost w" id="share-close" type="button" style="margin-top:10px">Chiudi</button>
   </div>
 </div>
 
@@ -2282,6 +2311,12 @@ async function apriSpazio(spaceId){
   window.scrollTo(0, 0);
   await renderSharedMembri(spaceId);
   aggiornaBadgeShared(spaceId);
+  // F4/8B2 — "Condividi spazio" solo con self attivo (read-only guard; ri-verificato anche al click)
+  var sec = $("#shared-condividi-sez");
+  if (sec){
+    var st = null; try { st = await window.nativeSync.selfStatus(spaceId); } catch(e){}
+    if (SPACE_CTX && SPACE_CTX.id === spaceId) sec.hidden = (st !== "active");
+  }
 }
 
 // Chiude la vista Shared e torna alla lista (Profilo, dove vive #pf-gruppi).
@@ -2344,6 +2379,126 @@ if (typeof window !== "undefined" && window.addEventListener){
   window.addEventListener("online",  function(){ if (SPACE_CTX && SPACE_CTX.kind === "shared") aggiornaBadgeShared(SPACE_CTX.id); });
   window.addEventListener("offline", function(){ if (SPACE_CTX && SPACE_CTX.kind === "shared") aggiornaBadgeShared(SPACE_CTX.id); });
   document.addEventListener("visibilitychange", function(){ if (!document.hidden && SPACE_CTX && SPACE_CTX.kind === "shared") aggiornaBadgeShared(SPACE_CTX.id); });
+}
+
+/* ============================================================
+   F4/8B2 — CREATE SHARED + SHARE INVITE (solo UI; consuma le API canoniche)
+   ============================================================ */
+var createMode = "local";       // "local" | "shared" — SOLO runtime/UI, non persistito
+var _creatingShared = false;    // single-flight creazione
+var _sharing = {};              // single-flight share per spaceId
+var _shareUrl = null;           // invite URL TRANSIENT: solo in memoria, durante lo sheet
+
+// Aggiorna placeholder/label del form in base alla modalita' (senza cancellare i valori digitati).
+function aggiornaPlaceholderCrea(){
+  var inputs = $$("#new-membri input");
+  var lbl = $("#crea-membri-lbl");
+  if (createMode === "shared"){
+    if (lbl) lbl.textContent = "Partecipanti";
+    inputs.forEach(function(inp, i){ inp.placeholder = (i === 0) ? "Il tuo nome" : "Aggiungi partecipante"; });
+  } else {
+    if (lbl) lbl.textContent = "Chi c'è";
+    inputs.forEach(function(inp, i){ inp.placeholder = "Nome " + (i + 1); });
+  }
+}
+function setCreateMode(mode){
+  createMode = (mode === "shared") ? "shared" : "local";
+  var ml = $("#mode-local"), ms = $("#mode-shared");
+  if (ml && ms){
+    ml.setAttribute("aria-checked", createMode === "local" ? "true" : "false"); ml.tabIndex = createMode === "local" ? 0 : -1;
+    ms.setAttribute("aria-checked", createMode === "shared" ? "true" : "false"); ms.tabIndex = createMode === "shared" ? 0 : -1;
+  }
+  aggiornaPlaceholderCrea();
+}
+
+// Creazione Shared (native), consuma sharedRuntime.createSpace/addMember. Offline-capable.
+async function creaShared(){
+  if (_creatingShared) return;                         // single-flight (double tap / Enter+click)
+  var e = $("#err-crea"); if (e) e.hidden = true;
+  var name = $("#in-name").value.trim();
+  var inputs = $$("#new-membri input").map(function(i){ return i.value.trim(); });
+  var selfName = inputs[0] || "";
+  var extras = inputs.slice(1).filter(Boolean);        // vuoti ignorati
+  if (!name){ if (e){ e.textContent = "Dai un nome allo spazio."; e.hidden = false; } return; }
+  if (!selfName){ if (e){ e.textContent = "Scrivi il tuo nome."; e.hidden = false; } return; }
+  _creatingShared = true;
+  var btn = $("#btn-crea"); if (btn){ btn.disabled = true; btn.setAttribute("aria-busy", "true"); }
+  var spaceId = null, addFail = 0;
+  try {
+    var res = await window.sharedRuntime.createSpace({ kind: "experience", name: name, selfName: selfName });   // F4/8B2 kind=experience
+    spaceId = res.spaceId;
+    for (var i = 0; i < extras.length; i++){
+      try { await window.sharedRuntime.addMember(spaceId, { name: extras[i] }); } catch(ex){ addFail++; }   // partial success: continua
+    }
+  } catch(ex){
+    if (btn){ btn.disabled = false; btn.removeAttribute("aria-busy"); }
+    _creatingShared = false;
+    if (e){ e.textContent = "Non riesco a creare lo spazio ora."; e.hidden = false; }
+    return;
+  }
+  if (btn){ btn.disabled = false; btn.removeAttribute("aria-busy"); }
+  _creatingShared = false;
+  avviso(addFail > 0 ? "Spazio creato. Uno o più partecipanti non sono stati aggiunti." : "Spazio creato");
+  await apriSpazio(spaceId);   // apre la vista minimale 8B1; il badge sara' Da sincronizzare (intent pending)
+}
+
+// URL invito TRANSIENT: app URL + fragment (mai query string / pathname; formato invito invariato).
+function buildInviteUrl(token){ return location.origin + location.pathname + "#invite=" + token; }
+
+// --- share sheet (riusa .velo/.popup) ---
+var _shareLastFocus = null;
+function apriShareSheet(){ _shareLastFocus = document.activeElement; $("#velo-share").hidden = false; }
+function chiudiShareSheet(){
+  $("#velo-share").hidden = true;
+  _shareUrl = null;                                    // hygiene: azzera il riferimento transient
+  try { if (_shareLastFocus && _shareLastFocus.focus) _shareLastFocus.focus(); } catch(e){}
+}
+function setShareState(state, failKind){
+  var msg = $("#share-msg"), actions = $("#share-actions"), doBtn = $("#share-do"), copyBtn = $("#share-copy"), pop = document.querySelector("#velo-share .popup");
+  if (state === "preparing"){
+    msg.textContent = "Preparo il link…"; if (pop) pop.setAttribute("aria-busy", "true");
+    actions.hidden = true; doBtn.disabled = true; copyBtn.disabled = true;
+    setTimeout(function(){ try { $("#share-close").focus(); } catch(e){} }, 30);
+  } else if (state === "ready"){
+    if (pop) pop.removeAttribute("aria-busy");
+    msg.textContent = "Chiunque abbia questo link può entrare nello spazio.";
+    actions.hidden = false; doBtn.disabled = false; copyBtn.disabled = false;
+    setTimeout(function(){ try { doBtn.focus(); } catch(e){} }, 30);
+  } else { // failed
+    if (pop) pop.removeAttribute("aria-busy");
+    actions.hidden = true; doBtn.disabled = true; copyBtn.disabled = true;
+    msg.textContent = failKind === "offline" ? "Connettiti a internet per condividere questo spazio."
+                    : failKind === "self"    ? "Non puoi condividere questo spazio da questo profilo."
+                    : "Non riesco a preparare il link ora.";
+    setTimeout(function(){ try { $("#share-close").focus(); } catch(e){} }, 30);
+  }
+}
+
+// Orchestrazione share (7G-CAP2 friendly): createInvite prima; se not-initialized e online -> deliverPending una volta -> retry.
+async function condividiSpazio(spaceId){
+  var st = null; try { st = await window.nativeSync.selfStatus(spaceId); } catch(e){}   // re-check al click (UI stale guard)
+  if (st !== "active"){ avviso("Non puoi condividere questo spazio da questo profilo."); return; }
+  if (_sharing[spaceId]) return;                       // single-flight per spazio
+  _sharing[spaceId] = true;
+  apriShareSheet(); setShareState("preparing");
+  var token = null, failKind = null;
+  try {
+    token = await window.nativeSync.createInvite(spaceId);           // proof valida -> zero delivery
+  } catch(e1){
+    if (e1 && e1.message === "space-not-remotely-initialized"){
+      if (navigator.onLine === false){ failKind = "offline"; }
+      else {
+        try { await window.nativeSync.deliverPending(spaceId); } catch(e2){}
+        if (SPACE_CTX && SPACE_CTX.kind === "shared" && SPACE_CTX.id === spaceId) aggiornaBadgeShared(spaceId);   // badge refresh (renderer read-only)
+        var st2 = null; try { st2 = await window.nativeSync.selfStatus(spaceId); } catch(e){}
+        if (st2 !== "active"){ failKind = "self"; }
+        else { try { token = await window.nativeSync.createInvite(spaceId); } catch(e3){ failKind = "sync"; } }
+      }
+    } else { failKind = "sync"; }
+  }
+  _sharing[spaceId] = false;
+  if (token){ _shareUrl = buildInviteUrl(token); setShareState("ready"); }
+  else { setShareState("failed", failKind); }
 }
 
 /* Un link incollato dall'utente → URL sicuro https, o null se non è un link valido.
@@ -3120,8 +3275,40 @@ $("#btn-addm").onclick = () => {
   inp.type = "text"; inp.placeholder = "Nome " + (box.children.length + 1);
   inp.autocomplete = "off"; inp.style.marginBottom = "8px";
   box.appendChild(inp); inp.focus();
+  aggiornaPlaceholderCrea();   // F4/8B2: placeholder coerente con la modalita' corrente
 };
-$("#btn-crea").onclick = crea;
+// F4/8B2 — dispatcher Local/Shared: Local usa il path legacy crea() INVARIATO; Shared usa creaShared().
+$("#btn-crea").onclick = () => { if (createMode === "shared") creaShared(); else crea(); };
+
+// F4/8B2 — selettore modalita' (radiogroup accessibile: click + frecce + Space/Enter)
+(function(){
+  var ml = $("#mode-local"), ms = $("#mode-shared");
+  if (!ml || !ms) return;
+  ml.onclick = function(){ setCreateMode("local"); ml.focus(); };
+  ms.onclick = function(){ setCreateMode("shared"); ms.focus(); };
+  function onKey(ev){
+    if (ev.key === "ArrowLeft" || ev.key === "ArrowUp"){ ev.preventDefault(); setCreateMode("local"); ml.focus(); }
+    else if (ev.key === "ArrowRight" || ev.key === "ArrowDown"){ ev.preventDefault(); setCreateMode("shared"); ms.focus(); }
+    else if (ev.key === " " || ev.key === "Enter"){ ev.preventDefault(); setCreateMode(ev.currentTarget === ms ? "shared" : "local"); }
+  }
+  ml.addEventListener("keydown", onKey); ms.addEventListener("keydown", onKey);
+})();
+
+// F4/8B2 — share entry point + share sheet wiring
+if ($("#btn-condividi-spazio")) $("#btn-condividi-spazio").onclick = () => { if (SPACE_CTX && SPACE_CTX.kind === "shared") condividiSpazio(SPACE_CTX.id); };
+if ($("#share-close")) $("#share-close").onclick = chiudiShareSheet;
+if ($("#velo-share")) $("#velo-share").addEventListener("click", (ev) => { if (ev.target === $("#velo-share")) chiudiShareSheet(); });
+document.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && !$("#velo-share").hidden) chiudiShareSheet(); });
+if ($("#share-copy")) $("#share-copy").onclick = () => { if (_shareUrl) copia(_shareUrl, "Link copiato"); };
+if ($("#share-do")) $("#share-do").onclick = async () => {
+  if (!_shareUrl) return;
+  if (typeof navigator.share === "function"){
+    try { await navigator.share({ url: _shareUrl }); }                      // success: nessun feedback invasivo
+    catch(e){ if (e && e.name === "AbortError") return; avviso("Non riesco a condividere, usa Copia link"); }   // cancel = no-op; error tecnico = messaggio safe
+    return;
+  }
+  copia(_shareUrl, "Link copiato");                                          // API share assente -> fallback copia
+};
 
 $("#btn-nuova").onclick    = () => apriForm(null);
 $("#btn-rimborso").onclick = () => apriRimborso(null);
