@@ -202,6 +202,8 @@ main{flex:1;display:flex;flex-direction:column;padding:8px var(--pad-pagina) 20p
 /* saldi: parte dall'alto, scorre se lungo */
 #s-saldi:not([hidden]){margin:0;flex:1;display:flex;flex-direction:column}
 #saldi-lista,#mov-lista{flex:0 0 auto}
+/* profilo: top-anchored come spese/saldi (no margin:auto -> niente offset iniziale/scroll "bloccato") */
+#s-profilo:not([hidden]){margin:0;flex:1;display:flex;flex-direction:column}
 .screen[hidden]{display:none}
 h1{font-family:var(--sf);font-size:var(--tit-grande);line-height:1.05;letter-spacing:-.035em;font-weight:700;
   margin:8px 0 10px}
@@ -395,6 +397,16 @@ select{background-position:calc(100% - 18px) 22px,calc(100% - 13px) 22px}
 .voce.rimb .desc{display:inline-flex;align-items:center;gap:8px}
 .vuoto{text-align:center;color:var(--grigio);padding:44px 16px}
 .vuoto p{margin:0 0 5px}
+/* F5.1a polish — empty state Spese piu' vicino al riepilogo (scoped, non tocca .vuoto globale) */
+#s-spese .vuoto{padding-top:8px}
+/* F5.1a — superficie finanziaria Shared (read-only): righe compatte, riuso grammatica esistente */
+#shared-settlement-lista .barra:last-child{border-bottom:0}
+#shared-spese-lista .spesa{display:flex;align-items:flex-start;gap:12px;padding:13px 0;border-bottom:1px solid var(--linea)}
+#shared-spese-lista .spesa:last-child{border-bottom:0}
+#shared-spese-lista .spesa .testi{flex:1;min-width:0}
+#shared-spese-lista .spesa .desc{font-weight:600;font-size:15px;line-height:1.3;word-break:break-word}
+#shared-spese-lista .spesa .chi{display:block;font-size:12px;color:var(--grigio);margin-top:3px;line-height:1.45}
+#shared-spese-lista .spesa .eur{font-weight:700;font-size:16px;flex:none;letter-spacing:-.02em}
 
 /* ---------- barra azioni + tab ---------- */
 .azioni{position:sticky;bottom:0;display:flex;gap:10px;padding:22px 0 18px;margin-top:16px;
@@ -1208,6 +1220,21 @@ body.no-splash #app{animation:none}
     <!-- F4/8B1 — vista Shared minimale, read-only (nome nell'header, partecipanti, badge sync) -->
     <section class="screen" id="s-shared" hidden>
       <button class="btn btn-ghost w" id="btn-shared-back" type="button">← I tuoi gruppi</button>
+      <!-- F5.1a — superficie finanziaria Shared (read-only): saldo self, come sistemare i conti, spese -->
+      <div id="shared-finance" hidden>
+        <div class="mio" id="shared-saldo">
+          <span class="k">Il tuo saldo</span>
+          <span class="big" id="shared-saldo-val" aria-live="polite">In pari</span>
+        </div>
+        <div class="sez" id="shared-settlement-sez">
+          <span class="sez-k">Come sistemare i conti</span>
+          <div id="shared-settlement-lista"></div>
+        </div>
+        <div class="sez" id="shared-spese-sez">
+          <span class="sez-k">Spese</span>
+          <div id="shared-spese-lista"></div>
+        </div>
+      </div>
       <div class="sez" id="shared-membri-sez">
         <span class="sez-k">Partecipanti</span>
         <div id="shared-membri" class="filo-lista"></div>
@@ -1254,7 +1281,6 @@ body.no-splash #app{animation:none}
       <div class="sez" id="shared-condividi-sez" hidden>
         <button class="btn btn-primary w" id="btn-condividi-spazio" type="button">Condividi spazio</button>
       </div>
-      <p class="nota" id="shared-placeholder">Le spese condivise arrivano a breve.</p>
     </section>
   </main>
 
@@ -2365,10 +2391,11 @@ async function apriSpazio(spaceId){
   // active => vista 8B1 normale; revoked => branch 8B4 (banner + reclaim). Le sotto-sezioni self
   // partono nascoste e vengono mostrate SOLO dopo il routing.
   var claimSez = $("#shared-claim-sez"), reclaimSez = $("#shared-reclaim-sez");
-  var condSez = $("#shared-condividi-sez"), membriSez = $("#shared-membri-sez"), placeholder = $("#shared-placeholder");
+  var condSez = $("#shared-condividi-sez"), membriSez = $("#shared-membri-sez"), finance = $("#shared-finance");
   if (claimSez) claimSez.hidden = true;
   if (reclaimSez) reclaimSez.hidden = true;
   if (condSez) condSez.hidden = true;
+  if (finance) finance.hidden = true;   // F5.1a: finance surface nascosta finche' il routing self non e' risolto
   // F4/8B4 — recovery probe: completa un self-rebuild incompleto. Idempotente (no-pending => no-op).
   // UNA VOLTA per apertura esplicita, race-guarded. MAI su boot/hashchange/render/polling. Il banner
   // "sto completando" appare solo se il resume e' percepibilmente lento (timer one-shot, non polling).
@@ -2390,13 +2417,17 @@ async function apriSpazio(spaceId){
   if (!SPACE_CTX || SPACE_CTX.id !== spaceId) return;   // race guard: contesto cambiato durante l'await
   var claiming = (st === "no-self"), revoked = (st === "revoked");
   if (membriSez) membriSez.hidden = claiming;                 // revoked: i partecipanti restano visibili
-  if (placeholder) placeholder.hidden = claiming || revoked;
+  // F5.1a: finance surface visibile per active E revoked (read-only); nascosta solo in no-self (claim 8B3).
+  if (finance) finance.hidden = claiming;
   if (claimSez) claimSez.hidden = !claiming;
   if (reclaimSez) reclaimSez.hidden = !revoked;
   if (condSez) condSez.hidden = (st !== "active");   // F4/8B2 — condividi solo con self attivo
   if (claiming && window.calculonClaim) await window.calculonClaim.render(spaceId);
   if (revoked && window.calculonReclaim) await window.calculonReclaim.render(spaceId,
     resumeErr === "reclaim-member-invalid" ? { error: "Questo partecipante non è più disponibile." } : null);
+  // F5.1a/D4: apertura esplicita di uno spazio join-ready => render locale canonico + pull best-effort + re-read.
+  // Solo quando la finance surface e' eleggibile (active o revoked); mai in no-self.
+  if (!claiming) refreshSharedFinance(spaceId, { pull: true });
 }
 
 // Chiude la vista Shared e torna alla lista (Profilo, dove vive #pf-gruppi).
@@ -2458,7 +2489,144 @@ async function aggiornaBadgeShared(spaceId){
 if (typeof window !== "undefined" && window.addEventListener){
   window.addEventListener("online",  function(){ if (SPACE_CTX && SPACE_CTX.kind === "shared") aggiornaBadgeShared(SPACE_CTX.id); });
   window.addEventListener("offline", function(){ if (SPACE_CTX && SPACE_CTX.kind === "shared") aggiornaBadgeShared(SPACE_CTX.id); });
-  document.addEventListener("visibilitychange", function(){ if (!document.hidden && SPACE_CTX && SPACE_CTX.kind === "shared") aggiornaBadgeShared(SPACE_CTX.id); });
+  document.addEventListener("visibilitychange", function(){
+    if (document.hidden || !SPACE_CTX || SPACE_CTX.kind !== "shared") return;   // no hidden-tab work
+    var id = SPACE_CTX.id;
+    aggiornaBadgeShared(id);
+    // F5.1a/D4: tab tornato visibile e finance surface eleggibile => pull spazio corrente + re-read canonico.
+    var f = $("#shared-finance");
+    if (f && !f.hidden) financePullOnce(id);   // solo current-space, single-flight, mai polling/globale
+  });
+}
+
+/* ============================================================
+   F5.1a — SHARED EXPENSE READ SURFACE (solo lettura; consuma le public API auditate)
+   Saldo POV self · settlementPlan · lista spese. Nessuna write di dominio, nessuna
+   proiezione, nessun IDB diretto oltre la lettura canonica dello space (come apriSpazio).
+   ============================================================ */
+// money: centesimi interi -> "€ 1.234,56" (riusa l'helper canonico eur(), mai float)
+function _finMoney(c){ return "€ " + eur(Math.abs(c | 0)); }
+// "YYYY-MM-DD" -> "dd/mm/yyyy" (solo presentazione; nessun parsing di dominio)
+function _finData(d){
+  if (typeof d !== "string") return "";
+  var p = d.split("-");
+  return (p.length === 3) ? (p[2] + "/" + p[1] + "/" + p[0]) : d;
+}
+// Coordinamento single-flight del pull per-spazio (runtime-only, non persistito).
+var _financePull = {};
+// Pull best-effort dello spazio corrente + re-read canonico. Idempotente e coalescato per spaceId.
+async function financePullOnce(spaceId){
+  if (_financePull[spaceId]) return;                     // gia' in volo: coalescing
+  var ctx = SPACE_CTX;                                   // token di generazione (identita' oggetto)
+  _financePull[spaceId] = true;
+  try { await window.nativeSync.pullSpace(spaceId); }
+  catch(e){ /* offline/HOLD/auth: si tengono i dati locali, il badge resta authority */ }
+  finally { delete _financePull[spaceId]; }
+  if (SPACE_CTX !== ctx || SPACE_CTX.id !== spaceId || SPACE_CTX.kind !== "shared") return;   // stale A->B guard
+  await refreshSharedFinance(spaceId, { pull: false });  // re-read se sono arrivati nuovi record
+  if (SPACE_CTX === ctx && SPACE_CTX.id === spaceId) aggiornaBadgeShared(spaceId);   // badge canonico dopo il pull
+}
+// Helper canonico UNICO: race-check -> read (members/tx/balances/settlement) -> race-check -> render.
+// pull:true avvia, DOPO il render locale, un pull best-effort + re-read (fire-and-forget).
+async function refreshSharedFinance(spaceId, opts){
+  opts = opts || {};
+  var ctx = SPACE_CTX;
+  if (!SPACE_CTX || SPACE_CTX.id !== spaceId || SPACE_CTX.kind !== "shared") return;   // race guard pre-read
+  var sp, members, txs, net, plan;
+  try {
+    sp      = await window.calculonDB.get("spaces", spaceId);
+    members = await window.sharedRuntime.listMembers(spaceId);
+    txs     = await window.sharedRuntime.listTransactions(spaceId);
+    net     = await window.sharedRuntime.balances(spaceId);
+    plan    = await window.sharedRuntime.settlementPlan(spaceId);
+  } catch(e){
+    if (SPACE_CTX === ctx && SPACE_CTX.id === spaceId) renderFinanceError();   // conserva il badge come authority sync
+    return;
+  }
+  if (SPACE_CTX !== ctx || SPACE_CTX.id !== spaceId || SPACE_CTX.kind !== "shared") return;   // race guard post-read (stale A->B)
+  renderFinance(sp, members, txs, net, plan);
+  if (opts.pull) financePullOnce(spaceId);   // render locale subito, poi pull best-effort
+}
+// Errore di LETTURA locale (non sync): messaggio neutro, mai raw ex.message. Non svuota dati gia' validi.
+function renderFinanceError(){
+  var xl = $("#shared-spese-lista"); if (!xl || xl.childNodes.length) return;
+  var v = document.createElement("div"); v.className = "vuoto";
+  var p = document.createElement("p"); p.textContent = "Non riesco a mostrare i conti adesso.";
+  v.appendChild(p); xl.innerHTML = ""; xl.appendChild(v);
+}
+// Rendering puro della superficie finanziaria dai dati canonici gia' letti.
+function renderFinance(sp, members, txs, net, plan){
+  members = members || []; txs = txs || []; net = net || {}; plan = plan || [];
+  var byName = {}, activeCount = 0;
+  for (var i = 0; i < members.length; i++){
+    var m = members[i]; byName[m.id] = (m.name || "?");   // identity = memberId; nomi duplicati non usati come identity
+    if (m.active !== false) activeCount++;
+  }
+  var nomeDi = function(id){ return byName[id] || "Partecipante"; };   // storico/tombstone: fallback neutro
+
+  // --- saldo POV self ---
+  var selfId = sp && sp.selfMemberId;
+  var sv = (selfId != null && net[selfId] != null) ? (net[selfId] | 0) : 0;
+  var big = $("#shared-saldo-val");
+  if (big){
+    big.classList.remove("pos", "neg");
+    if (sv > 0){ big.textContent = "Ti devono " + _finMoney(sv); big.classList.add("pos"); }
+    else if (sv < 0){ big.textContent = "Devi " + _finMoney(sv); big.classList.add("neg"); }
+    else { big.textContent = "In pari"; }
+  }
+
+  // --- come sistemare i conti (settlementPlan: debtor -> creditor) ---
+  var sl = $("#shared-settlement-lista");
+  if (sl){
+    sl.innerHTML = "";
+    if (!plan.length){
+      var pe = document.createElement("p"); pe.className = "nota"; pe.style.margin = "0";
+      pe.textContent = "I conti sono in pari."; sl.appendChild(pe);
+    } else {
+      for (var k = 0; k < plan.length; k++){
+        var s = plan[k];
+        var row = document.createElement("div"); row.className = "barra";
+        var nm = document.createElement("span"); nm.className = "nome";
+        nm.textContent = nomeDi(s.from) + " deve a " + nomeDi(s.to);
+        var am = document.createElement("span"); am.className = "eur"; am.textContent = _finMoney(s.amount);
+        row.appendChild(nm); row.appendChild(am); sl.appendChild(row);
+      }
+    }
+  }
+
+  // --- spese (solo type expense; settlement contribuiscono a saldi/plan ma NON compaiono qui) ---
+  var xl = $("#shared-spese-lista");
+  if (xl){
+    xl.innerHTML = "";
+    var exp = txs.filter(function(t){ return t && t.type === "expense" && t.deleted !== true; });
+    exp.sort(function(a, b){
+      if (a.date !== b.date) return (a.date < b.date) ? 1 : -1;   // date DESC
+      return (b.createdAt | 0) - (a.createdAt | 0);               // createdAt DESC
+    });
+    if (!exp.length){
+      var vv = document.createElement("div"); vv.className = "vuoto";
+      var p1 = document.createElement("p"); p1.textContent = "Ancora nessuna spesa";
+      var p2 = document.createElement("p"); p2.className = "nota"; p2.style.margin = "0";
+      p2.textContent = "Le spese condivise compariranno qui.";
+      vv.appendChild(p1); vv.appendChild(p2); xl.appendChild(vv);
+    } else {
+      for (var j = 0; j < exp.length; j++){
+        var t = exp[j];
+        var n = (t.allocations && t.allocations.length) | 0;
+        var split = (n > 0 && n === activeCount) ? "Divisa tra tutti"
+                   : (n === 1 ? "Divisa tra 1 partecipante" : "Divisa tra " + n + " partecipanti");
+        var chiTxt = "Pagato da " + nomeDi(t.paidById) + " · " + split + (t.date ? (" · " + _finData(t.date)) : "");
+        var rr = document.createElement("div"); rr.className = "spesa";
+        var testi = document.createElement("span"); testi.className = "testi";
+        var desc = document.createElement("span"); desc.className = "desc";
+        desc.textContent = (t.note != null && String(t.note).trim() !== "") ? t.note : "Spesa";
+        var chi = document.createElement("span"); chi.className = "chi"; chi.textContent = chiTxt;
+        testi.appendChild(desc); testi.appendChild(chi);
+        var e = document.createElement("span"); e.className = "eur"; e.textContent = _finMoney(t.amount);
+        rr.appendChild(testi); rr.appendChild(e); xl.appendChild(rr);
+      }
+    }
+  }
 }
 
 /* ============================================================
