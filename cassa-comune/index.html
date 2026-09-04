@@ -1222,6 +1222,34 @@ body.no-splash #app{animation:none}
         </div>
         <p class="err" id="shared-claim-err" role="alert" hidden></p>
       </div>
+      <!-- F4/8B4 — revoked / reclaim / self-rebuild recovery (stato revoked): read-only + scegli un altro partecipante -->
+      <div class="sez" id="shared-reclaim-sez" hidden>
+        <div id="reclaim-banner">
+          <span class="sez-k">Non sei più tra i partecipanti attivi</span>
+          <p class="nota" style="margin-top:6px">Il partecipante che avevi scelto non è più attivo in questo spazio. Puoi continuare a leggere. Per tornare a partecipare attivamente, scegli un altro partecipante.</p>
+          <button class="btn btn-primary w" id="btn-reclaim-apri" type="button">Scegli un altro partecipante</button>
+        </div>
+        <div id="reclaim-picker" hidden>
+          <span class="sez-k">Chi sei in questo spazio?</span>
+          <div id="shared-reclaim-lista" class="filo-lista"></div>
+          <div id="shared-reclaim-empty" hidden>
+            <p class="nota" style="margin-top:0">Nessun altro partecipante disponibile</p>
+            <button class="btn btn-ghost w" id="btn-reclaim-refresh" type="button">Aggiorna</button>
+          </div>
+          <div id="reclaim-confirm" hidden>
+            <p class="nota" id="reclaim-confirm-msg" style="margin-top:0"></p>
+            <div class="due">
+              <button class="btn btn-ghost" id="reclaim-annulla" type="button">Annulla</button>
+              <button class="btn btn-primary" id="reclaim-conferma" type="button">Conferma</button>
+            </div>
+          </div>
+          <p class="err" id="shared-reclaim-err" role="alert" hidden></p>
+        </div>
+        <div id="reclaim-recovery" hidden aria-busy="true">
+          <p class="nota" id="reclaim-recovery-msg" role="status" style="margin-top:0">Sto completando l'aggiornamento dello spazio.</p>
+          <button class="btn btn-ghost w" id="btn-reclaim-retry" type="button" hidden>Riprova</button>
+        </div>
+      </div>
       <!-- F4/8B2 — condivisione (mostrato solo con self attivo) -->
       <div class="sez" id="shared-condividi-sez" hidden>
         <button class="btn btn-primary w" id="btn-condividi-spazio" type="button">Condividi spazio</button>
@@ -2333,17 +2361,42 @@ async function apriSpazio(spaceId){
   window.scrollTo(0, 0);
   await renderSharedMembri(spaceId);
   aggiornaBadgeShared(spaceId);
-  // F4/8B3 — routing self: no-self => superficie di claim ("Sono io"); active => vista 8B1 normale;
-  // revoked => read-only senza claim (il reclaim resta 8B4). selfStatus e' derivato (read-only).
+  // F4/8B3+8B4 — routing self derivato (nessun flag persistente): no-self => claim ("Sono io");
+  // active => vista 8B1 normale; revoked => branch 8B4 (banner + reclaim). Le sotto-sezioni self
+  // partono nascoste e vengono mostrate SOLO dopo il routing.
+  var claimSez = $("#shared-claim-sez"), reclaimSez = $("#shared-reclaim-sez");
+  var condSez = $("#shared-condividi-sez"), membriSez = $("#shared-membri-sez"), placeholder = $("#shared-placeholder");
+  if (claimSez) claimSez.hidden = true;
+  if (reclaimSez) reclaimSez.hidden = true;
+  if (condSez) condSez.hidden = true;
+  // F4/8B4 — recovery probe: completa un self-rebuild incompleto. Idempotente (no-pending => no-op).
+  // UNA VOLTA per apertura esplicita, race-guarded. MAI su boot/hashchange/render/polling. Il banner
+  // "sto completando" appare solo se il resume e' percepibilmente lento (timer one-shot, non polling).
+  var resumeErr = null;
+  var slowT = setTimeout(function(){
+    if (!SPACE_CTX || SPACE_CTX.id !== spaceId) return;
+    if (window.calculonReclaim) window.calculonReclaim.recovery(spaceId, { retry: false });
+  }, 200);
+  try { await window.nativeSync.resumeSelfRebuild(spaceId); }
+  catch(e){ resumeErr = (e && e.message) || "generic"; }
+  clearTimeout(slowT);
+  if (!SPACE_CTX || SPACE_CTX.id !== spaceId) return;   // race guard post-resume
+  // failure transiente/non-dominio (reclaim-member-invalid e' fail-closed => cade su revoked): recovery + Riprova.
+  if (resumeErr && resumeErr !== "reclaim-member-invalid"){
+    if (window.calculonReclaim) window.calculonReclaim.recovery(spaceId, { retry: true });
+    return;
+  }
   var st = null; try { st = await window.nativeSync.selfStatus(spaceId); } catch(e){}
   if (!SPACE_CTX || SPACE_CTX.id !== spaceId) return;   // race guard: contesto cambiato durante l'await
-  var claiming = (st === "no-self");
-  var membriSez = $("#shared-membri-sez"); if (membriSez) membriSez.hidden = claiming;
-  var placeholder = $("#shared-placeholder"); if (placeholder) placeholder.hidden = claiming;
-  var claimSez = $("#shared-claim-sez"); if (claimSez) claimSez.hidden = !claiming;
-  var sec = $("#shared-condividi-sez");
-  if (sec) sec.hidden = (st !== "active");   // F4/8B2 — condividi solo con self attivo
+  var claiming = (st === "no-self"), revoked = (st === "revoked");
+  if (membriSez) membriSez.hidden = claiming;                 // revoked: i partecipanti restano visibili
+  if (placeholder) placeholder.hidden = claiming || revoked;
+  if (claimSez) claimSez.hidden = !claiming;
+  if (reclaimSez) reclaimSez.hidden = !revoked;
+  if (condSez) condSez.hidden = (st !== "active");   // F4/8B2 — condividi solo con self attivo
   if (claiming && window.calculonClaim) await window.calculonClaim.render(spaceId);
+  if (revoked && window.calculonReclaim) await window.calculonReclaim.render(spaceId,
+    resumeErr === "reclaim-member-invalid" ? { error: "Questo partecipante non è più disponibile." } : null);
 }
 
 // Chiude la vista Shared e torna alla lista (Profilo, dove vive #pf-gruppi).
@@ -12356,6 +12409,157 @@ if ("serviceWorker" in navigator){
   window.addEventListener("hashchange", detectInvite);
   detectInvite();
   /* F4/8B3-INVITE-JOIN-CLAIM-END */
+})();
+</script>
+
+<script>
+"use strict";
+/* F4/8B4-REVOKED-RECLAIM-RECOVERY-START */
+/* F4 · Passo 8B4 — Revoked / Reclaim / Self-rebuild recovery (SOLO UI). Consuma ESCLUSIVAMENTE le API
+   canoniche del motore: nativeSync.selfStatus (read-only), nativeSync.reclaimSelf (LOCAL, unica mutation),
+   nativeSync.resumeSelfRebuild (recovery idempotente), nativeSync.joinPull (refresh token-free),
+   sharedRuntime.listMembers (candidati). Nessun tocco a motore/worker/schema/8B3. reclaimSelf non produce
+   write Shared / outbox / bump / delivery. selfStatus e' derivato: nessun flag revoked persistito lato UI. */
+(function(){
+  var NS = window.nativeSync, SR = window.sharedRuntime, doc = document;
+  if (!NS || !NS.selfStatus || !NS.reclaimSelf || !NS.resumeSelfRebuild || !NS.joinPull || !SR || !SR.listMembers) return;
+  function el(id){ return doc.getElementById(id); }
+  function ctxOk(spaceId){ return window.SPACE_CTX && window.SPACE_CTX.id === spaceId && window.SPACE_CTX.kind === "shared"; }
+
+  var _reclaiming = false;   // single-flight reclaimSelf
+  var _refreshing = false;   // single-flight joinPull
+  var _resuming   = false;   // single-flight resumeSelfRebuild (retry)
+  var _pendingSel = null;    // selezione in attesa di conferma (runtime-only, MAI persistita)
+
+  // ---- toggling dei tre sotto-blocchi del branch revoked (banner | picker | recovery) ----
+  function show(which){
+    var sez = el("shared-reclaim-sez"); if (sez) sez.hidden = false;
+    var b = el("reclaim-banner"), p = el("reclaim-picker"), r = el("reclaim-recovery");
+    if (b) b.hidden = which !== "banner";
+    if (p) p.hidden = which !== "picker";
+    if (r) r.hidden = which !== "recovery";
+  }
+  function err(msg){
+    var e = el("shared-reclaim-err"); if (!e) return;
+    if (msg){ e.textContent = msg; e.hidden = false; } else { e.hidden = true; }
+  }
+  function busy(on){
+    var lista = el("shared-reclaim-lista");
+    if (lista) Array.prototype.forEach.call(lista.querySelectorAll("button"), function(x){ x.disabled = on; });
+    ["btn-reclaim-refresh","reclaim-annulla","reclaim-conferma"].forEach(function(id){ var x = el(id); if (x) x.disabled = on; });
+    var conf = el("reclaim-conferma"); if (conf){ conf.setAttribute("aria-busy", on ? "true" : "false"); conf.textContent = on ? "Sto aggiornando…" : "Conferma"; }
+  }
+  // Mappa errori engine -> copy utente. reclaim-not-revoked/reclaim-no-self => null (non e' un errore:
+  // il self e' cambiato, il caller rilegge selfStatus e instrada).
+  function mapErr(e){
+    var m = e && e.message;
+    if (m === "reclaim-member-invalid") return "Questo partecipante non è più disponibile.";
+    if (m === "reclaim-not-revoked" || m === "reclaim-no-self") return null;
+    return "Non riesco a completare adesso. Riprova.";
+  }
+
+  // Candidati = membri attivi non-tombstone. Identity = memberId (mai la label): nomi duplicati ammessi.
+  async function renderCandidati(spaceId){
+    var lista = el("shared-reclaim-lista"), empty = el("shared-reclaim-empty"), conf = el("reclaim-confirm");
+    if (!lista) return;
+    err(null); busy(false); if (conf) conf.hidden = true; _pendingSel = null;   // reset controlli statici (il path di successo naviga via senza riabilitarli)
+    lista.innerHTML = "";
+    var membri = [];
+    try { membri = await SR.listMembers(spaceId); } catch(e){ membri = []; }
+    membri = (membri || []).filter(function(m){ return m && m.deleted !== true && m.active !== false; });
+    if (!ctxOk(spaceId)) return;   // race guard
+    if (!membri.length){ if (empty) empty.hidden = false; lista.hidden = true; return; }   // NO_CANDIDATE
+    if (empty) empty.hidden = true;
+    lista.hidden = false;
+    membri.forEach(function(m){
+      var b = doc.createElement("button");
+      b.type = "button"; b.className = "scelta";
+      b.appendChild(window.avatarEl(m));
+      var n = doc.createElement("span"); n.className = "nome-sc"; n.textContent = m.name || "?";
+      b.appendChild(n);
+      var cta = doc.createElement("span"); cta.className = "nota"; cta.style.marginLeft = "auto"; cta.textContent = "Sono io";
+      b.appendChild(cta);
+      b.setAttribute("aria-label", "Sono io: " + (m.name || "partecipante"));
+      b.onclick = function(){ chiediConferma(spaceId, m); };   // NON muta subito: conferma inline
+      lista.appendChild(b);
+    });
+  }
+
+  // Conferma inline (cambio identita' locale): nessuna persistenza della selezione.
+  function chiediConferma(spaceId, m){
+    _pendingSel = m.id;
+    var conf = el("reclaim-confirm"), msg = el("reclaim-confirm-msg");
+    if (msg) msg.textContent = "Vuoi usare " + (m.name || "questo partecipante") + " come tuo partecipante in questo spazio?";
+    if (conf) conf.hidden = false;
+    err(null);
+  }
+
+  async function doReclaim(spaceId){
+    if (_reclaiming) return;                 // single-flight
+    var memberId = _pendingSel; if (!memberId) return;
+    _reclaiming = true; err(null); busy(true);
+    try {
+      await NS.reclaimSelf(spaceId, memberId);   // LOCAL: nessun write Shared / outbox / bump
+      _reclaiming = false; _pendingSel = null;
+      if (ctxOk(spaceId)) await window.apriSpazio(spaceId);   // re-read selfStatus => active => 8B1
+    } catch(e){
+      _reclaiming = false; busy(false);
+      var m = e && e.message;
+      if (m === "reclaim-not-revoked" || m === "reclaim-no-self"){   // self cambiato sotto: rilegge e instrada, nessun errore
+        _pendingSel = null;
+        if (ctxOk(spaceId)) await window.apriSpazio(spaceId);
+        return;
+      }
+      var msg = mapErr(e);
+      if (m === "reclaim-member-invalid"){ _pendingSel = null; await refreshCandidati(spaceId); }   // stale target: refresh fail-closed (renderCandidati azzera err)
+      if (msg && ctxOk(spaceId)) err(msg);   // (ri)mostra DOPO il refresh, cosi' non viene cancellato
+    }
+  }
+
+  async function refreshCandidati(spaceId){
+    if (_refreshing) return;
+    _refreshing = true;
+    var btn = el("btn-reclaim-refresh"); if (btn){ btn.disabled = true; btn.setAttribute("aria-busy", "true"); }
+    try { await NS.joinPull(spaceId); } catch(e){}   // token-free: usa cap/key persistiti; mai mostrare l'errore rete grezzo
+    _refreshing = false;
+    if (btn){ btn.disabled = false; btn.removeAttribute("aria-busy"); }
+    if (ctxOk(spaceId)) await renderCandidati(spaceId);
+  }
+
+  // recovery(): banner "sto completando" (read-only, no Share CTA). retry:true aggiunge [Riprova].
+  function recovery(spaceId, opts){
+    if (!ctxOk(spaceId)) return;
+    show("recovery");
+    var msg = el("reclaim-recovery-msg"); if (msg) msg.textContent = (opts && opts.retry)
+      ? "Non riesco a completare adesso. Riprova." : "Sto completando l'aggiornamento dello spazio.";
+    var rt = el("btn-reclaim-retry"); if (rt) rt.hidden = !(opts && opts.retry);
+    var rec = el("reclaim-recovery"); if (rec) rec.setAttribute("aria-busy", (opts && opts.retry) ? "false" : "true");
+  }
+
+  async function retryResume(spaceId){
+    if (_resuming) return;
+    _resuming = true;
+    var rt = el("btn-reclaim-retry"); if (rt){ rt.disabled = true; rt.setAttribute("aria-busy", "true"); }
+    recovery(spaceId, { retry: false });   // torna a "sto completando" durante il tentativo
+    try { await NS.resumeSelfRebuild(spaceId); _resuming = false; if (ctxOk(spaceId)) await window.apriSpazio(spaceId); }
+    catch(e){ _resuming = false; if (rt){ rt.disabled = false; rt.removeAttribute("aria-busy"); }
+      if (ctxOk(spaceId)){ var m = e && e.message; if (m === "reclaim-member-invalid") await window.apriSpazio(spaceId); else recovery(spaceId, { retry: true }); } }
+  }
+
+  // render(): stato revoked. opts.error (da resume reclaim-member-invalid) => apri picker con la nota.
+  async function render(spaceId, opts){
+    if (opts && opts.error){ show("picker"); await renderCandidati(spaceId); if (ctxOk(spaceId)) err(opts.error); return; }
+    show("banner");
+  }
+
+  if (el("btn-reclaim-apri")) el("btn-reclaim-apri").onclick = function(){ if (window.SPACE_CTX && window.SPACE_CTX.kind === "shared"){ show("picker"); renderCandidati(window.SPACE_CTX.id); } };
+  if (el("btn-reclaim-refresh")) el("btn-reclaim-refresh").onclick = function(){ if (window.SPACE_CTX && window.SPACE_CTX.kind === "shared") refreshCandidati(window.SPACE_CTX.id); };
+  if (el("reclaim-conferma")) el("reclaim-conferma").onclick = function(){ if (window.SPACE_CTX && window.SPACE_CTX.kind === "shared") doReclaim(window.SPACE_CTX.id); };
+  if (el("reclaim-annulla")) el("reclaim-annulla").onclick = function(){ _pendingSel = null; var c = el("reclaim-confirm"); if (c) c.hidden = true; err(null); };
+  if (el("btn-reclaim-retry")) el("btn-reclaim-retry").onclick = function(){ if (window.SPACE_CTX && window.SPACE_CTX.kind === "shared") retryResume(window.SPACE_CTX.id); };
+
+  window.calculonReclaim = { render: render, recovery: recovery };
+  /* F4/8B4-REVOKED-RECLAIM-RECOVERY-END */
 })();
 </script>
 
