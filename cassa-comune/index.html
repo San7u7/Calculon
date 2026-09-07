@@ -259,6 +259,13 @@ h2.ttl{font-family:var(--sf);font-size:11px;letter-spacing:.13em;text-transform:
 #velo-spesa-azioni #spazione-main .btn.w:first-child,#velo-spesa-azioni #spazione-conferma .btn.w:first-child{margin-top:0}
 #spesa-dirty{margin-top:16px;padding-top:16px;border-top:1px solid rgba(26,18,48,.10)}
 #spesa-dirty .pop-testo{margin:0 0 12px}
+/* F5.1d — CTA "Segna come saldato" per riga del piano + sheet settlement */
+#shared-settlement-lista .barra{flex-wrap:wrap}
+#s-shared .saldo-cta{display:none}   /* base-hide con specificità id: batte .btn{display} indipendentemente dall'ordine nel foglio */
+#s-shared[data-self-state="active"] .saldo-cta{display:block;flex-basis:100%;width:100%;min-height:48px;margin-top:10px;font-size:13px}
+#velo-saldo .lbl{margin-top:16px}
+#velo-saldo .lbl:first-of-type{margin-top:0}
+#velo-saldo select,#velo-saldo input[type=text],#velo-saldo input[type=date]{margin-bottom:0}
 .sez-k{display:block;font-size:var(--et-sezione);letter-spacing:.16em;text-transform:uppercase;
   color:var(--grigio);font-weight:600;margin:0 0 var(--gap-titolo)}
 .sez .nota{margin:0 0 var(--gap-nota)}
@@ -1413,6 +1420,29 @@ body.no-splash #app{animation:none}
   </div>
 </div>
 
+<!-- F5.1d — registra un pagamento tra due membri ("Segna come saldato"); consuma createSettlement -->
+<div class="velo" id="velo-saldo" hidden>
+  <div class="popup" role="dialog" aria-modal="true" aria-labelledby="saldo-tit">
+    <h2 class="pop-tit" id="saldo-tit">Segna come saldato</h2>
+    <label class="lbl" for="saldo-from">Chi paga</label>
+    <select id="saldo-from"></select>
+    <label class="lbl" for="saldo-to">Chi riceve</label>
+    <select id="saldo-to"></select>
+    <label class="lbl" for="saldo-amt">Importo</label>
+    <div class="importo-wrap importo-sm">
+      <input id="saldo-amt" class="importo" type="text" inputmode="numeric" placeholder="0,00" autocomplete="off">
+      <span class="sim">€</span>
+    </div>
+    <label class="lbl" for="saldo-date">Data</label>
+    <input id="saldo-date" type="date">
+    <p class="err" id="saldo-err" role="alert" hidden></p>
+    <div class="due">
+      <button class="btn btn-ghost" id="saldo-annulla" type="button">Annulla</button>
+      <button class="btn btn-primary" id="saldo-conferma" type="button">Conferma</button>
+    </div>
+  </div>
+</div>
+
 <!-- ============ F1P5 · CONTI (sotto-schermata Profilo) ============ -->
 <div class="subscreen" id="ov-conti" data-view="list" hidden>
   <div class="sub-head">
@@ -2503,6 +2533,7 @@ async function apriSpazio(spaceId){
   if (reclaimSez) reclaimSez.hidden = !revoked;
   if (condSez) condSez.hidden = (st !== "active");   // F4/8B2 — condividi solo con self attivo
   var addSpesaBtn = $("#btn-shared-add-spesa"); if (addSpesaBtn) addSpesaBtn.hidden = (st !== "active");   // F5.1b — crea spesa solo con self attivo
+  var sSharedEl = $("#s-shared"); if (sSharedEl) sSharedEl.setAttribute("data-self-state", st || "");   // F5.1d — gate CSS della CTA "Segna come saldato"
   if (claiming && window.calculonClaim) await window.calculonClaim.render(spaceId);
   if (revoked && window.calculonReclaim) await window.calculonReclaim.render(spaceId,
     resumeErr === "reclaim-member-invalid" ? { error: "Questo partecipante non è più disponibile." } : null);
@@ -2660,6 +2691,7 @@ function renderFinance(sp, members, txs, net, plan){
   var sl = $("#shared-settlement-lista");
   if (sl){
     sl.innerHTML = "";
+    var attivoSet = {}; for (var ai = 0; ai < members.length; ai++){ if (members[ai].active !== false) attivoSet[members[ai].id] = true; }   // F5.1d
     if (!plan.length){
       var pe = document.createElement("p"); pe.className = "nota"; pe.style.margin = "0";
       pe.textContent = "I conti sono in pari."; sl.appendChild(pe);
@@ -2670,7 +2702,16 @@ function renderFinance(sp, members, txs, net, plan){
         var nm = document.createElement("span"); nm.className = "nome";
         nm.textContent = nomeDi(s.from) + " deve a " + nomeDi(s.to);
         var am = document.createElement("span"); am.className = "eur"; am.textContent = _finMoney(s.amount);
-        row.appendChild(nm); row.appendChild(am); sl.appendChild(row);
+        row.appendChild(nm); row.appendChild(am);
+        // F5.1d — CTA "Segna come saldato" (renderizzata solo se entrambe le parti sono attive; visibilita' self-active via CSS su #s-shared[data-self-state])
+        if (attivoSet[s.from] && attivoSet[s.to]){
+          row.setAttribute("data-sfrom", s.from); row.setAttribute("data-sto", s.to); row.setAttribute("data-samount", s.amount | 0);
+          var cta = document.createElement("button"); cta.type = "button"; cta.className = "btn btn-ghost w saldo-cta";
+          cta.textContent = "Segna come saldato";
+          cta.setAttribute("aria-label", "Segna come saldato: " + nomeDi(s.from) + " paga " + nomeDi(s.to) + " " + _finMoney(s.amount));
+          row.appendChild(cta);
+        }
+        sl.appendChild(row);
       }
     }
   }
@@ -3085,6 +3126,97 @@ function avvisoUndo(txt, onUndo, ms){
   t.appendChild(lab); t.appendChild(btn); document.body.appendChild(t); _undoToast = t;
   requestAnimationFrame(function(){ t.style.opacity = "1"; t.style.transform = "translateX(-50%) translateY(0)"; });
   _undoTimer = setTimeout(chiudi, ms);
+}
+
+/* ============================================================
+   F5.1d — SETTLEMENT RECORDING (solo UI; consuma sharedRuntime.createSettlement)
+   "Segna come saldato": registra un pagamento debitore->creditore dal settlement plan.
+   Nessuna nuova API, nessuna modifica engine. Read-after-write, mai patch manuale.
+   ============================================================ */
+var _creatingSaldo   = false;   // single-flight registrazione pagamento
+var _saldoAmt        = 0;       // importo in centesimi interi (da inputCifre)
+var _saldoLastFocus  = null;    // focus da ripristinare alla chiusura
+
+// Errori REALI di createSettlement -> copy utente neutra. { msg, close }. Mai e.message/terminologia engine. Catch-all.
+function mapSaldoError(e){
+  var m = (e && e.message) ? String(e.message) : "";
+  if (/amount non intero/.test(m))                       return { msg: "Inserisci un importo valido.", close: false };
+  if (/date deve essere/.test(m))                        return { msg: "Scegli una data valida.", close: false };
+  if (/from === to/.test(m))                             return { msg: "Chi paga e chi riceve devono essere diversi.", close: false };
+  if (/inesistente\/non attivo/.test(m))                 return { msg: "Uno dei partecipanti non è più disponibile.", close: true };
+  if (/settlement invalido/.test(m))                     return { msg: "Non riesco a registrare il pagamento ora.", close: false };
+  if (/self-revoked|self-rebuild-pending|non pronto: join|non scrivibile|non active|non shared|authority/.test(m))
+                                                         return { msg: "Non puoi registrare pagamenti in questo spazio adesso.", close: true };
+  if (/local-create-conflict/.test(m))                   return { msg: "Non riesco a registrare il pagamento ora. Riprova.", close: false };
+  if (/immutabile|selfMemberId|spazio inesistente|spaceId richiesto/.test(m)) return { msg: "Non riesco a registrare il pagamento ora.", close: true };
+  return { msg: "Non riesco a registrare il pagamento ora.", close: false };
+}
+
+// Apre lo sheet #velo-saldo pre-compilato dalla riga del piano. Gate self-active (re-check). Select = solo membri attivi.
+async function apriSaldoSheet(from, to, amount){
+  if (!SPACE_CTX || SPACE_CTX.kind !== "shared") return;
+  var spaceId = SPACE_CTX.id, ctx = SPACE_CTX;
+  var st = null; try { st = await window.nativeSync.selfStatus(spaceId); } catch(e){}         // re-check (UI stale guard)
+  if (SPACE_CTX !== ctx || SPACE_CTX.id !== spaceId) return;
+  if (st !== "active") return;                                                                 // solo self attivo
+  var ms = []; try { ms = await window.sharedRuntime.listMembers(spaceId); } catch(e){ avviso("Non riesco ad aprire ora."); return; }
+  if (SPACE_CTX !== ctx || SPACE_CTX.id !== spaceId) return;
+  var attivi = (ms || []).filter(function(x){ return x && x.deleted !== true && x.active !== false; });
+  var att = {}; attivi.forEach(function(x){ att[x.id] = true; });
+  // edge: la parte suggerita è diventata inattiva tra render e apertura -> non registrabile (engine richiede attivi).
+  if (!att[from] || !att[to]){ avviso("Uno dei partecipanti non è più disponibile."); await _refreshDopoMutazione(spaceId); return; }
+  function opzioni(sel, selected){ sel.innerHTML = ""; attivi.forEach(function(x){ var o = document.createElement("option"); o.value = x.id; o.textContent = x.name || "Partecipante"; if (x.id === selected) o.selected = true; sel.appendChild(o); }); }
+  var fromEl = $("#saldo-from"), toEl = $("#saldo-to");
+  if (fromEl) opzioni(fromEl, from);
+  if (toEl)   opzioni(toEl, to);
+  _saldoAmt = amount | 0;
+  var amt = $("#saldo-amt");   if (amt)  amt.value = _saldoAmt ? fmtCifre(String(_saldoAmt)) : "";
+  var data = $("#saldo-date"); if (data) data.value = oggiISO();
+  var err = $("#saldo-err");   if (err){ err.hidden = true; err.textContent = ""; }
+  var conf = $("#saldo-conferma"); if (conf){ conf.disabled = false; conf.removeAttribute("aria-busy"); }
+  var pop = document.querySelector("#velo-saldo .popup"); if (pop) pop.removeAttribute("aria-busy");
+  _saldoLastFocus = document.activeElement;
+  var velo = $("#velo-saldo"); if (velo) velo.hidden = false;
+  setTimeout(function(){ try { if (amt) amt.focus(); } catch(e){} }, 30);
+}
+
+function chiudiSaldoSheet(){
+  var velo = $("#velo-saldo"); if (velo) velo.hidden = true;
+  _saldoAmt = 0;
+  try { if (_saldoLastFocus && _saldoLastFocus.focus) _saldoLastFocus.focus(); } catch(e){}
+}
+
+// Registrazione: validazione UI leggera -> single-flight -> createSettlement -> chiudi + toast + read-after-write.
+async function salvaSaldo(){
+  if (_creatingSaldo) return;
+  if (!SPACE_CTX || SPACE_CTX.kind !== "shared") return;
+  var spaceId = SPACE_CTX.id;
+  var err = $("#saldo-err"); function mostra(t){ if (err){ err.textContent = t; err.hidden = false; } }
+  if (err) err.hidden = true;
+  var amount = _saldoAmt | 0;
+  var fromEl = $("#saldo-from"), toEl = $("#saldo-to"), dateEl = $("#saldo-date");
+  var fromId = fromEl ? fromEl.value : "", toId = toEl ? toEl.value : "", date = dateEl ? String(dateEl.value || "") : "";
+  if (!(amount > 0)){ mostra("Inserisci un importo valido."); return; }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)){ mostra("Scegli una data valida."); return; }
+  if (!fromId || !toId){ mostra("Scegli chi paga e chi riceve."); return; }
+  if (fromId === toId){ mostra("Chi paga e chi riceve devono essere diversi."); return; }
+  _creatingSaldo = true;
+  var conf = $("#saldo-conferma"), pop = document.querySelector("#velo-saldo .popup");
+  if (conf){ conf.disabled = true; conf.setAttribute("aria-busy", "true"); }
+  if (pop) pop.setAttribute("aria-busy", "true");
+  function sblocca(){ if (conf){ conf.disabled = false; conf.removeAttribute("aria-busy"); } if (pop) pop.removeAttribute("aria-busy"); }
+  var fail = null;
+  try { await window.sharedRuntime.createSettlement(spaceId, { amount: amount, date: date, fromMemberId: fromId, toMemberId: toId }); }
+  catch(e){ fail = mapSaldoError(e); }
+  _creatingSaldo = false; sblocca();
+  if (fail){
+    if (fail.close){ chiudiSaldoSheet(); avviso(fail.msg); await _refreshDopoMutazione(spaceId); }
+    else mostra(fail.msg);
+    return;
+  }
+  chiudiSaldoSheet();
+  avviso("Pagamento registrato");
+  await _refreshDopoMutazione(spaceId);
 }
 
 /* ============================================================
@@ -4030,6 +4162,20 @@ if ($("#velo-spesa-azioni")) $("#velo-spesa-azioni").addEventListener("click", (
 document.addEventListener("keydown", (ev) => { var v = $("#velo-spesa-azioni"); if (ev.key === "Escape" && v && !v.hidden) chiudiSpesaAzioni(); });
 if ($("#spesa-dirty-resta")) $("#spesa-dirty-resta").onclick = () => { var dc = $("#spesa-dirty"); if (dc) dc.hidden = true; };
 if ($("#spesa-dirty-esci")) $("#spesa-dirty-esci").onclick = chiudiSpesaSheet;
+
+// F5.1d — wiring settlement recording ("Segna come saldato")
+if ($("#shared-settlement-lista")){
+  $("#shared-settlement-lista").addEventListener("click", (ev) => {
+    if (!ev.target.closest(".saldo-cta")) return;
+    var r = ev.target.closest(".barra");
+    if (r && r.dataset.sfrom) apriSaldoSheet(r.dataset.sfrom, r.dataset.sto, parseInt(r.dataset.samount || "0", 10));
+  });
+}
+if ($("#saldo-annulla")) $("#saldo-annulla").onclick = chiudiSaldoSheet;
+if ($("#saldo-conferma")) $("#saldo-conferma").onclick = salvaSaldo;
+if ($("#velo-saldo")) $("#velo-saldo").addEventListener("click", (ev) => { if (ev.target === $("#velo-saldo")) chiudiSaldoSheet(); });
+document.addEventListener("keydown", (ev) => { var v = $("#velo-saldo"); if (ev.key === "Escape" && v && !v.hidden) chiudiSaldoSheet(); });
+if ($("#saldo-amt")) inputCifre($("#saldo-amt"), (v) => { _saldoAmt = v; }, true);
 if ($("#share-copy")) $("#share-copy").onclick = () => { if (_shareUrl) copia(_shareUrl, "Link copiato"); };
 if ($("#share-do")) $("#share-do").onclick = async () => {
   if (!_shareUrl) return;
