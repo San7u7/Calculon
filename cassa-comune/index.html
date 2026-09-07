@@ -238,6 +238,18 @@ h2.ttl{font-family:var(--sf);font-size:11px;letter-spacing:.13em;text-transform:
 .pop-testo b{color:var(--inchiostro)}
 .popup .campo{margin-bottom:22px}
 @media (prefers-reduced-motion:reduce){ .velo,.popup{animation:none} }
+/* F5.1b — sheet spesa: scroll interno su viewport bassi + righe partecipante */
+#velo-spesa .popup{max-height:calc(100dvh - 44px);overflow-y:auto}
+#velo-spesa .lbl{margin-top:16px}
+#velo-spesa .lbl:first-of-type{margin-top:0}
+#velo-spesa select,#velo-spesa input[type=text],#velo-spesa input[type=date]{margin-bottom:0}
+.spesa-membri{margin:8px 0 2px}
+.spesa-membro{display:flex;align-items:center;gap:12px;min-height:44px}
+.spesa-membro-nome{flex:1;font-weight:600;font-size:15px}
+.spesa-membro .spesa-chk{width:22px;height:22px;flex:none;accent-color:var(--sole)}
+.spesa-membro .importo-wrap{flex:none;width:150px;margin:0;padding:4px 12px}
+.spesa-membro .importo{font-size:18px}
+.spesa-resto{margin:10px 0 0;font-weight:600}
 .sez-k{display:block;font-size:var(--et-sezione);letter-spacing:.16em;text-transform:uppercase;
   color:var(--grigio);font-weight:600;margin:0 0 var(--gap-titolo)}
 .sez .nota{margin:0 0 var(--gap-nota)}
@@ -1233,6 +1245,8 @@ body.no-splash #app{animation:none}
         <div class="sez" id="shared-spese-sez">
           <span class="sez-k">Spese</span>
           <div id="shared-spese-lista"></div>
+          <!-- F5.1b — entry point creazione spesa: visibile solo con self attivo (toggle in apriSpazio) -->
+          <button class="btn btn-primary w" id="btn-shared-add-spesa" type="button" hidden>+ Aggiungi spesa</button>
         </div>
       </div>
       <div class="sez" id="shared-membri-sez">
@@ -1330,6 +1344,36 @@ body.no-splash #app{animation:none}
     <div class="due" id="invite-actions">
       <button class="btn btn-ghost" id="invite-annulla" type="button">Annulla</button>
       <button class="btn btn-primary" id="invite-entra" type="button">Entra</button>
+    </div>
+  </div>
+</div>
+
+<!-- F5.1b — sheet creazione spesa condivisa (solo UI; consuma sharedRuntime.createExpense) -->
+<div class="velo" id="velo-spesa" hidden>
+  <div class="popup" role="dialog" aria-modal="true" aria-labelledby="spesa-tit">
+    <h2 class="pop-tit" id="spesa-tit">Nuova spesa</h2>
+    <label class="lbl" for="spesa-amt">Importo</label>
+    <div class="importo-wrap importo-sm">
+      <input id="spesa-amt" class="importo" type="text" inputmode="numeric" placeholder="0,00" autocomplete="off">
+      <span class="sim">€</span>
+    </div>
+    <label class="lbl" for="spesa-desc">Descrizione <span class="lbl-opt">(opzionale)</span></label>
+    <input id="spesa-desc" type="text" autocomplete="off" placeholder="Es. Cena, spesa, benzina" maxlength="80">
+    <label class="lbl" for="spesa-date">Data</label>
+    <input id="spesa-date" type="date">
+    <label class="lbl" for="spesa-payer">Chi ha pagato</label>
+    <select id="spesa-payer"></select>
+    <label class="lbl">Come dividerla</label>
+    <div class="seg" id="spesa-split" role="group" aria-label="Come dividere la spesa">
+      <button type="button" class="seg-btn is-on" data-split="equal" aria-pressed="true">Parti uguali</button>
+      <button type="button" class="seg-btn" data-split="exact" aria-pressed="false">Importi personalizzati</button>
+    </div>
+    <div id="spesa-membri" class="spesa-membri"></div>
+    <p class="nota spesa-resto" id="spesa-exact-info" role="status" hidden></p>
+    <p class="err" id="spesa-err" role="alert" hidden></p>
+    <div class="due">
+      <button class="btn btn-ghost" id="spesa-annulla" type="button">Annulla</button>
+      <button class="btn btn-primary" id="spesa-salva" type="button">Salva</button>
     </div>
   </div>
 </div>
@@ -2396,6 +2440,7 @@ async function apriSpazio(spaceId){
   if (reclaimSez) reclaimSez.hidden = true;
   if (condSez) condSez.hidden = true;
   if (finance) finance.hidden = true;   // F5.1a: finance surface nascosta finche' il routing self non e' risolto
+  var addSpesaBtn0 = $("#btn-shared-add-spesa"); if (addSpesaBtn0) addSpesaBtn0.hidden = true;   // F5.1b
   // F4/8B4 — recovery probe: completa un self-rebuild incompleto. Idempotente (no-pending => no-op).
   // UNA VOLTA per apertura esplicita, race-guarded. MAI su boot/hashchange/render/polling. Il banner
   // "sto completando" appare solo se il resume e' percepibilmente lento (timer one-shot, non polling).
@@ -2422,6 +2467,7 @@ async function apriSpazio(spaceId){
   if (claimSez) claimSez.hidden = !claiming;
   if (reclaimSez) reclaimSez.hidden = !revoked;
   if (condSez) condSez.hidden = (st !== "active");   // F4/8B2 — condividi solo con self attivo
+  var addSpesaBtn = $("#btn-shared-add-spesa"); if (addSpesaBtn) addSpesaBtn.hidden = (st !== "active");   // F5.1b — crea spesa solo con self attivo
   if (claiming && window.calculonClaim) await window.calculonClaim.render(spaceId);
   if (revoked && window.calculonReclaim) await window.calculonReclaim.render(spaceId,
     resumeErr === "reclaim-member-invalid" ? { error: "Questo partecipante non è più disponibile." } : null);
@@ -2627,6 +2673,184 @@ function renderFinance(sp, members, txs, net, plan){
       }
     }
   }
+}
+
+/* ============================================================
+   F5.1b — SHARED EXPENSE CREATION (solo UI; consuma sharedRuntime.createExpense)
+   Nessuna nuova API/schema/engine: raccoglie input, valida, delega al motore,
+   poi re-read canonico (refreshSharedFinance) + badge. Offline-capable.
+   ============================================================ */
+var _creatingExpense = false;     // single-flight creazione spesa
+var _spesaSplitMode  = "equal";   // "equal" | "exact" — solo runtime/UI
+var _spesaLastFocus  = null;      // focus da ripristinare alla chiusura
+var _spesaMembri     = [];        // snapshot [{id,name}] membri attivi all'apertura sheet
+var _spesaAmt        = 0;         // importo in centesimi interi (da inputCifre)
+var _spesaExact      = {};        // { memberId: centesimi } — modalita' exact
+var _spesaEqualSel   = {};        // { memberId: bool } — modalita' equal
+
+// Apertura sheet: re-check self attivo (UI stale guard), snapshot membri, reset campi, focus.
+async function apriSpesaSheet(){
+  if (!SPACE_CTX || SPACE_CTX.kind !== "shared") return;
+  var spaceId = SPACE_CTX.id, ctx = SPACE_CTX;
+  var st = null; try { st = await window.nativeSync.selfStatus(spaceId); } catch(e){}
+  if (SPACE_CTX !== ctx || SPACE_CTX.id !== spaceId) return;                       // race guard
+  if (st !== "active"){ avviso("Non puoi aggiungere spese in questo spazio adesso."); return; }
+  var sp = null, membri = [];
+  try {
+    sp     = await window.calculonDB.get("spaces", spaceId);
+    membri = await window.sharedRuntime.listMembers(spaceId);
+  } catch(e){ avviso("Non riesco ad aprire la spesa ora."); return; }
+  if (SPACE_CTX !== ctx || SPACE_CTX.id !== spaceId) return;                       // race guard post-read
+  membri = (membri || []).filter(function(m){ return m && m.deleted !== true && m.active !== false; });
+  if (!membri.length){ avviso("Non ci sono partecipanti attivi."); return; }
+  _spesaMembri = membri.map(function(m){ return { id: m.id, name: m.name || "Partecipante" }; });
+  _spesaAmt = 0; _spesaExact = {}; _spesaEqualSel = {}; _spesaSplitMode = "equal";
+  _spesaMembri.forEach(function(m){ _spesaEqualSel[m.id] = true; _spesaExact[m.id] = 0; });
+  var amt = $("#spesa-amt");   if (amt)  amt.value = "";
+  var desc = $("#spesa-desc"); if (desc) desc.value = "";
+  var data = $("#spesa-date"); if (data) data.value = oggiISO();
+  var pay = $("#spesa-payer");
+  if (pay){
+    pay.innerHTML = "";
+    var selfId = sp && sp.selfMemberId;
+    _spesaMembri.forEach(function(m){
+      var o = document.createElement("option"); o.value = m.id; o.textContent = m.name;
+      if (m.id === selfId) o.selected = true;
+      pay.appendChild(o);
+    });
+  }
+  setSpesaSplitUI("equal");   // rende anche le righe partecipante
+  var err = $("#spesa-err"); if (err){ err.hidden = true; err.textContent = ""; }
+  var salva = $("#spesa-salva"); if (salva){ salva.disabled = false; salva.removeAttribute("aria-busy"); }
+  var pop = document.querySelector("#velo-spesa .popup"); if (pop) pop.removeAttribute("aria-busy");
+  _spesaLastFocus = document.activeElement;
+  var velo = $("#velo-spesa"); if (velo) velo.hidden = false;
+  setTimeout(function(){ try { if (amt) amt.focus(); } catch(e){} }, 30);
+}
+
+function chiudiSpesaSheet(){
+  var velo = $("#velo-spesa"); if (velo) velo.hidden = true;
+  _spesaMembri = []; _spesaExact = {}; _spesaEqualSel = {}; _spesaAmt = 0;
+  try { if (_spesaLastFocus && _spesaLastFocus.focus) _spesaLastFocus.focus(); } catch(e){}
+}
+
+// Cambio modalita' split: toggla i seg-btn e ri-renderizza le righe (preserva le selezioni gia' in stato).
+function setSpesaSplitUI(mode){
+  _spesaSplitMode = (mode === "exact") ? "exact" : "equal";
+  $$("#spesa-split .seg-btn").forEach(function(b){
+    var on = b.dataset.split === _spesaSplitMode;
+    b.classList.toggle("is-on", on);
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  renderSpesaMembri();
+}
+
+// Righe partecipante: equal -> checkbox (default inclusi); exact -> campo centesimi per membro.
+function renderSpesaMembri(){
+  var box = $("#spesa-membri"); if (!box) return;
+  box.innerHTML = "";
+  _spesaMembri.forEach(function(m){
+    var row = document.createElement("div"); row.className = "spesa-membro";
+    var nm = document.createElement("span"); nm.className = "spesa-membro-nome"; nm.textContent = m.name;
+    row.appendChild(nm);
+    if (_spesaSplitMode === "equal"){
+      var cb = document.createElement("input"); cb.type = "checkbox"; cb.className = "spesa-chk";
+      cb.checked = _spesaEqualSel[m.id] !== false;
+      cb.setAttribute("aria-label", "Includi " + m.name);
+      cb.addEventListener("change", function(){ _spesaEqualSel[m.id] = cb.checked; });
+      row.appendChild(cb);
+    } else {
+      var wrap = document.createElement("div"); wrap.className = "importo-wrap";
+      var inp = document.createElement("input"); inp.className = "importo"; inp.type = "text";
+      inp.inputMode = "numeric"; inp.autocomplete = "off"; inp.placeholder = "0,00";
+      inp.setAttribute("aria-label", "Quota di " + m.name);
+      if (_spesaExact[m.id]) inp.value = fmtCifre(String(_spesaExact[m.id]));
+      var sim = document.createElement("span"); sim.className = "sim"; sim.textContent = "€";
+      wrap.appendChild(inp); wrap.appendChild(sim);
+      inputCifre(inp, function(v){ _spesaExact[m.id] = v; aggiornaSpesaResto(); }, true);
+      row.appendChild(wrap);
+    }
+    box.appendChild(row);
+  });
+  var info = $("#spesa-exact-info"); if (info) info.hidden = (_spesaSplitMode !== "exact");
+  aggiornaSpesaResto();
+}
+
+// Indicatore live (solo exact): assegnato vs totale, resto/eccesso.
+function aggiornaSpesaResto(){
+  var info = $("#spesa-exact-info"); if (!info) return;
+  if (_spesaSplitMode !== "exact"){ info.hidden = true; return; }
+  info.hidden = false;
+  var somma = 0; _spesaMembri.forEach(function(m){ somma += (_spesaExact[m.id] | 0); });
+  var resto = (_spesaAmt | 0) - somma;
+  info.textContent = "Assegnato € " + eur(somma) + " di € " + eur(_spesaAmt | 0)
+                   + (resto === 0 ? " · a posto" : (resto > 0 ? " · resta € " + eur(resto) : " · eccede € " + eur(-resto)));
+}
+
+// Throw del motore -> copy utente neutro (mai ex.message grezzo). Vedi F5.1b_DESIGN_RESULT 2.8.
+function mapSpesaError(e){
+  var msg = (e && e.message) ? String(e.message) : "";
+  if (/amount non intero/.test(msg))        return "Inserisci un importo valido.";
+  if (/date deve essere/.test(msg))          return "Scegli una data valida.";
+  if (/payer inesistente/.test(msg))         return "Chi ha pagato non è più tra i partecipanti attivi.";
+  if (/allocatee inesistente/.test(msg))     return "Un partecipante selezionato non è più attivo.";
+  if (/exact: somma/.test(msg))              return "La somma delle quote non corrisponde al totale.";
+  if (/nessun membro attivo/.test(msg))      return "Non ci sono partecipanti attivi.";
+  if (/non scrivibile|non active|join|self-rebuild|non shared|authority/.test(msg))
+                                             return "Non puoi aggiungere spese in questo spazio adesso.";
+  if (/local-create-conflict/.test(msg))     return "Non riesco a salvare la spesa ora. Riprova.";
+  return "Non riesco a salvare la spesa ora.";
+}
+
+// Salvataggio: validazione UI -> single-flight -> createExpense -> chiudi + toast + refresh + badge.
+// Nome namespaced: evita collisione con la legacy salvaSpesa() (gruppo, #sp-salva).
+async function salvaSpesaCondivisa(){
+  if (_creatingExpense) return;                                     // single-flight (doppio tap / Enter+click)
+  if (!SPACE_CTX || SPACE_CTX.kind !== "shared") return;
+  var spaceId = SPACE_CTX.id;
+  var err = $("#spesa-err");
+  function mostraErr(t){ if (err){ err.textContent = t; err.hidden = false; } }
+  if (err) err.hidden = true;
+  var amount = _spesaAmt | 0;
+  var payEl = $("#spesa-payer"),  paidById = payEl ? payEl.value : "";
+  var dateEl = $("#spesa-date"),  date = dateEl ? String(dateEl.value || "") : "";
+  var descEl = $("#spesa-desc"),  descRaw = descEl ? String(descEl.value || "").trim() : "";
+  var note = (descRaw !== "") ? descRaw : null;
+  // Validazione UI (friendly, prima del motore che resta authority fail-closed).
+  if (!(amount > 0)){ mostraErr("Inserisci un importo valido."); return; }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)){ mostraErr("Scegli una data valida."); return; }
+  var attivo = {}; _spesaMembri.forEach(function(m){ attivo[m.id] = true; });
+  if (!paidById || !attivo[paidById]){ mostraErr("Scegli chi ha pagato."); return; }
+  var allocationMode, parts = {};
+  if (_spesaSplitMode === "exact"){
+    var somma = 0, n = 0;
+    _spesaMembri.forEach(function(m){ var c = _spesaExact[m.id] | 0; if (c > 0){ parts[m.id] = c; somma += c; n++; } });
+    if (n === 0){ mostraErr("Assegna almeno una quota."); return; }
+    if (somma !== amount){ mostraErr("La somma delle quote non corrisponde al totale."); return; }
+    allocationMode = "exact";
+  } else {
+    var sel = 0;
+    _spesaMembri.forEach(function(m){ if (_spesaEqualSel[m.id] !== false){ parts[m.id] = 1; sel++; } });
+    if (sel === 0){ mostraErr("Seleziona almeno un partecipante."); return; }
+    allocationMode = "equal";
+  }
+  // Allocazione SEMPRE esplicita: identica per experience/ongoing, mai il ramo shareRule (stale -> fail).
+  var input = { amount: amount, date: date, paidById: paidById, note: note, allocationMode: allocationMode, parts: parts };
+  _creatingExpense = true;
+  var salva = $("#spesa-salva"), pop = document.querySelector("#velo-spesa .popup");
+  if (salva){ salva.disabled = true; salva.setAttribute("aria-busy", "true"); }
+  if (pop) pop.setAttribute("aria-busy", "true");
+  function sbloccaBtn(){ if (salva){ salva.disabled = false; salva.removeAttribute("aria-busy"); } if (pop) pop.removeAttribute("aria-busy"); }
+  var failMsg = null;
+  try { await window.sharedRuntime.createExpense(spaceId, input); }               // atomico + E2EE intent + offline
+  catch(e){ failMsg = mapSpesaError(e); }
+  if (failMsg != null){ _creatingExpense = false; sbloccaBtn(); mostraErr(failMsg); return; }
+  // successo
+  _creatingExpense = false; sbloccaBtn();
+  chiudiSpesaSheet();
+  avviso("Spesa aggiunta");
+  try { await refreshSharedFinance(spaceId, { pull: false }); } catch(e){}          // re-read canonico locale
+  aggiornaBadgeShared(spaceId);                                                     // badge -> "Da sincronizzare"
 }
 
 /* ============================================================
@@ -3547,6 +3771,15 @@ if ($("#btn-condividi-spazio")) $("#btn-condividi-spazio").onclick = () => { if 
 if ($("#share-close")) $("#share-close").onclick = chiudiShareSheet;
 if ($("#velo-share")) $("#velo-share").addEventListener("click", (ev) => { if (ev.target === $("#velo-share")) chiudiShareSheet(); });
 document.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && !$("#velo-share").hidden) chiudiShareSheet(); });
+
+// F5.1b — wiring creazione spesa (UI). Entry point, sheet, split toggle, salva.
+if ($("#btn-shared-add-spesa")) $("#btn-shared-add-spesa").onclick = () => { if (SPACE_CTX && SPACE_CTX.kind === "shared") apriSpesaSheet(); };
+if ($("#spesa-annulla")) $("#spesa-annulla").onclick = chiudiSpesaSheet;
+if ($("#velo-spesa")) $("#velo-spesa").addEventListener("click", (ev) => { if (ev.target === $("#velo-spesa")) chiudiSpesaSheet(); });
+document.addEventListener("keydown", (ev) => { var v = $("#velo-spesa"); if (ev.key === "Escape" && v && !v.hidden) chiudiSpesaSheet(); });
+if ($("#spesa-salva")) $("#spesa-salva").onclick = salvaSpesaCondivisa;
+$$("#spesa-split .seg-btn").forEach((b) => { b.onclick = () => setSpesaSplitUI(b.dataset.split); });
+if ($("#spesa-amt")) inputCifre($("#spesa-amt"), (v) => { _spesaAmt = v; aggiornaSpesaResto(); }, true);
 if ($("#share-copy")) $("#share-copy").onclick = () => { if (_shareUrl) copia(_shareUrl, "Link copiato"); };
 if ($("#share-do")) $("#share-do").onclick = async () => {
   if (!_shareUrl) return;
