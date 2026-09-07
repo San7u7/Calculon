@@ -250,6 +250,15 @@ h2.ttl{font-family:var(--sf);font-size:11px;letter-spacing:.13em;text-transform:
 .spesa-membro .importo-wrap{flex:none;width:150px;margin:0;padding:4px 12px}
 .spesa-membro .importo{font-size:18px}
 .spesa-resto{margin:10px 0 0;font-weight:600}
+/* F5.1c — riga spesa attivabile (edit/elimina) + action sheet + conferma dirty */
+.spesa[role=button]{cursor:pointer}
+.spesa[role=button]:focus-visible{outline:2px solid var(--sole);outline-offset:2px;border-radius:12px}
+#velo-spesa-azioni .pop-tit{margin-bottom:6px}
+#velo-spesa-azioni .pop-testo{margin:0 0 18px}
+#velo-spesa-azioni .btn.w{display:block;width:100%;min-height:48px;margin-top:10px}
+#velo-spesa-azioni #spazione-main .btn.w:first-child,#velo-spesa-azioni #spazione-conferma .btn.w:first-child{margin-top:0}
+#spesa-dirty{margin-top:16px;padding-top:16px;border-top:1px solid rgba(26,18,48,.10)}
+#spesa-dirty .pop-testo{margin:0 0 12px}
 .sez-k{display:block;font-size:var(--et-sezione);letter-spacing:.16em;text-transform:uppercase;
   color:var(--grigio);font-weight:600;margin:0 0 var(--gap-titolo)}
 .sez .nota{margin:0 0 var(--gap-nota)}
@@ -1374,6 +1383,32 @@ body.no-splash #app{animation:none}
     <div class="due">
       <button class="btn btn-ghost" id="spesa-annulla" type="button">Annulla</button>
       <button class="btn btn-primary" id="spesa-salva" type="button">Salva</button>
+    </div>
+    <!-- F5.1c — conferma uscita con modifiche non salvate (solo edit dirty) -->
+    <div id="spesa-dirty" hidden>
+      <p class="pop-testo">Uscire senza salvare?</p>
+      <div class="due">
+        <button class="btn btn-ghost" id="spesa-dirty-resta" type="button">Continua a modificare</button>
+        <button class="btn btn-primary" id="spesa-dirty-esci" type="button">Esci</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- F5.1c — azioni su una spesa della lista Shared: modifica / elimina (con conferma a due passi) -->
+<div class="velo" id="velo-spesa-azioni" hidden>
+  <div class="popup" role="dialog" aria-modal="true" aria-labelledby="spazione-tit">
+    <h2 class="pop-tit" id="spazione-tit">Spesa</h2>
+    <p class="pop-testo" id="spazione-meta" role="status"></p>
+    <div id="spazione-main">
+      <button class="btn btn-primary w" id="spazione-edit" type="button">Modifica</button>
+      <button class="btn btn-ghost w" id="spazione-del" type="button">Elimina</button>
+      <button class="btn btn-ghost w" id="spazione-close" type="button">Chiudi</button>
+    </div>
+    <div id="spazione-conferma" hidden>
+      <p class="pop-testo">Eliminare questa spesa?</p>
+      <button class="btn btn-rosso w" id="spazione-del-ok" type="button">Elimina</button>
+      <button class="btn btn-ghost w" id="spazione-del-no" type="button">Annulla</button>
     </div>
   </div>
 </div>
@@ -2669,6 +2704,10 @@ function renderFinance(sp, members, txs, net, plan){
         var chi = document.createElement("span"); chi.className = "chi"; chi.textContent = chiTxt;
         testi.appendChild(desc); testi.appendChild(chi);
         var e = document.createElement("span"); e.className = "eur"; e.textContent = _finMoney(t.amount);
+        // F5.1c — riga attivabile: entry point azioni (modifica/elimina). Gate self-active applicato all'apertura.
+        rr.setAttribute("data-tx-id", t.id);
+        rr.setAttribute("role", "button"); rr.setAttribute("tabindex", "0");
+        rr.setAttribute("aria-label", (desc.textContent || "Spesa") + ", " + _finMoney(t.amount) + ", tocca per opzioni");
         rr.appendChild(testi); rr.appendChild(e); xl.appendChild(rr);
       }
     }
@@ -2687,6 +2726,15 @@ var _spesaMembri     = [];        // snapshot [{id,name}] membri attivi all'aper
 var _spesaAmt        = 0;         // importo in centesimi interi (da inputCifre)
 var _spesaExact      = {};        // { memberId: centesimi } — modalita' exact
 var _spesaEqualSel   = {};        // { memberId: bool } — modalita' equal
+// F5.1c — stato correction lifecycle (edit/delete/undo). Tutto solo runtime/UI.
+var _spesaEditId       = null;    // null = create · <txId> = edit (ramo in salvaSpesaCondivisa)
+var _spesaEditBaseline = null;    // firma form all'apertura edit (dirty-state)
+var _azioniTxId        = null;    // tx corrente nell'action sheet
+var _azioniLastFocus   = null;    // focus da ripristinare alla chiusura action sheet
+var _deletingTx        = false;   // single-flight elimina
+var _restoringTx       = false;   // single-flight ripristina
+var _undoToast         = null;    // toast Undo effimero corrente
+var _undoTimer         = null;    // timer del toast Undo
 
 // Apertura sheet: re-check self attivo (UI stale guard), snapshot membri, reset campi, focus.
 async function apriSpesaSheet(){
@@ -2731,7 +2779,18 @@ async function apriSpesaSheet(){
 function chiudiSpesaSheet(){
   var velo = $("#velo-spesa"); if (velo) velo.hidden = true;
   _spesaMembri = []; _spesaExact = {}; _spesaEqualSel = {}; _spesaAmt = 0;
+  _spesaEditId = null; _spesaEditBaseline = null;                 // F5.1c: torna in modalita' create
+  var tit = $("#spesa-tit"); if (tit) tit.textContent = "Nuova spesa";
+  var dc = $("#spesa-dirty"); if (dc) dc.hidden = true;
   try { if (_spesaLastFocus && _spesaLastFocus.focus) _spesaLastFocus.focus(); } catch(e){}
+}
+// F5.1c — chiusura RICHIESTA dall'utente (annulla/Escape/backdrop): in edit con modifiche non salvate chiede conferma.
+function tentaChiudiSpesa(){
+  if (_spesaEditId && _spesaEditBaseline != null && spesaFormSig() !== _spesaEditBaseline){
+    var dc = $("#spesa-dirty"); if (dc){ dc.hidden = false; setTimeout(function(){ try { $("#spesa-dirty-resta").focus(); } catch(e){} }, 20); }
+    return;
+  }
+  chiudiSpesaSheet();
 }
 
 // Cambio modalita' split: toggla i seg-btn e ri-renderizza le righe (preserva le selezioni gia' in stato).
@@ -2841,16 +2900,191 @@ async function salvaSpesaCondivisa(){
   if (salva){ salva.disabled = true; salva.setAttribute("aria-busy", "true"); }
   if (pop) pop.setAttribute("aria-busy", "true");
   function sbloccaBtn(){ if (salva){ salva.disabled = false; salva.removeAttribute("aria-busy"); } if (pop) pop.removeAttribute("aria-busy"); }
-  var failMsg = null;
-  try { await window.sharedRuntime.createExpense(spaceId, input); }               // atomico + E2EE intent + offline
-  catch(e){ failMsg = mapSpesaError(e); }
-  if (failMsg != null){ _creatingExpense = false; sbloccaBtn(); mostraErr(failMsg); return; }
-  // successo
+  // F5.1c — ramo create vs edit. Edit invia SEMPRE allocazione esplicita (mai il ramo implicito "amount senza ripartizione").
+  var editId = _spesaEditId;
+  var fail = null;
+  try {
+    if (editId) await window.sharedRuntime.updateExpense(spaceId, editId, input);  // patch pieno esplicito, atomico + CAS
+    else        await window.sharedRuntime.createExpense(spaceId, input);          // atomico + E2EE intent + offline
+  } catch(e){ fail = editId ? mapExpenseError(e, "edit") : { msg: mapSpesaError(e), close: false }; }
   _creatingExpense = false; sbloccaBtn();
+  if (fail){
+    if (fail.close){ chiudiSpesaSheet(); avviso(fail.msg); await _refreshDopoMutazione(spaceId); }   // errore terminale: stato aggiornato
+    else mostraErr(fail.msg);                                                                        // errore di validazione: resta nello sheet
+    return;
+  }
+  // successo
   chiudiSpesaSheet();
-  avviso("Spesa aggiunta");
-  try { await refreshSharedFinance(spaceId, { pull: false }); } catch(e){}          // re-read canonico locale
-  aggiornaBadgeShared(spaceId);                                                     // badge -> "Da sincronizzare"
+  avviso(editId ? "Spesa aggiornata" : "Spesa aggiunta");
+  await _refreshDopoMutazione(spaceId);                                            // read-after-write canonico + badge
+}
+
+/* ============================================================
+   F5.1c — EXPENSE CORRECTION LIFECYCLE (solo UI; consuma updateExpense/deleteTransaction/restoreTransaction)
+   Nessuna nuova API, nessuna modifica engine. Read-after-write canonico, mai patch manuale.
+   ============================================================ */
+
+// Read-after-write unico: re-read canonico locale + badge (mai patch manuale di lista/saldo/settlement).
+async function _refreshDopoMutazione(spaceId){
+  try { await refreshSharedFinance(spaceId, { pull: false }); } catch(e){}
+  try { aggiornaBadgeShared(spaceId); } catch(e){}
+}
+
+// Firma del form per il dirty-state (edit): confronta importo/mode/parts/payer/note/data.
+function spesaFormSig(){
+  var parts = {};
+  if (_spesaSplitMode === "exact"){ _spesaMembri.forEach(function(m){ var c = _spesaExact[m.id] | 0; if (c > 0) parts[m.id] = c; }); }
+  else { _spesaMembri.forEach(function(m){ if (_spesaEqualSel[m.id] !== false) parts[m.id] = 1; }); }
+  var payEl = $("#spesa-payer"), descEl = $("#spesa-desc"), dateEl = $("#spesa-date");
+  return JSON.stringify({ amt: _spesaAmt | 0, mode: _spesaSplitMode, parts: parts,
+    payer: payEl ? payEl.value : "", note: descEl ? String(descEl.value || "").trim() : "", date: dateEl ? String(dateEl.value || "") : "" });
+}
+
+// Errori REALI di updateExpense/deleteTransaction/restoreTransaction -> copy utente neutra + comportamento UI.
+// { msg, close }: close=true -> errore terminale (chiudi + refresh); close=false -> resta nello sheet (validazione).
+// MAI e.message grezzo, MAI linguaggio tecnico. Catch-all finale.
+function mapExpenseError(e, op){
+  var m = (e && e.message) ? String(e.message) : "";
+  // --- terminale prioritario: restore non più valido (il motivo interno puo' contenere pattern di validazione) ---
+  if (/restore invalido/.test(m))                        return { msg: "Non è più possibile ripristinare questa spesa.", close: true };
+  // --- validazione (resta nello sheet, correggibile) ---
+  if (/amount non intero|amount cambiato senza nuova ripartizione/.test(m)) return { msg: "Inserisci un importo valido.", close: false };
+  if (/date deve essere/.test(m))                       return { msg: "Scegli una data valida.", close: false };
+  if (/exact: somma/.test(m))                            return { msg: "La somma delle quote non corrisponde al totale.", close: false };
+  if (/payer (inesistente|non ammesso)/.test(m))         return { msg: "Chi ha pagato non è più tra i partecipanti disponibili.", close: false };
+  if (/allocatee (inesistente|non ammesso)|allocation: membro inesistente/.test(m)) return { msg: "Un partecipante selezionato non è più disponibile.", close: false };
+  if (/expense update invalida|parts vuoto|parts assente|mode sconosciuto|peso non intero|allocazioni \(|materializzazione/.test(m)) return { msg: "Ricontrolla come dividere la spesa.", close: false };
+  // --- terminali (chiudi + refresh, lo stato canonico è cambiato) ---
+  if (/transazione inesistente/.test(m))                 return { msg: "Questa spesa non esiste più.", close: true };
+  if (/transazione eliminata/.test(m))                   return { msg: "Questa spesa è già stata eliminata.", close: true };
+  if (/local-write-conflict/.test(m))                    return { msg: "Questa spesa è stata modificata altrove. Ho aggiornato la lista, riprova.", close: true };
+  if (/local-create-conflict/.test(m))                   return { msg: "Non riesco a salvare la spesa ora. Riprova.", close: false };
+  if (/self-revoked|self-rebuild-pending|non pronto: join|non scrivibile|non active|non shared|authority/.test(m)){
+    var az = (op === "delete") ? "eliminare" : (op === "restore") ? "ripristinare" : "modificare";
+    return { msg: "Non puoi " + az + " le spese in questo spazio adesso.", close: true };
+  }
+  if (/immutabile|selfMemberId|spazio inesistente|spaceId richiesto/.test(m)) return { msg: "Non riesco a salvare le modifiche ora.", close: true };
+  return { msg: "Non riesco a completare l'operazione ora.", close: (op !== "edit") };   // catch-all: edit resta, delete/restore chiudono
+}
+
+// Apre lo sheet #velo-spesa in modalità EDIT: prefill dal record, lista membri = attivi ∪ referenziati-presenti.
+async function apriSpesaSheetEdit(txId){
+  if (!SPACE_CTX || SPACE_CTX.kind !== "shared") return;
+  var spaceId = SPACE_CTX.id, ctx = SPACE_CTX;
+  var cur = null; try { cur = await window.calculonDB.get("transactions", txId); } catch(e){}
+  if (SPACE_CTX !== ctx || SPACE_CTX.id !== spaceId) return;                                  // race guard
+  if (!cur || cur.spaceId !== spaceId || cur.deleted === true || cur.type !== "expense"){
+    avviso("Questa spesa non esiste più."); await _refreshDopoMutazione(spaceId); return;
+  }
+  // L3/§11 — solo equal|exact editabili in sicurezza dallo sheet a 2 modalità; storico shares/percent -> fail-closed,
+  // nessuna conversione silenziosa, record non toccato.
+  if (cur.allocationMode !== "equal" && cur.allocationMode !== "exact"){ avviso("Questa spesa non è modificabile da qui."); return; }
+  var ms = []; try { ms = await window.sharedRuntime.listMembers(spaceId); } catch(e){ avviso("Non riesco ad aprire la spesa ora."); return; }
+  if (SPACE_CTX !== ctx || SPACE_CTX.id !== spaceId) return;
+  ms = (ms || []).filter(function(x){ return x && x.deleted !== true; });
+  var byId = {}; ms.forEach(function(x){ byId[x.id] = x; });
+  var refIds = {}; refIds[cur.paidById] = true; (cur.allocations || []).forEach(function(a){ refIds[a.memberId] = true; });
+  // lista sheet: attivi + referenziati-ora-inattivi (mantenibili per la regola engine `ammesso`).
+  var lista = [];
+  ms.forEach(function(x){ if (x.active !== false) lista.push({ id: x.id, name: x.name || "Partecipante", inactive: false }); });
+  Object.keys(refIds).forEach(function(id){ if (byId[id] && byId[id].active === false) lista.push({ id: id, name: (byId[id].name || "Partecipante"), inactive: true }); });
+  _spesaMembri = lista;
+  _spesaEditId = txId;
+  _spesaAmt = cur.amount | 0;
+  _spesaExact = {}; _spesaEqualSel = {};
+  _spesaMembri.forEach(function(x){ _spesaExact[x.id] = 0; _spesaEqualSel[x.id] = false; });
+  (cur.allocations || []).forEach(function(a){ if (Object.prototype.hasOwnProperty.call(_spesaExact, a.memberId)) _spesaExact[a.memberId] = a.amount | 0; _spesaEqualSel[a.memberId] = true; });
+  _spesaSplitMode = (cur.allocationMode === "exact") ? "exact" : "equal";
+  var amt = $("#spesa-amt");   if (amt)  amt.value = _spesaAmt ? fmtCifre(String(_spesaAmt)) : "";
+  var desc = $("#spesa-desc"); if (desc) desc.value = (cur.note != null) ? String(cur.note) : "";
+  var data = $("#spesa-date"); if (data) data.value = cur.date || oggiISO();
+  var pay = $("#spesa-payer");
+  if (pay){ pay.innerHTML = "";
+    _spesaMembri.forEach(function(x){ var o = document.createElement("option"); o.value = x.id; o.textContent = x.name + (x.inactive ? " · non più attivo" : ""); if (x.id === cur.paidById) o.selected = true; pay.appendChild(o); });
+  }
+  setSpesaSplitUI(_spesaSplitMode);                                    // rende righe partecipante (checkbox/quote) dai valori prefillati
+  var err = $("#spesa-err"); if (err){ err.hidden = true; err.textContent = ""; }
+  var dc = $("#spesa-dirty"); if (dc) dc.hidden = true;
+  var salva = $("#spesa-salva"); if (salva){ salva.disabled = false; salva.removeAttribute("aria-busy"); }
+  var pop = document.querySelector("#velo-spesa .popup"); if (pop) pop.removeAttribute("aria-busy");
+  var tit = $("#spesa-tit"); if (tit) tit.textContent = "Modifica spesa";
+  _spesaLastFocus = document.activeElement;
+  _spesaEditBaseline = spesaFormSig();                                 // snapshot per dirty-state
+  var velo = $("#velo-spesa"); if (velo) velo.hidden = false;
+  setTimeout(function(){ try { if (amt) amt.focus(); } catch(e){} }, 30);
+}
+
+// Action sheet su una riga spesa: gate self-active (re-check), header, poi Modifica/Elimina.
+async function apriSpesaAzioni(txId){
+  if (!SPACE_CTX || SPACE_CTX.kind !== "shared") return;
+  var spaceId = SPACE_CTX.id, ctx = SPACE_CTX;
+  var st = null; try { st = await window.nativeSync.selfStatus(spaceId); } catch(e){}         // re-check (UI stale guard)
+  if (SPACE_CTX !== ctx || SPACE_CTX.id !== spaceId) return;
+  if (st !== "active") return;                                                                 // azioni solo con self attivo
+  var cur = null; try { cur = await window.calculonDB.get("transactions", txId); } catch(e){}
+  if (!cur || cur.spaceId !== spaceId || cur.deleted === true || cur.type !== "expense"){
+    avviso("Questa spesa non esiste più."); await _refreshDopoMutazione(spaceId); return;
+  }
+  _azioniTxId = txId;
+  var membri = []; try { membri = await window.sharedRuntime.listMembers(spaceId); } catch(e){}
+  var nome = {}; (membri || []).forEach(function(x){ nome[x.id] = x.name || "Partecipante"; });
+  $("#spazione-tit").textContent = (cur.note != null && String(cur.note).trim() !== "") ? cur.note : "Spesa";
+  $("#spazione-meta").textContent = "Pagato da " + (nome[cur.paidById] || "Partecipante") + " · " + _finMoney(cur.amount) + (cur.date ? (" · " + _finData(cur.date)) : "");
+  _mostraAzioniMain();
+  _azioniLastFocus = document.activeElement;
+  $("#velo-spesa-azioni").hidden = false;
+  setTimeout(function(){ try { $("#spazione-edit").focus(); } catch(e){} }, 30);
+}
+function _mostraAzioniMain(){ var a = $("#spazione-main"), c = $("#spazione-conferma"); if (a) a.hidden = false; if (c) c.hidden = true; setTimeout(function(){ try { $("#spazione-edit").focus(); } catch(e){} }, 20); }
+function _mostraAzioniConferma(){ var a = $("#spazione-main"), c = $("#spazione-conferma"); if (a) a.hidden = true; if (c) c.hidden = false; setTimeout(function(){ try { $("#spazione-del-no").focus(); } catch(e){} }, 20); }
+function chiudiSpesaAzioni(){ var v = $("#velo-spesa-azioni"); if (v) v.hidden = true; _azioniTxId = null; try { if (_azioniLastFocus && _azioniLastFocus.focus) _azioniLastFocus.focus(); } catch(e){} }
+
+// Elimina: single-flight, tombstone via engine (idempotente), poi read-after-write + toast Undo effimero.
+async function eseguiEliminaSpesa(txId){
+  if (_deletingTx) return; _deletingTx = true;
+  var spaceId = SPACE_CTX && SPACE_CTX.id;
+  var b = $("#spazione-del-ok"); if (b){ b.disabled = true; b.setAttribute("aria-busy", "true"); }
+  var fail = null;
+  try { await window.sharedRuntime.deleteTransaction(spaceId, txId); }               // idempotente se già eliminata
+  catch(e){ fail = mapExpenseError(e, "delete"); }
+  _deletingTx = false; if (b){ b.disabled = false; b.removeAttribute("aria-busy"); }
+  chiudiSpesaAzioni();
+  if (fail){ avviso(fail.msg); await _refreshDopoMutazione(spaceId); return; }
+  await _refreshDopoMutazione(spaceId);
+  avvisoUndo("Spesa eliminata", function(){ annullaEliminaSpesa(spaceId, txId); });
+}
+
+// Undo/ripristino effimero (solo dal toast). single-flight; restoreTransaction idempotente; fail -> copy user-friendly.
+async function annullaEliminaSpesa(spaceId, txId){
+  if (_restoringTx) return; _restoringTx = true;
+  var fail = null;
+  try { await window.sharedRuntime.restoreTransaction(spaceId, txId); }               // idempotente se già viva
+  catch(e){ fail = mapExpenseError(e, "restore"); }
+  _restoringTx = false;
+  if (fail){ avviso(fail.msg); await _refreshDopoMutazione(spaceId); return; }
+  await _refreshDopoMutazione(spaceId);
+  avviso("Spesa ripristinata");
+}
+
+// Toast con azione "Annulla" (~6s, single-shot, non persistente). Sostituisce l'eventuale toast precedente.
+function avvisoUndo(txt, onUndo, ms){
+  ms = ms || 6000;
+  if (_undoTimer){ clearTimeout(_undoTimer); _undoTimer = null; }
+  if (_undoToast){ try { _undoToast.remove(); } catch(e){} _undoToast = null; }
+  var t = document.createElement("div");
+  t.setAttribute("role", "status"); t.setAttribute("aria-live", "polite");
+  t.style.cssText = "position:fixed;left:50%;bottom:76px;z-index:60;display:flex;align-items:center;gap:10px;" +
+    "transform:translateX(-50%) translateY(8px);opacity:0;transition:opacity .22s ease,transform .22s ease;" +
+    "background:#0E0E0C;color:#FFFFFF;padding:6px 8px 6px 18px;border-radius:99px;font-weight:700;" +
+    "font-family:'Space Mono',ui-monospace,monospace;text-transform:uppercase;letter-spacing:.06em;font-size:11px;max-width:92%";
+  var lab = document.createElement("span"); lab.textContent = txt;
+  var btn = document.createElement("button"); btn.type = "button"; btn.textContent = "Annulla";
+  btn.style.cssText = "background:transparent;border:0;color:#FF4E8E;font:inherit;cursor:pointer;padding:12px 14px;min-height:48px";
+  function chiudi(){ if (_undoTimer){ clearTimeout(_undoTimer); _undoTimer = null; } t.style.opacity = "0"; t.style.transform = "translateX(-50%) translateY(8px)"; setTimeout(function(){ try { t.remove(); } catch(e){} if (_undoToast === t) _undoToast = null; }, 220); }
+  btn.onclick = function(){ chiudi(); try { onUndo(); } catch(e){} };
+  t.appendChild(lab); t.appendChild(btn); document.body.appendChild(t); _undoToast = t;
+  requestAnimationFrame(function(){ t.style.opacity = "1"; t.style.transform = "translateX(-50%) translateY(0)"; });
+  _undoTimer = setTimeout(chiudi, ms);
 }
 
 /* ============================================================
@@ -3774,12 +4008,28 @@ document.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && !$("#v
 
 // F5.1b — wiring creazione spesa (UI). Entry point, sheet, split toggle, salva.
 if ($("#btn-shared-add-spesa")) $("#btn-shared-add-spesa").onclick = () => { if (SPACE_CTX && SPACE_CTX.kind === "shared") apriSpesaSheet(); };
-if ($("#spesa-annulla")) $("#spesa-annulla").onclick = chiudiSpesaSheet;
-if ($("#velo-spesa")) $("#velo-spesa").addEventListener("click", (ev) => { if (ev.target === $("#velo-spesa")) chiudiSpesaSheet(); });
-document.addEventListener("keydown", (ev) => { var v = $("#velo-spesa"); if (ev.key === "Escape" && v && !v.hidden) chiudiSpesaSheet(); });
+if ($("#spesa-annulla")) $("#spesa-annulla").onclick = tentaChiudiSpesa;   // F5.1c: dirty-guard in edit
+if ($("#velo-spesa")) $("#velo-spesa").addEventListener("click", (ev) => { if (ev.target === $("#velo-spesa")) tentaChiudiSpesa(); });
+document.addEventListener("keydown", (ev) => { var v = $("#velo-spesa"); if (ev.key === "Escape" && v && !v.hidden) tentaChiudiSpesa(); });
 if ($("#spesa-salva")) $("#spesa-salva").onclick = salvaSpesaCondivisa;
 $$("#spesa-split .seg-btn").forEach((b) => { b.onclick = () => setSpesaSplitUI(b.dataset.split); });
 if ($("#spesa-amt")) inputCifre($("#spesa-amt"), (v) => { _spesaAmt = v; aggiornaSpesaResto(); }, true);
+
+// F5.1c — wiring correction lifecycle: righe attivabili, action sheet, conferma dirty.
+if ($("#shared-spese-lista")){
+  var _rows = $("#shared-spese-lista");
+  _rows.addEventListener("click", (ev) => { var r = ev.target.closest(".spesa"); if (r && r.dataset.txId) apriSpesaAzioni(r.dataset.txId); });
+  _rows.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " "){ var r = ev.target.closest(".spesa"); if (r && r.dataset.txId){ ev.preventDefault(); apriSpesaAzioni(r.dataset.txId); } } });
+}
+if ($("#spazione-close")) $("#spazione-close").onclick = chiudiSpesaAzioni;
+if ($("#spazione-edit")) $("#spazione-edit").onclick = () => { var id = _azioniTxId; chiudiSpesaAzioni(); if (id) apriSpesaSheetEdit(id); };
+if ($("#spazione-del")) $("#spazione-del").onclick = _mostraAzioniConferma;
+if ($("#spazione-del-no")) $("#spazione-del-no").onclick = _mostraAzioniMain;
+if ($("#spazione-del-ok")) $("#spazione-del-ok").onclick = () => { if (_azioniTxId) eseguiEliminaSpesa(_azioniTxId); };
+if ($("#velo-spesa-azioni")) $("#velo-spesa-azioni").addEventListener("click", (ev) => { if (ev.target === $("#velo-spesa-azioni")) chiudiSpesaAzioni(); });
+document.addEventListener("keydown", (ev) => { var v = $("#velo-spesa-azioni"); if (ev.key === "Escape" && v && !v.hidden) chiudiSpesaAzioni(); });
+if ($("#spesa-dirty-resta")) $("#spesa-dirty-resta").onclick = () => { var dc = $("#spesa-dirty"); if (dc) dc.hidden = true; };
+if ($("#spesa-dirty-esci")) $("#spesa-dirty-esci").onclick = chiudiSpesaSheet;
 if ($("#share-copy")) $("#share-copy").onclick = () => { if (_shareUrl) copia(_shareUrl, "Link copiato"); };
 if ($("#share-do")) $("#share-do").onclick = async () => {
   if (!_shareUrl) return;
