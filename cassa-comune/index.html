@@ -266,6 +266,12 @@ h2.ttl{font-family:var(--sf);font-size:11px;letter-spacing:.13em;text-transform:
 #velo-saldo .lbl{margin-top:16px}
 #velo-saldo .lbl:first-of-type{margin-top:0}
 #velo-saldo select,#velo-saldo input[type=text],#velo-saldo input[type=date]{margin-bottom:0}
+/* F5.2 micro-fix — surface "Spazi": nasconde i contenuti solo-Profilo (saluto/foto/pay) sopra la lista.
+   Il vero Profilo (senza data-surface="spazi") continuerebbe a mostrarli. */
+#s-profilo[data-surface="spazi"] #pf-saluto,
+#s-profilo[data-surface="spazi"] #pf-saluto + .divisore,
+#s-profilo[data-surface="spazi"] #pf-foto-sez,
+#s-profilo[data-surface="spazi"] #pf-pay-sez{ display:none }
 .sez-k{display:block;font-size:var(--et-sezione);letter-spacing:.16em;text-transform:uppercase;
   color:var(--grigio);font-weight:600;margin:0 0 var(--gap-titolo)}
 .sez .nota{margin:0 0 var(--gap-nota)}
@@ -973,10 +979,11 @@ body.no-splash #app{animation:none}
       <h1 class="tit-logo"><span class="sr">Calculon</span>
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 272.0 44.0" class="logo-titolo"><path fill="#7F77DD" d="M29.5 40.6 L22.7 43.6 L15.2 43.7 L8.2 40.9 L2.9 35.6 L0.0 28.7 L0.0 21.3 L2.9 14.4 L8.2 9.1 L15.2 6.3 L22.7 6.4 L29.5 9.4 L25.0 16.0 L21.0 14.3 L16.6 14.2 L12.6 15.8 L9.5 18.8 L7.9 22.8 L7.9 27.2 L9.5 31.2 L12.6 34.2 L16.6 35.8 L21.0 35.7 L25.0 34.0 Z"/><path fill="#9C8FE8" d="M63.8 42.0 L55.4 44.0 L47.4 40.8 L42.5 33.7 L42.5 25.1 L47.4 18.0 L55.4 14.8 L63.8 16.8 L71.1 23.6 L71.1 44.0 L63.1 44.0 L63.1 35.2 L59.8 23.7 L57.4 22.9 L54.9 23.0 L52.7 24.0 L50.9 25.8 L50.0 28.2 L50.0 30.6 L50.9 33.0 L52.7 34.8 L54.9 35.8 L57.4 35.9 L59.8 35.1 Z"/><path fill="#AFA9EC" d="M84.1 0.0 L84.1 4.0 L84.1 8.0 L84.1 12.0 L84.1 16.0 L84.1 20.0 L84.1 24.0 L84.1 28.0 L84.1 32.0 L84.1 36.0 L84.1 40.0 L84.1 44.0 L92.1 44.0 L92.1 40.0 L92.1 36.0 L92.1 32.0 L92.1 28.0 L92.1 24.0 L92.1 20.0 L92.1 16.0 L92.1 12.0 L92.1 8.0 L92.1 4.0 L92.1 0.0 Z"/><path fill="#ED93B1" d="M127.8 41.4 L122.5 43.7 L116.8 43.8 L111.4 41.6 L107.3 37.6 L105.1 32.3 L105.1 26.5 L107.3 21.2 L111.4 17.2 L116.8 15.0 L122.5 15.1 L127.8 17.4 L123.2 24.0 L120.8 23.0 L118.2 22.9 L115.8 23.9 L113.9 25.7 L112.9 28.1 L112.9 30.7 L113.9 33.1 L115.8 34.9 L118.2 35.9 L120.8 35.8 L123.2 34.8 Z"/><path fill="#E0568C" d="M140.8 16.8 L140.8 23.8 L140.8 30.8 L140.8 30.8 L143.3 38.6 L149.9 43.4 L158.1 43.4 L164.7 38.6 L167.2 30.8 L167.2 30.8 L167.2 23.8 L167.2 16.8 L159.2 16.8 L159.2 23.8 L159.2 30.8 L159.2 30.8 L158.2 33.9 L155.6 35.7 L152.4 35.7 L149.8 33.9 L148.8 30.8 L148.8 30.8 L148.8 23.8 L148.8 16.8 Z"/><path fill="#F0997B" d="M180.2 0.0 L180.2 4.0 L180.2 8.0 L180.2 12.0 L180.2 16.0 L180.2 20.0 L180.2 24.0 L180.2 28.0 L180.2 32.0 L180.2 36.0 L180.2 40.0 L180.2 44.0 L188.2 44.0 L188.2 40.0 L188.2 36.0 L188.2 32.0 L188.2 28.0 L188.2 24.0 L188.2 20.0 L188.2 16.0 L188.2 12.0 L188.2 8.0 L188.2 4.0 L188.2 0.0 Z"/><path fill="#EF9F27" d="M229.8 29.4 L227.5 37.3 L221.3 42.7 L213.1 43.9 L205.6 40.4 L201.2 33.5 L201.2 25.3 L205.6 18.4 L213.1 14.9 L221.3 16.1 L227.5 21.5 L229.8 29.4 L221.8 29.4 L220.7 25.8 L217.9 23.4 L214.2 22.9 L210.9 24.4 L208.9 27.5 L208.9 31.3 L210.9 34.4 L214.2 35.9 L217.9 35.4 L220.7 33.0 L221.8 29.4 Z"/><path fill="#FF4E8E" d="M242.8 44.0 L242.8 37.0 L242.8 30.0 L242.8 30.0 L245.6 21.4 L252.9 16.1 L261.9 16.1 L269.2 21.4 L272.0 30.0 L272.0 30.0 L272.0 37.0 L272.0 44.0 L264.0 44.0 L264.0 37.0 L264.0 30.0 L264.0 30.0 L262.7 26.1 L259.4 23.7 L255.3 23.7 L252.0 26.1 L250.8 30.0 L250.8 30.0 L250.8 37.0 L250.8 44.0 Z"/></svg>
       </h1>
-      <p class="lead">Le spese divise mentre sei ancora in fila alla cassa. Nessun account: solo un codice.</p>
-      <button class="btn btn-ghost w" id="btn-annulla-ingresso" type="button" hidden>← Torna al tuo gruppo</button>
+      <p class="lead">Crea uno spazio condiviso: le spese divise con chi vuoi, subito.</p>
+      <button class="btn btn-ghost w" id="btn-annulla-ingresso" type="button" hidden>← I tuoi spazi</button>
 
-      <div class="sez">
+      <!-- F5.2: join-by-code legacy (/api/group) soppresso dalla UI V1; il join nativo avviene via link invito (8B3). -->
+      <div class="sez" id="ingresso-entra-sez" hidden aria-hidden="true">
         <span class="sez-k">Entra con un codice</span>
         <input id="in-code" class="code-in" type="text" maxlength="6" placeholder="XN8YCD"
                autocomplete="off" autocapitalize="characters" spellcheck="false" inputmode="text">
@@ -984,21 +991,21 @@ body.no-splash #app{animation:none}
         <p class="err" id="err-entra" hidden></p>
       </div>
 
-      <div class="sep">oppure</div>
+      <div class="sep" id="ingresso-sep" hidden>oppure</div>
 
       <div class="sez">
-        <span class="sez-k">Crea un gruppo</span>
-        <!-- F4/8B2 — tipo di spazio: default Local (comportamento storico invariato) -->
-        <div class="crea-mode" role="radiogroup" aria-label="Tipo di spazio">
-          <button type="button" class="crea-mode-opt" id="mode-local" role="radio" aria-checked="true" tabindex="0">Solo su questo dispositivo</button>
-          <button type="button" class="crea-mode-opt" id="mode-shared" role="radio" aria-checked="false" tabindex="-1">Condiviso</button>
+        <span class="sez-k">Crea uno spazio</span>
+        <!-- F5.2: bivio local/shared rimosso dalla UI; unico percorso = Shared nativo. Toggle nascosto (default shared). -->
+        <div class="crea-mode" role="radiogroup" aria-label="Tipo di spazio" hidden aria-hidden="true">
+          <button type="button" class="crea-mode-opt" id="mode-local" role="radio" aria-checked="false" tabindex="-1">Solo su questo dispositivo</button>
+          <button type="button" class="crea-mode-opt" id="mode-shared" role="radio" aria-checked="true" tabindex="0">Condiviso</button>
         </div>
         <label class="campo"><span class="lbl">Come si chiama</span>
           <input id="in-name" type="text" placeholder="Estate Tropeana" autocomplete="off"></label>
         <span class="lbl" id="crea-membri-lbl">Chi c'è</span>
         <div id="new-membri" class="filo-lista"></div>
         <button class="btn btn-ghost btn-mini" id="btn-addm" type="button">+ Aggiungi partecipante</button>
-        <button class="btn btn-primary w" id="btn-crea">Crea il gruppo</button>
+        <button class="btn btn-primary w" id="btn-crea">Crea spazio</button>
         <p class="err" id="err-crea" hidden></p>
       </div>
     </section>
@@ -1192,7 +1199,7 @@ body.no-splash #app{animation:none}
         <button class="btn btn-primary w" id="btn-open-mese" type="button">Il mio mese</button>
       </div>
 
-      <div class="sez">
+      <div class="sez" id="pf-foto-sez">
         <span class="sez-k">La tua foto</span>
         <p class="nota">Vale per tutti i tuoi gruppi.</p>
         <div class="foto-mia">
@@ -1203,14 +1210,15 @@ body.no-splash #app{animation:none}
         <input id="foto-file" type="file" accept="image/*" hidden>
       </div>
 
-      <div class="sez">
+      <div class="sez" id="pf-pay-sez">
         <span class="sez-k">Come ti pagano</span>
         <p class="nota">Un link solo, valido ovunque. Chi ti deve dei soldi lo vedrà nei saldi.</p>
         <input id="pf-pay" class="campo-solo" type="text" inputmode="url" autocomplete="off" placeholder="paypal.me/iltuonome">
         <button class="btn btn-primary w" id="btn-salva-pay" type="button">Salva il link</button>
       </div>
 
-      <div class="sez">
+      <!-- F5.2: blocco prestiti personali legacy SOPPRESSO dalla surface "Spazi" V1 (DOM ritenuto, funzioni legacy invariate). -->
+      <div class="sez" id="pf-personali-sez" hidden aria-hidden="true">
         <span class="sez-k">Le tue spese personali</span>
         <p class="nota">Solo per te: non entrano nel conto del gruppo e restano su questo telefono.</p>
         <div class="tot-pers">
@@ -1237,9 +1245,9 @@ body.no-splash #app{animation:none}
       </div>
 
       <div class="sez">
-        <span class="sez-k">I tuoi gruppi</span>
+        <span class="sez-k">I tuoi spazi</span>
         <div id="pf-gruppi" class="filo-lista"></div>
-        <button class="btn btn-primary w" id="btn-nuovo-gruppo" type="button">+ Entra o crea un gruppo</button>
+        <button class="btn btn-primary w" id="btn-nuovo-gruppo" type="button">+ Crea spazio</button>
       </div>
     </section>
 
@@ -1247,7 +1255,7 @@ body.no-splash #app{animation:none}
 
     <!-- F4/8B1 — vista Shared minimale, read-only (nome nell'header, partecipanti, badge sync) -->
     <section class="screen" id="s-shared" hidden>
-      <button class="btn btn-ghost w" id="btn-shared-back" type="button">← I tuoi gruppi</button>
+      <button class="btn btn-ghost w" id="btn-shared-back" type="button">← I tuoi spazi</button>
       <!-- F5.1a — superficie finanziaria Shared (read-only): saldo self, come sistemare i conti, spese -->
       <div id="shared-finance" hidden>
         <div class="mio" id="shared-saldo">
@@ -2453,11 +2461,11 @@ async function elencaSpaziNative(){
 // Lista unificata Local + Shared nel box esistente #pf-gruppi. kind e' SOLO presentazionale.
 async function renderListaSpazi(box){
   if (!box) return;
-  var locali = tuttiIGruppi().map(function(g){ return { id: g.id, name: g.name, kind: "local", me: g.me }; });
+  // F5.2: lista V1 = SOLO spazi Shared nativi. I gruppi legacy /api/group NON sono piu' presentati come spazi.
   var nativi = await elencaSpaziNative();
-  var elenco = locali.concat(nativi).sort(function(a, b){ return a.name.localeCompare(b.name); });
+  var elenco = nativi.slice().sort(function(a, b){ return a.name.localeCompare(b.name); });
   box.innerHTML = "";
-  if (!elenco.length){ box.innerHTML = '<p class="nota" style="margin-top:0">Non fai ancora parte di nessun gruppo su questo telefono.</p>'; return; }
+  if (!elenco.length){ box.innerHTML = '<p class="nota" style="margin-top:0">Non hai ancora spazi condivisi. Creane uno con «+ Crea spazio».</p>'; return; }
   for (var i = 0; i < elenco.length; i++){
     var g = elenco[i];
     var riga = document.createElement("div"); riga.className = "membro";
@@ -2546,8 +2554,9 @@ async function apriSpazio(spaceId){
 function chiudiSpazio(){
   SPACE_CTX = null;
   $("#s-shared").hidden = true;
-  if (GID && D){ vaiA("profilo"); }
-  else { $("#hdr").hidden = true; vaiA("ingresso"); }
+  $("#hdr").hidden = true;            // F5.2: torna SEMPRE alla surface "Spazi" (mai al create legacy "ingresso")
+  var _sp = $("#s-profilo"); if (_sp) _sp.setAttribute("data-surface", "spazi");   // F5.2 micro-fix: modalita' Spazi
+  vaiA("profilo");
 }
 
 // Partecipanti attivi (read-only) via API di dominio esistente.
@@ -3368,7 +3377,7 @@ function inputCifre(input, onChange, decimali){
 function render(){
   if (SPACE_CTX && SPACE_CTX.kind === "shared") return;   // F4/8B1: vista Shared aperta -> render legacy sospeso
   const dentro = !!(GID && D);
-  if (!dentro && vista !== "ingresso" && vista !== "intro") vista = "ingresso";
+  if (!dentro && vista !== "ingresso" && vista !== "intro" && vista !== "profilo") vista = "ingresso";   // F5.2: surface "Spazi" (#s-profilo) accessibile anche senza gruppo legacy
   document.body.dataset.vista = vista;
   $("#hdr").hidden  = !dentro || vista === "intro";
   $("#tabs").hidden = !dentro || vista === "nuova" || vista === "rimborso" || vista === "ingresso" || vista === "intro" || (vista === "chi" && !ME);
@@ -3384,7 +3393,7 @@ function render(){
     });
   }
   const annIngr = $("#btn-annulla-ingresso");
-  if (annIngr) annIngr.hidden = !(vista === "ingresso" && dentro);
+  if (annIngr) annIngr.hidden = (vista !== "ingresso");   // F5.2: "Annulla" create sempre disponibile su ingresso (anche path nativo)
 
   if (vista === "chi")     renderChi();
   if (vista === "spese")   renderSpese();
@@ -4116,7 +4125,7 @@ $("#btn-addm").onclick = () => {
   aggiornaPlaceholderCrea();   // F4/8B2: placeholder coerente con la modalita' corrente
 };
 // F4/8B2 — dispatcher Local/Shared: Local usa il path legacy crea() INVARIATO; Shared usa creaShared().
-$("#btn-crea").onclick = () => { if (createMode === "shared") creaShared(); else crea(); };
+$("#btn-crea").onclick = () => creaShared();   // F5.2: unico percorso create = Shared nativo (legacy crea() resta in codice, nessun caller UI V1)
 
 // F4/8B2 — selettore modalita' (radiogroup accessibile: click + frecce + Space/Enter)
 (function(){
@@ -4359,8 +4368,8 @@ $("#btn-esci").onclick = () => {
     vaiA("ingresso");
   }
 };
-$("#btn-nuovo-gruppo").onclick = () => vaiA("ingresso");
-$("#btn-annulla-ingresso").onclick = () => vaiA(ME ? "spese" : "chi");
+$("#btn-nuovo-gruppo").onclick = () => { setCreateMode("shared"); vaiA("ingresso"); };   // F5.2: "+ Crea spazio" apre create Shared nativo
+$("#btn-annulla-ingresso").onclick = () => vaiA("profilo");   // F5.2: annulla create -> surface "Spazi"
 
 $("#sync").onclick = async () => {
   if (SPACE_CTX && SPACE_CTX.kind === "shared"){   // F4/8B1: tap badge Shared (nessun blind repair)
@@ -12951,6 +12960,8 @@ if ("serviceWorker" in navigator){
     // rivela il runtime legacy intatto: nasconde solo il layer Calculon
     ovHome.hidden = true; shell.hidden = true; shellBack.hidden = false;
     doc.body.style.overflow = "";
+    var _sp = document.getElementById("s-profilo"); if (_sp) _sp.setAttribute("data-surface", "spazi");   // F5.2 micro-fix: modalita' Spazi (nasconde saluto/foto/pay)
+    if (typeof vaiA === "function") vaiA("profilo");   // F5.2: routing deterministico alla surface "Spazi" (lista nativi)
   }
 
   shell.addEventListener("click", function(e){
