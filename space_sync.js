@@ -76,9 +76,43 @@ export async function handleSpaceRequest(request, env){
   var capBytes = b64urlToBytes(cap);
   if (capBytes.length !== 32) return json({ error: "capability malformata" }, 401);
   var capHash = await sha256hex(capBytes);
+  if (route.recordType === "file") return handleFile(request, env, route, capHash);   // F6.3: PDF cifrati -> GitHub privato
   var doName = route.spaceId + ":" + capHash;   // conoscere spaceId da solo non da' accesso allo spazio reale
   var stub = env.SPACE_SYNC.get(env.SPACE_SYNC.idFromName(doName));
   return stub.fetch(request);
+}
+
+// F6.3 — FILE CIFRATI (PDF delle bollette). Il client cifra (AES-GCM, chiave dello spazio) e manda il
+// ciphertext in base64; il Worker non decifra mai e lo inoltra a un repository GitHub PRIVATO
+// (env.GITHUB_REPO "owner/repo", env.GITHUB_TOKEN segreto Worker con permesso Contents su quel solo repo).
+// Percorso = hash(spaceId:capHash)/fileId: senza capability non si legge ne' si indovina nulla.
+// Write-once: un file esistente non si sovrascrive (409 = gia' caricato, il client lo tratta come successo).
+export const FILE_LIMITS = { MAX_PLAIN_BYTES: 5 * 1024 * 1024, MAX_B64: Math.ceil((5 * 1024 * 1024 + 28) / 3) * 4 };
+export async function handleFile(request, env, route, capHash){
+  if (!route.recordId || route.depth !== 5 || !/^[A-Za-z0-9_-]{16,64}$/.test(route.recordId)) return json({ error: "fileId non valido" }, 400);
+  if (!env.GITHUB_TOKEN || !env.GITHUB_REPO) return json({ error: "archivio file non configurato" }, 503);
+  var ns = await sha256hex(new TextEncoder().encode(route.spaceId + ":" + capHash));
+  var api = "https://api.github.com/repos/" + env.GITHUB_REPO + "/contents/f/" + ns + "/" + route.recordId;
+  var gh = { "Authorization": "Bearer " + env.GITHUB_TOKEN, "User-Agent": "calculon-worker", "X-GitHub-Api-Version": "2022-11-28" };
+  if (request.method === "GET"){
+    var r = await fetch(api, { headers: Object.assign({ "Accept": "application/vnd.github.raw" }, gh) });
+    if (r.status === 404) return json({ error: "file assente" }, 404);
+    if (!r.ok) return json({ error: "archivio non raggiungibile", gh: r.status }, 502);   // solo lo status, mai il corpo
+    return new Response(r.body, { status: 200, headers: Object.assign({ "Content-Type": "application/octet-stream", "Cache-Control": "no-store" }, CORS) });
+  }
+  if (request.method === "PUT"){
+    var len = Number(request.headers.get("Content-Length") || 0);
+    if (len > FILE_LIMITS.MAX_B64 + 16) return json({ error: "file troppo grande" }, 413);
+    var b64 = await request.text();
+    if (b64.length > FILE_LIMITS.MAX_B64) return json({ error: "file troppo grande" }, 413);
+    if (b64.length < 40 || !/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) return json({ error: "contenuto non valido" }, 400);
+    var w = await fetch(api, { method: "PUT", headers: Object.assign({ "Accept": "application/vnd.github+json", "Content-Type": "application/json" }, gh),
+      body: '{"message":"calculon file","content":"' + b64 + '"}' });
+    if (w.status === 201 || w.status === 200) return json({ ok: true }, 201);
+    if (w.status === 422 || w.status === 409) return json({ error: "file gia' presente" }, 409);
+    return json({ error: "archivio non raggiungibile", gh: w.status }, 502);   // solo lo status, mai il corpo
+  }
+  return json({ error: "non trovato" }, 404);
 }
 
 // DURABLE OBJECT (SQLite-backed). Stato: seq monotono + rec:<type>:<id> -> {envelope, seq}.

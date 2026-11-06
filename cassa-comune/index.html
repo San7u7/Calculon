@@ -1256,6 +1256,8 @@ body.no-splash #app{animation:none}
     <!-- F4/8B1 — vista Shared minimale, read-only (nome nell'header, partecipanti, badge sync) -->
     <section class="screen" id="s-shared" hidden>
       <button class="btn btn-ghost w" id="btn-shared-back" type="button">← I tuoi spazi</button>
+      <!-- F6.2 — ingresso al conto della casa (solo ongoing nativo, self attivo; gate in calculonCasa.gate) -->
+      <button class="btn btn-primary w" id="btn-casa-apri" type="button" hidden>Conto della casa</button>
       <!-- F5.1a — superficie finanziaria Shared (read-only): saldo self, come sistemare i conti, spese -->
       <div id="shared-finance" hidden>
         <div class="mio" id="shared-saldo">
@@ -2514,6 +2516,7 @@ async function apriSpazio(spaceId){
   if (condSez) condSez.hidden = true;
   if (finance) finance.hidden = true;   // F5.1a: finance surface nascosta finche' il routing self non e' risolto
   var addSpesaBtn0 = $("#btn-shared-add-spesa"); if (addSpesaBtn0) addSpesaBtn0.hidden = true;   // F5.1b
+  var casaBtn0 = $("#btn-casa-apri"); if (casaBtn0) casaBtn0.hidden = true;   // F6.2
   // F4/8B4 — recovery probe: completa un self-rebuild incompleto. Idempotente (no-pending => no-op).
   // UNA VOLTA per apertura esplicita, race-guarded. MAI su boot/hashchange/render/polling. Il banner
   // "sto completando" appare solo se il resume e' percepibilmente lento (timer one-shot, non polling).
@@ -2541,6 +2544,7 @@ async function apriSpazio(spaceId){
   if (reclaimSez) reclaimSez.hidden = !revoked;
   if (condSez) condSez.hidden = (st !== "active");   // F4/8B2 — condividi solo con self attivo
   var addSpesaBtn = $("#btn-shared-add-spesa"); if (addSpesaBtn) addSpesaBtn.hidden = (st !== "active");   // F5.1b — crea spesa solo con self attivo
+  if (window.calculonCasa) window.calculonCasa.gate(spaceId, st);   // F6.2 — ingresso Casa
   var sSharedEl = $("#s-shared"); if (sSharedEl) sSharedEl.setAttribute("data-self-state", st || "");   // F5.1d — gate CSS della CTA "Segna come saldato"
   if (claiming && window.calculonClaim) await window.calculonClaim.render(spaceId);
   if (revoked && window.calculonReclaim) await window.calculonReclaim.render(spaceId,
@@ -4623,13 +4627,13 @@ if ("serviceWorker" in navigator){
 /* F0P3-DB-START */
 (function(){
   var DB_NAME     = "calculon";
-  var DB_VERSION  = 4;   // struttura IndexedDB (F2.2: +"budgets" 1->2; F4/7C: +"syncOutbox"+"spaceKeys" 2->3; F4/7G-P: +"syncQuarantine" 3->4, additivo)
+  var DB_VERSION  = 5;   // struttura IndexedDB (F2.2: +"budgets" 1->2; F4/7C: +"syncOutbox"+"spaceKeys" 2->3; F4/7G-P: +"syncQuarantine" 3->4; F6.1: +"casa" 4->5, additivo)
   var SCHEMA_TARGET = 1; // modello dati che la migrazione M1 introdurra' (Passo 4); NON applicata in F0
   // Store previsti da spec v1.1 §3 per F0. spaceMembers e shareRules sono separati
   // apposta (membership e quote non devono fondersi come array atomici).
   // F2.2: "budgets" aggiunto in coda. onupgradeneeded crea SOLO gli store mancanti
   // (create-if-absent), quindi l'upgrade 1->2 aggiunge budgets senza toccare gli altri.
-  var STORES = ["spaces","spaceMembers","shareRules","transactions","accounts","categories","liabilities","recurring","budgets","meta","syncOutbox","spaceKeys","syncQuarantine"];
+  var STORES = ["spaces","spaceMembers","shareRules","transactions","accounts","categories","liabilities","recurring","budgets","meta","syncOutbox","spaceKeys","syncQuarantine","casa"];
 
   function reqP(req){ return new Promise(function(res, rej){ req.onsuccess = function(){ res(req.result); }; req.onerror = function(){ rej(req.error); }; }); }
   function txDone(tx){ return new Promise(function(res, rej){ tx.oncomplete = function(){ res(); }; tx.onerror = function(){ rej(tx.error); }; tx.onabort = function(){ rej(tx.error || new Error("transazione annullata")); }; }); }
@@ -5173,11 +5177,13 @@ if ("serviceWorker" in navigator){
   }
 
   // Validazione fail-closed di UNA transazione shared. `noto(id)` = membro presente in net.
+  // F6 — chi ha mosso il denaro: expense = chi ha pagato (paidById), income = chi ha incassato (receivedById).
+  function titolareTx(tx){ return tx.type === "income" ? tx.receivedById : tx.paidById; }
   function validaTx(tx, noto){
     if (!tx || typeof tx !== "object") return "transazione assente";
-    if (tx.type === "expense"){
+    if (tx.type === "expense" || tx.type === "income"){
       if (!centInt(tx.amount) || tx.amount <= 0) return "amount non intero/<=0";
-      if (!noto(tx.paidById)) return "payer inesistente: " + tx.paidById;
+      if (!noto(titolareTx(tx))) return (tx.type === "income" ? "receiver" : "payer") + " inesistente: " + titolareTx(tx);
       var alloc = tx.allocations;
       if (!Array.isArray(alloc) || alloc.length === 0) return "allocations vuoto";
       var somma = 0;
@@ -5213,6 +5219,10 @@ if ("serviceWorker" in navigator){
       if (tx.type === "expense"){
         net[tx.paidById] += tx.amount;
         for (var k = 0; k < tx.allocations.length; k++) net[tx.allocations[k].memberId] -= tx.allocations[k].amount;
+      } else if (tx.type === "income"){
+        // F6 — specchio della spesa: chi incassa trattiene le quote altrui (le deve), ogni allocatee ne vanta la sua.
+        net[tx.receivedById] -= tx.amount;
+        for (var q = 0; q < tx.allocations.length; q++) net[tx.allocations[q].memberId] += tx.allocations[q].amount;
       } else {                                                  // settlement
         net[tx.fromMemberId] += tx.amount;
         net[tx.toMemberId]   -= tx.amount;
@@ -5370,13 +5380,19 @@ if ("serviceWorker" in navigator){
     return { mode: mode, parts: parts };
   }
 
-  async function createExpense(spaceId, input){
+  // F6 — expense e income condividono lo stesso write-path; cambia solo il campo del titolare
+  // (paidById | receivedById) e il segno nei saldi (vedi balancesFrom).
+  function campoTitolare(type){ return type === "income" ? "receivedById" : "paidById"; }
+  async function createExpense(spaceId, input){ return createMovimento(spaceId, input, "expense"); }
+  async function createIncome(spaceId, input){ return createMovimento(spaceId, input, "income"); }
+  async function createMovimento(spaceId, input, type){
     var sp = await spazioScrivibile(spaceId);
     input = input || {};
+    var campo = campoTitolare(type), chi = input[campo];
     if (!centInt(input.amount) || input.amount <= 0) throw new Error("amount non intero/<=0");
     if (!validDateStr(input.date)) throw new Error("date deve essere YYYY-MM-DD valida");
     var m = await membriSpazio(spaceId);
-    if (!m.attivi[input.paidById]) throw new Error("payer inesistente/non attivo: " + input.paidById);
+    if (!m.attivi[chi]) throw new Error((type === "income" ? "receiver" : "payer") + " inesistente/non attivo: " + chi);
     // F4/4B — precedenza ripartizione: esplicita > shareRule (ongoing) > equal implicito.
     var rip = leggiRipartizione(input), alloc, allocMode;
     if (rip.mode != null || rip.parts != null){
@@ -5395,12 +5411,13 @@ if ("serviceWorker" in navigator){
     for (var i = 0; i < alloc.length; i++){ if (!m.attivi[alloc[i].memberId]) throw new Error("allocatee inesistente/non attivo: " + alloc[i].memberId); }
     var now = Date.now();
     // Snapshot: persistono SOLO allocationMode + allocations. Nessun riferimento vivo alla shareRule.
-    var tx = { id: nuovoTxId(spaceId), spaceId: spaceId, type: "expense",
-      amount: input.amount, paidById: input.paidById, allocations: alloc, allocationMode: allocMode,
+    var tx = { id: nuovoTxId(spaceId), spaceId: spaceId, type: type,
+      amount: input.amount, allocations: alloc, allocationMode: allocMode,
       date: input.date, note: (input.note != null ? input.note : null),
       version: 1, deviceId: deviceCorrente(), createdAt: now, updatedAt: now, deleted: false };
+    tx[campo] = chi;
     var err = validaTx(tx, function(id){ return !!m.tutti[id]; });
-    if (err) throw new Error("expense invalida: " + err);
+    if (err) throw new Error(type + " invalida: " + err);
     await wireCommit(sp, tx, { expectAbsent: true });   // source + proiezioni, atomico + create-guard
     return tx.id;
   }
@@ -5416,22 +5433,25 @@ if ("serviceWorker" in navigator){
   // Riferimenti gia' presenti nella tx corrente (payer/allocatee o from/to).
   function riferimentiCorrenti(cur){
     var g = {};
-    if (cur.type === "expense"){ g[cur.paidById] = true; (cur.allocations || []).forEach(function(a){ g[a.memberId] = true; }); }
+    if (cur.type === "expense" || cur.type === "income"){ g[titolareTx(cur)] = true; (cur.allocations || []).forEach(function(a){ g[a.memberId] = true; }); }
     else { g[cur.fromMemberId] = true; g[cur.toMemberId] = true; }
     return g;
   }
 
-  async function updateExpense(spaceId, txId, patch){
+  async function updateExpense(spaceId, txId, patch){ return updateMovimento(spaceId, txId, patch, "expense"); }
+  async function updateIncome(spaceId, txId, patch){ return updateMovimento(spaceId, txId, patch, "income"); }
+  async function updateMovimento(spaceId, txId, patch, type){
     var sp = await spazioScrivibile(spaceId);
-    var cur = await txDaModificare(spaceId, txId, "expense");
+    var cur = await txDaModificare(spaceId, txId, type);
+    var campo = campoTitolare(type);
     patch = patch || {};
     if ("spaceId" in patch && patch.spaceId !== spaceId) throw new Error("spaceId immutabile");
     if ("id" in patch && patch.id !== txId) throw new Error("id immutabile");
-    if ("type" in patch && patch.type !== "expense") throw new Error("type immutabile");
+    if ("type" in patch && patch.type !== type) throw new Error("type immutabile");
     if ("date" in patch && !validDateStr(patch.date)) throw new Error("date deve essere YYYY-MM-DD valida");
     var amount = ("amount" in patch) ? patch.amount : cur.amount;
     if (!centInt(amount) || amount <= 0) throw new Error("amount non intero/<=0");
-    var paidById = ("paidById" in patch) ? patch.paidById : cur.paidById;
+    var paidById = (campo in patch) ? patch[campo] : cur[campo];
     var rip = leggiRipartizione(patch), alloc, allocMode;
     if (rip.mode || rip.parts){
       allocMode = rip.mode || cur.allocationMode;
@@ -5444,15 +5464,16 @@ if ("serviceWorker" in navigator){
     var m = await membriSpazio(spaceId), gia = riferimentiCorrenti(cur);
     // un riferimento gia' presente puo' restare anche se ora inattivo; un NUOVO riferimento deve essere attivo.
     function ammesso(id){ return !!m.attivi[id] || (!!gia[id] && !!m.tutti[id]); }
-    if (!ammesso(paidById)) throw new Error("payer non ammesso (nuovo riferimento a inattivo?): " + paidById);
+    if (!ammesso(paidById)) throw new Error((type === "income" ? "receiver" : "payer") + " non ammesso (nuovo riferimento a inattivo?): " + paidById);
     for (var i = 0; i < alloc.length; i++){ if (!ammesso(alloc[i].memberId)) throw new Error("allocatee non ammesso (nuovo riferimento a inattivo?): " + alloc[i].memberId); }
-    var upd = { id: txId, spaceId: spaceId, type: "expense",
-      amount: amount, paidById: paidById, allocations: alloc, allocationMode: allocMode,
+    var upd = { id: txId, spaceId: spaceId, type: type,
+      amount: amount, allocations: alloc, allocationMode: allocMode,
       date: ("date" in patch ? patch.date : cur.date), note: ("note" in patch ? patch.note : (cur.note != null ? cur.note : null)),
       version: (cur.version | 0) + 1, deviceId: deviceCorrente(),
       createdAt: (cur.createdAt != null ? cur.createdAt : null), updatedAt: Date.now(), deleted: false };
+    upd[campo] = paidById;
     var err = validaTx(upd, function(id){ return !!m.tutti[id]; });
-    if (err) throw new Error("expense update invalida: " + err);
+    if (err) throw new Error(type + " update invalida: " + err);
     await wireCommit(sp, upd, { expect: baseAttesa(cur) });   // source + proiezioni, atomico + CAS
     return upd.id;
   }
@@ -5805,6 +5826,8 @@ if ("serviceWorker" in navigator){
     // F4/3A: write-path nativo (solo spazi nativi experience|ongoing active)
     createExpense: createExpense,
     updateExpense: updateExpense,
+    createIncome: createIncome,     // F6 — entrate condivise
+    updateIncome: updateIncome,
     createSettlement: createSettlement,
     updateSettlement: updateSettlement,
     deleteTransaction: deleteTransaction,
@@ -5987,11 +6010,78 @@ if ("serviceWorker" in navigator){
       ok("fail: settlement from===to",  throws([{ id:"x", type:"settlement", amount:100, fromMemberId:"s:m1", toMemberId:"s:m1" }]));
       ok("fail: amount non intero",     throws([{ id:"x", type:"expense", amount:10.5, paidById:"s:m1", allocations:[{memberId:"s:m1",amount:10.5}] }]));
       ok("fail: amount <= 0",           throws([{ id:"x", type:"expense", amount:0, paidById:"s:m1", allocations:[{memberId:"s:m1",amount:0}] }]));
-      ok("fail: tipo non supportato",   throws([{ id:"x", type:"income", amount:100, paidById:"s:m1", allocations:[{memberId:"s:m1",amount:100}] }]));
+      ok("fail: tipo non supportato",   throws([{ id:"x", type:"transfer", amount:100, paidById:"s:m1", allocations:[{memberId:"s:m1",amount:100}] }]));
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
     },
     // F4/3A: test end-to-end del write-path nativo su IndexedDB reale (semina, scrive, verifica, ricarica).
+    // F6 — entrate condivise: saldi specchio della spesa, proiezione Personale, edit/delete/restore, sync boundary.
+    _testF6Income: async function(){
+      var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
+      var DB = window.calculonDB, SR = window.sharedRuntime, NB = window.nativeSyncBoundary, PJ = window.personalProjection;
+      async function throwsA(fn){ try { await fn(); return false; } catch(e){ return true; } }
+      var c = await SR.createSpace({ kind: "ongoing", name: "Casa", selfName: "Giovanni" });
+      var S = c.spaceId, G = c.selfMemberId, L = await SR.addMember(S, { name: "Laura" });
+      var eq = {}; eq[G] = 1; eq[L] = 1;
+      async function quota(txId){ return (await DB.list("transactions", function(t){ return t.derived === true && t.sourceTransactionId === txId && t.deleted !== true; }))[0] || null; }
+      async function liab(){ return (await PJ.liabilityBalance(S)).totalSignedAmount; }
+
+      // 1) incasso io l'affitto 900 diviso a meta': devo 450 a Laura
+      var i1 = await SR.createIncome(S, { amount: 90000, receivedById: G, date: "2026-10-05", note: "Affitto", allocationMode: "equal", parts: eq });
+      var b = await SR.balances(S);
+      ok("income: chi incassa deve la quota altrui", b[G] === -45000 && b[L] === 45000);
+      var t1 = await DB.get("transactions", i1);
+      ok("income: record canonico", t1.type === "income" && t1.receivedById === G && !("paidById" in t1) && t1.allocations.length === 2);
+      var q1 = await quota(i1);
+      ok("income: quota Personale = entrata", q1 && q1.type === "income" && q1.amount === 45000 && q1.spaceId === "personal:local");
+      ok("income: liability coerente coi saldi", (await liab()) === b[G]);
+      var plan = await SR.settlementPlan(S);
+      ok("income: piano G -> L 450", plan.length === 1 && plan[0].from === G && plan[0].to === L && plan[0].amount === 45000);
+
+      // 2) spesa pagata da Laura 200 a meta': il debito scende a 350
+      await SR.createExpense(S, { amount: 20000, paidById: L, date: "2026-10-10", note: "Caldaia", allocationMode: "equal", parts: eq });
+      b = await SR.balances(S);
+      ok("misto: saldo netto", b[G] === -55000 && b[L] === 55000);
+      ok("misto: zero-sum", b[G] + b[L] === 0);
+
+      // 3) incassa Laura 100 tutto a me (exact): Laura mi deve 100 -> debito 450
+      var p2 = {}; p2[G] = 10000; p2[L] = 0;
+      var i2 = await SR.createIncome(S, { amount: 10000, receivedById: L, date: "2026-10-12", allocationMode: "exact", parts: p2 });
+      b = await SR.balances(S);
+      ok("income altrui: mio credito", b[G] === -45000);
+      var q2 = await quota(i2);
+      ok("income altrui: mia quota entrata 100", q2 && q2.type === "income" && q2.amount === 10000);
+      ok("liability = saldi (misto)", (await liab()) === b[G]);
+
+      // 4) modifica importo
+      await SR.updateIncome(S, i1, { amount: 100000, allocationMode: "equal", parts: eq });
+      b = await SR.balances(S);
+      ok("updateIncome: saldi ricalcolati", b[G] === -50000);
+      ok("updateIncome: quota aggiornata", (await quota(i1)).amount === 50000);
+      ok("updateIncome: type immutabile", await throwsA(function(){ return SR.updateIncome(S, i1, { type: "expense" }); }));
+      ok("updateExpense su income respinto", await throwsA(function(){ return SR.updateExpense(S, i1, { note: "x" }); }));
+
+      // 5) delete / restore
+      await SR.deleteTransaction(S, i1);
+      b = await SR.balances(S);
+      ok("delete income: saldi senza", b[G] === 0 && b[L] === 0);
+      ok("delete income: quota tombstone", (await quota(i1)) === null);
+      await SR.restoreTransaction(S, i1);
+      b = await SR.balances(S);
+      ok("restore income: saldi tornano", b[G] === -50000);
+
+      // 6) validazione fail-closed
+      ok("income senza receiver respinto", await throwsA(function(){ return SR.createIncome(S, { amount: 100, date: "2026-10-01", allocationMode: "equal", parts: eq }); }));
+      ok("income amount 0 respinto", await throwsA(function(){ return SR.createIncome(S, { amount: 0, receivedById: G, date: "2026-10-01", allocationMode: "equal", parts: eq }); }));
+      ok("balancesFrom: income senza receiver throw", (function(){ try { SR._balancesFrom([{ id: "a" }], [{ id: "x", type: "income", amount: 1, allocations: [{ memberId: "a", amount: 1 }] }]); return false; } catch(e){ return true; } })());
+
+      // 7) sync boundary: income syncabile, receivedById nel protocollo
+      var t1b = await DB.get("transactions", i1);
+      ok("boundary: income sync-ready", NB.isSyncableSharedRecord(t1b) === true);
+      ok("boundary: receivedById proiettato", NB.sharedProjectionOfTransaction(t1b).receivedById === G);
+      var fails = r.filter(function(x){ return !x.pass; });
+      return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+    },
     _testWritePath: async function(){
       var r = [], ok = function(name, cond){ r.push({ name: name, pass: !!cond }); };
       var DB = window.calculonDB, SR = window.sharedRuntime;
@@ -6684,6 +6774,41 @@ if ("serviceWorker" in navigator){
       return { quotaExpense: quotaExpense, liabilityLegs: legs };
     }
 
+    if (tx.type === "income"){
+      // F6 — specchio della spesa: la mia quota e' un'ENTRATA Personale; chi ha incassato deve le quote altrui.
+      if (!centInt(tx.amount) || tx.amount <= 0) throw new Error("amount non valido");
+      if (!esiste(tx.receivedById)) throw new Error("receiver inesistente: " + tx.receivedById);
+      var allocI = tx.allocations;
+      if (!Array.isArray(allocI) || allocI.length === 0) throw new Error("allocations vuoto");
+      var sommaI = 0, myQuotaI = 0;
+      for (var ji = 0; ji < allocI.length; ji++){ var ai = allocI[ji];
+        if (!ai || !esiste(ai.memberId)) throw new Error("allocatee inesistente: " + (ai && ai.memberId));
+        if (!centInt(ai.amount) || ai.amount < 0) throw new Error("allocation non intera/<0");
+        sommaI += ai.amount;
+        if (ai.memberId === self) myQuotaI += ai.amount;
+      }
+      if (sommaI !== tx.amount) throw new Error("allocation incoerente: " + sommaI + " != " + tx.amount);
+      var quotaIncome = null;
+      if (myQuotaI > 0){
+        quotaIncome = { id: "proj:" + space.id + ":" + tx.id + ":quota", spaceId: PID, type: "income",
+          amount: myQuotaI, date: (tx.date != null ? tx.date : null), accountId: null, categoryId: null,
+          capitalMovement: false, sourceSpaceId: space.id, sourceTransactionId: tx.id, sourceMemberId: self,
+          projectionType: "share-quota" };
+      }
+      var legsI = [];
+      if (tx.receivedById === self){
+        // incasso io: payable verso ogni ALTRO allocatee (>0).
+        for (var ki = 0; ki < allocI.length; ki++){ var bi = allocI[ki];
+          if (bi.memberId === self) continue;
+          if (bi.amount > 0) legsI.push(mkLeg(bi.memberId, bi.amount, "payable", null, "share-liability"));
+        }
+      } else if (myQuotaI > 0){
+        // incassa un altro: UNA leg receivable verso chi ha incassato = myQuota.
+        legsI.push(mkLeg(tx.receivedById, myQuotaI, "receivable", null, "share-liability"));
+      }
+      return { quotaExpense: quotaIncome, liabilityLegs: legsI };
+    }
+
     if (tx.type === "settlement"){
       if (!centInt(tx.amount) || tx.amount <= 0) throw new Error("amount non valido");
       if (!esiste(tx.fromMemberId) || !esiste(tx.toMemberId)) throw new Error("settlement from/to inesistente");
@@ -6754,7 +6879,7 @@ if ("serviceWorker" in navigator){
   function sigLiab(r){ return JSON.stringify([r.id, r.sourceSpaceId, r.sourceTransactionId, r.sourceMemberId, r.counterpartMemberId, r.signedAmount, r.date, r.projectionType, r.deleted, r.derived]); }
   function quotaRecord(existing, q, src, now){
     var createdAt = (existing && existing.createdAt != null) ? existing.createdAt : now;
-    return { id: q.id, spaceId: PID_D, type: "expense", amount: q.amount, date: q.date,
+    return { id: q.id, spaceId: PID_D, type: (q.type === "income" ? "income" : "expense"), amount: q.amount, date: q.date,
       accountId: null, categoryId: null, merchant: "", note: (src.note != null ? src.note : ""),
       tags: [], capitalMovement: false, deleted: false,
       sourceSpaceId: q.sourceSpaceId, sourceTransactionId: q.sourceTransactionId, sourceMemberId: q.sourceMemberId,
@@ -7018,7 +7143,7 @@ if ("serviceWorker" in navigator){
       ok("allocation incoerente respinta", throws(function(){ return PJ.fromSharedTx(SPACE, exp(100, SELF, [[SELF,40],[A,50]]), MEM); }));
       ok("amount non valido respinto", throws(function(){ return PJ.fromSharedTx(SPACE, exp(0, SELF, [[SELF,0]]), MEM); }));
       ok("payer inesistente respinto", throws(function(){ return PJ.fromSharedTx(SPACE, { id:"T", spaceId:"S", type:"expense", amount:100, paidById:"S:zz", allocations:[{memberId:SELF,amount:100}] }, MEM); }));
-      ok("tipo non supportato respinto", throws(function(){ return PJ.fromSharedTx(SPACE, { id:"T", spaceId:"S", type:"income", amount:100 }, MEM); }));
+      ok("tipo non supportato respinto", throws(function(){ return PJ.fromSharedTx(SPACE, { id:"T", spaceId:"S", type:"transfer", amount:100 }, MEM); }));
 
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
@@ -7114,7 +7239,7 @@ if ("serviceWorker" in navigator){
       ok("aggregate: counterpart mancante respinto", throws(function(){ return PJ.aggregateLiabilities([{ signedAmount:100 }]); }));
       ok("position: txs non array respinto", throws(function(){ return PJ.liabilityPosition(SPACE, "x", MEM); }));
       ok("position: tx cross-space respinta", throws(function(){ return PJ.liabilityPosition(SPACE, [ { id:"T", spaceId:"OTHER", type:"expense", amount:100, paidById:SELF, allocations:[{memberId:SELF,amount:100}] } ], MEM); }));
-      ok("position: tipo non supportato respinto", throws(function(){ return PJ.liabilityPosition(SPACE, [ { id:"T", spaceId:"S", type:"income", amount:100 } ], MEM); }));
+      ok("position: tipo non supportato respinto", throws(function(){ return PJ.liabilityPosition(SPACE, [ { id:"T", spaceId:"S", type:"transfer", amount:100 } ], MEM); }));
 
       var fails = r.filter(function(x){ return !x.pass; });
       return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
@@ -7370,7 +7495,7 @@ if ("serviceWorker" in navigator){
   var LOCAL_SPACE_FIELDS  = ["selfMemberId", "authority", "cutover", "legacyGroupId"];
   // Allowlist di projection per gli altri record shared.
   var SHARED_MEMBER_FIELDS    = ["id", "spaceId", "name", "active", "deleted", "version", "deviceId"];
-  var SHARED_TX_FIELDS        = ["id", "spaceId", "type", "amount", "paidById", "allocations", "allocationMode", "fromMemberId", "toMemberId", "date", "note", "deleted", "version", "deviceId"];
+  var SHARED_TX_FIELDS        = ["id", "spaceId", "type", "amount", "paidById", "receivedById", "allocations", "allocationMode", "fromMemberId", "toMemberId", "date", "note", "deleted", "version", "deviceId"];
   var SHARED_SHARERULE_FIELDS = ["id", "spaceId", "mode", "parts", "deleted", "version", "deviceId"];
 
   function pick(obj, fields){ var out = {}; for (var i = 0; i < fields.length; i++){ var k = fields[i]; if (Object.prototype.hasOwnProperty.call(obj, k)) out[k] = obj[k]; } return out; }
@@ -7396,6 +7521,94 @@ if ("serviceWorker" in navigator){
   function sharedProjectionOfTransaction(t){ if (!t || typeof t !== "object") throw new Error("transaction assente"); return pick(t, SHARED_TX_FIELDS); }
   function sharedProjectionOfShareRule(s){ if (!s || typeof s !== "object") throw new Error("shareRule assente"); return pick(s, SHARED_SHARERULE_FIELDS); }
 
+  /* F6.1 — record «Casa» (casaTenant | casaMove | casaDebt). Sul filo viaggiano come recordType
+     "transaction" (allowlist del Worker invariata: header indistinguibile da una spesa, id opaco);
+     il discriminante e' `type` DENTRO il payload cifrato. In locale vivono nello store "casa".
+     Allowlist per tipo + validatore strutturale PURO (fail-closed): un record incompleto non e' syncabile. */
+  var CASA_COMMON_FIELDS = ["id", "spaceId", "type", "note", "updatedAt", "updatedBy", "deleted", "version", "deviceId"];
+  var SHARED_CASA_FIELDS = {
+    casaTenant: CASA_COMMON_FIELDS.concat(["name", "room", "phone", "rentMonthly", "startDate", "endDate", "excludedExtras"]),
+    casaMove:   CASA_COMMON_FIELDS.concat(["moveType", "date", "amount", "tenantId", "month", "billId", "supplier", "period", "extra", "shares", "pdfRef", "debtId", "reason"]),
+    casaDebt:   CASA_COMMON_FIELDS.concat(["debtor", "creditorMemberId", "creditorName", "initialAmount", "monthlyInstallment", "startDate"])
+  };
+  var CASA_MOVE_TYPES = { rent: 1, billShare: 1, bill: 1, expense: 1, debtPayment: 1, adjustment: 1, debtAdjustment: 1 };
+  function isCasaRecord(r){ return !!r && typeof r === "object" && Object.prototype.hasOwnProperty.call(SHARED_CASA_FIELDS, r.type); }
+  function sharedProjectionOfCasa(r){ if (!isCasaRecord(r)) throw new Error("record casa assente"); return pick(r, SHARED_CASA_FIELDS[r.type]); }
+  function casaInt(n){ return typeof n === "number" && isFinite(n) && Math.floor(n) === n; }
+  function casaDate(d){
+    if (typeof d !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(d)) return false;
+    var p = d.split("-"), mo = +p[1], day = +p[2]; return mo >= 1 && mo <= 12 && day >= 1 && day <= 31;
+  }
+  function casaMonth(m){ return typeof m === "string" && /^\d{4}-(0[1-9]|1[0-2])$/.test(m); }
+  function nonVuota(v){ return typeof v === "string" && v.trim() !== ""; }
+  function strONull(v){ return v == null || typeof v === "string"; }
+  // Ritorna null se valido, altrimenti il motivo. Strutturale: NON verifica riferimenti ad altri record.
+  function validateCasaRecord(r){
+    if (!isCasaRecord(r)) return "tipo casa sconosciuto";
+    if (!nonVuota(r.id)) return "id assente";
+    if (!nonVuota(r.spaceId) || r.spaceId === "personal:local") return "spaceId non shared";
+    if (!strONull(r.note) || !strONull(r.updatedBy)) return "note/updatedBy non stringa";
+    if (r.type === "casaTenant"){
+      if (!nonVuota(r.name)) return "nome inquilino vuoto";
+      if (!strONull(r.room) || !strONull(r.phone)) return "stanza/telefono non stringa";
+      if (!casaInt(r.rentMonthly) || r.rentMonthly < 0) return "affitto non intero/<0";
+      if (!casaDate(r.startDate)) return "data ingresso non valida";
+      if (r.endDate != null && (!casaDate(r.endDate) || r.endDate < r.startDate)) return "data uscita non valida";
+      if (!Array.isArray(r.excludedExtras) || !r.excludedExtras.every(nonVuota)) return "esclusioni non valide";
+      return null;
+    }
+    if (r.type === "casaDebt"){
+      if (!nonVuota(r.debtor)) return "debitore assente";
+      var cm = nonVuota(r.creditorMemberId), cn = nonVuota(r.creditorName);
+      if (cm === cn) return "creditore: serve esattamente uno tra membro e nome";
+      if (cm && (r.creditorMemberId === r.debtor || r.debtor === "both")) return "debitore === creditore";
+      if (!casaInt(r.initialAmount) || r.initialAmount <= 0) return "importo iniziale non intero/<=0";
+      if (r.monthlyInstallment != null && (!casaInt(r.monthlyInstallment) || r.monthlyInstallment <= 0)) return "rata non intera/<=0";
+      if (!casaDate(r.startDate)) return "data inizio non valida";
+      return null;
+    }
+    // casaMove
+    var mt = r.moveType;
+    if (!CASA_MOVE_TYPES[mt]) return "moveType sconosciuto: " + mt;
+    if (!casaDate(r.date)) return "data non valida";
+    if (!casaInt(r.amount)) return "importo non intero";
+    var signed = (mt === "adjustment" || mt === "debtAdjustment");
+    if (signed ? r.amount === 0 : r.amount <= 0) return "importo " + (signed ? "== 0" : "<= 0");
+    if (mt === "rent"){ if (!nonVuota(r.tenantId)) return "rent: tenantId assente"; if (!casaMonth(r.month)) return "rent: mese non valido"; }
+    if (mt === "billShare"){ if (!nonVuota(r.tenantId) || !nonVuota(r.billId)) return "billShare: tenantId/billId assente"; }
+    if (mt === "adjustment" && !nonVuota(r.reason)) return "adjustment: motivo assente";
+    if (mt === "debtAdjustment" && (!nonVuota(r.debtId) || !nonVuota(r.reason))) return "debtAdjustment: debtId/motivo assente";
+    if (mt === "debtPayment" && r.debtId != null && !nonVuota(r.debtId)) return "debtPayment: debtId non valido";
+    if (mt === "bill"){
+      if (!strONull(r.supplier) || !strONull(r.period)) return "bill: fornitore/periodo non stringa";
+      var extraAmt = 0;
+      if (r.extra != null){
+        if (typeof r.extra !== "object" || !nonVuota(r.extra.name) || !casaInt(r.extra.amount) || r.extra.amount <= 0) return "bill: voce a parte non valida";
+        extraAmt = r.extra.amount;
+      }
+      if (extraAmt > r.amount) return "bill: voce a parte > importo";
+      if (!Array.isArray(r.shares) || r.shares.length === 0) return "bill: quote assenti";
+      var visti = {}, somma = 0;
+      for (var i = 0; i < r.shares.length; i++){
+        var q = r.shares[i];
+        if (!q || !nonVuota(q.tenantId) || visti[q.tenantId]) return "bill: quota con tenantId assente/duplicato";
+        if (!casaInt(q.amount) || q.amount < 0) return "bill: quota non intera/<0";
+        visti[q.tenantId] = true; somma += q.amount;
+      }
+      if (somma !== r.amount) return "bill: somma quote (" + somma + ") != importo (" + r.amount + ")";
+      if (r.pdfRef != null){   // F6.3: riferimento al PDF cifrato (id opaco, nome, byte in chiaro, keyVersion)
+        var pr = r.pdfRef;
+        if (typeof pr !== "object" || Array.isArray(pr)) return "bill: pdfRef non valido";
+        if (typeof pr.fileId !== "string" || !/^[A-Za-z0-9_-]{16,64}$/.test(pr.fileId)) return "bill: pdfRef.fileId non valido";
+        if (!nonVuota(pr.name) || pr.name.length > 200) return "bill: pdfRef.name non valido";
+        if (!casaInt(pr.size) || pr.size <= 0 || pr.size > 5242880) return "bill: pdfRef.size non valido";
+        if (!casaInt(pr.keyVersion) || pr.keyVersion < 1) return "bill: pdfRef.keyVersion non valido";
+        for (var pk in pr) if (Object.prototype.hasOwnProperty.call(pr, pk) && !{ fileId: 1, name: 1, size: 1, keyVersion: 1 }[pk]) return "bill: pdfRef campo non ammesso";
+      }
+    }
+    return null;
+  }
+
   // 7B2: record causalmente completo (sync-ready) solo con version intero >=1 e deviceId non vuoto.
   function hasCausalMetadata(record){
     return Number.isInteger(record.version) && record.version >= 1 && typeof record.deviceId === "string" && record.deviceId !== "";
@@ -7413,7 +7626,9 @@ if ("serviceWorker" in navigator){
     var tipoOk = false;
     if (typeof id === "string" && id.indexOf("shareRule:") === 0){                    // shareRule
       tipoOk = typeof record.spaceId === "string" && record.spaceId !== "" && record.mode != null && Array.isArray(record.parts);
-    } else if (record.type === "expense" || record.type === "settlement"){            // transazione shared
+    } else if (isCasaRecord(record)){                                                  // F6.1: record Casa (validatore strutturale)
+      tipoOk = validateCasaRecord(record) === null;
+    } else if (record.type === "expense" || record.type === "income" || record.type === "settlement"){   // transazione shared (F6: +income)
       tipoOk = typeof record.spaceId === "string" && record.spaceId !== "" && record.spaceId !== "personal:local";
     } else if (typeof record.spaceId === "string" && record.spaceId !== "" && typeof record.name === "string" && ("active" in record) && record.type == null){   // membro
       tipoOk = true;
@@ -7441,6 +7656,9 @@ if ("serviceWorker" in navigator){
     sharedProjectionOfMember: sharedProjectionOfMember,
     sharedProjectionOfTransaction: sharedProjectionOfTransaction,
     sharedProjectionOfShareRule: sharedProjectionOfShareRule,
+    sharedProjectionOfCasa: sharedProjectionOfCasa,   // F6.1
+    isCasaRecord: isCasaRecord,                       // F6.1
+    validateCasaRecord: validateCasaRecord,           // F6.1
     isSyncableSharedRecord: isSyncableSharedRecord,
     nativeWinner: nativeWinner,
     _test: function(){
@@ -7581,7 +7799,7 @@ if ("serviceWorker" in navigator){
     var B = NB();
     if (recordType === "space") return B.sharedProjectionOfSpace(record);
     if (recordType === "member") return B.sharedProjectionOfMember(record);
-    if (recordType === "transaction") return B.sharedProjectionOfTransaction(record);
+    if (recordType === "transaction") return B.isCasaRecord(record) ? B.sharedProjectionOfCasa(record) : B.sharedProjectionOfTransaction(record);   // F6.1: Casa sul filo come "transaction"
     if (recordType === "shareRule") return B.sharedProjectionOfShareRule(record);
     throw new Error("recordType non ammesso: " + recordType);
   }
@@ -7699,7 +7917,7 @@ if ("serviceWorker" in navigator){
     ok("upgrade: store syncQuarantine presente", db4.objectStoreNames.contains("syncQuarantine"));
     db4.close(); await del(UNAME);
     // il DB reale dell'app e' a v4 con i nuovi store
-    ok("app DB_VERSION 4", DBx.DB_VERSION === 4);
+    ok("app DB_VERSION 5", DBx.DB_VERSION === 5);   // F6.1: +"casa" (additivo)
     ok("app: syncOutbox scrivibile", (await DBx.put("syncOutbox", { id: "sync:probe", status: "delivered" })) === "sync:probe");
     ok("app: spaceKeys leggibile (vuoto)", Array.isArray(await DBx.list("spaceKeys", function(){ return false; })));
     ok("app: syncQuarantine scrivibile", (await DBx.put("syncQuarantine", { id: "quar:probe", spaceId: "x", attempts: 1 })) === "quar:probe");
@@ -7881,7 +8099,8 @@ if ("serviceWorker" in navigator){
     if (space.authority !== "native") throw new Error("commit: spazio non native");
     opts = opts || {};
     var storeByType = { space: "spaces", member: "spaceMembers", shareRule: "shareRules" };
-    var store = storeByType[recordType]; if (!store) throw new Error("recordType non gestito: " + recordType);
+    var store = (recordType === "transaction" && window.nativeSyncBoundary.isCasaRecord(record)) ? "casa" : storeByType[recordType];   // F6.1: Casa -> store "casa"
+    if (!store) throw new Error("recordType non gestito: " + recordType);
     var items = [{ store: store, record: record }];
     if (!opts.noIntent){   // F4/7E3: inbound apply usa noIntent -> nessun echo outbound
       var intent = await buildIntentItem(recordType, record);   // crypto PRIMA della transazione
@@ -7937,6 +8156,7 @@ if ("serviceWorker" in navigator){
     members.forEach(function(m){ records.push({ type: "member", rec: m }); });
     txs.forEach(function(t){ records.push({ type: "transaction", rec: t }); });
     if (rule) records.push({ type: "shareRule", rec: rule });
+    (await DB().list("casa", function(c){ return c && c.spaceId === spaceId; })).forEach(function(c){ records.push({ type: "transaction", rec: c }); });   // F6.1
     // 3) cifra + coalesca gli intent (solo record causalmente completi/sync-ready; lo space e' sempre incluso).
     var items = [];
     if (spaceUpdated) items.push({ store: "spaces", record: sp });   // solo il campo keyVersion (causale) e' shared
@@ -7962,6 +8182,21 @@ if ("serviceWorker" in navigator){
     if (typeof cap !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(cap)) throw new Error("capability non valida (32B base64url)");
     await DB().meta.set("spaceCap:" + spaceId, cap);
     return cap;
+  }
+  // F6.3 — file cifrati dello spazio (il chiamante passa GIA' il ciphertext in base64 standard).
+  async function uploadSpaceFile(spaceId, fileId, b64){
+    var cap = await getSpaceCapability(spaceId); if (!cap) throw new Error("capability assente");
+    var res = await fetch(_apiBase + "/api/space/" + encodeURIComponent(spaceId) + "/file/" + encodeURIComponent(fileId),
+      { method: "PUT", headers: { "Authorization": "Bearer " + cap, "Content-Type": "text/plain" }, body: b64 });
+    if (res.status === 201 || res.status === 409) return true;   // 409 = gia' caricato (retry dopo risposta persa)
+    throw new Error("upload-failed:" + res.status);
+  }
+  async function downloadSpaceFile(spaceId, fileId){
+    var cap = await getSpaceCapability(spaceId); if (!cap) throw new Error("capability assente");
+    var res = await fetch(_apiBase + "/api/space/" + encodeURIComponent(spaceId) + "/file/" + encodeURIComponent(fileId),
+      { headers: { "Authorization": "Bearer " + cap } });
+    if (!res.ok) throw new Error("download-failed:" + res.status);
+    return new Uint8Array(await res.arrayBuffer());
   }
   async function ensureSpaceCapability(spaceId){ var ex = await getSpaceCapability(spaceId); return ex ? ex : await setSpaceCapability(spaceId, nuovaCapability()); }
 
@@ -8075,8 +8310,7 @@ if ("serviceWorker" in navigator){
     var bySpace = {};
     for (var i = 0; i < sup.length; i++){
       var it = sup[i], cursor = await getSyncSeq(it.spaceId);
-      var store = SYNC_TYPES[it.recordType];
-      var cur = store ? await DB().get(store, it.recordId) : null;
+      var cur = await getSyncSource(it.recordType, it.recordId);   // F6.1: anche store casa
       var resolved = (cursor >= (it.lastSeq | 0)) && winnerMaterialized(cur, it.remoteWinner);
       if (resolved) continue;
       var e = bySpace[it.spaceId] || (bySpace[it.spaceId] = { spaceId: it.spaceId, targetSeq: 0, needsPull: false });
@@ -8122,8 +8356,7 @@ if ("serviceWorker" in navigator){
     var id = "sync:" + spaceId + ":" + recordType + ":" + recordId;
     var intent = await DB().get("syncOutbox", id);
     if (!intent || intent.status !== "error") throw new Error("reemit-not-error");          // solo terminal error
-    var store = SYNC_TYPES[recordType];
-    var cur = await DB().get(store, recordId);
+    var cur = await getSyncSource(recordType, recordId);   // F6.1: anche store casa
     if (!cur) throw new Error("reemit-source-absent");                                       // fail-closed: nessun source
     // O2b delega: winner remoto non ancora materializzato -> non re-emettere un potenziale loser.
     var pend = await pendingPullRecovery(spaceId);
@@ -8154,6 +8387,14 @@ if ("serviceWorker" in navigator){
      avanza SOLO dopo che l'intero batch e' processato. */
   var SYNC_TYPES = { space: "spaces", member: "spaceMembers", shareRule: "shareRules", transaction: "transactions" };
   var TYPE_ORDER = { space: 0, member: 1, shareRule: 2, transaction: 3 };   // referenziati prima dei referenti
+  // F6.1 — i record Casa viaggiano come "transaction" ma vivono nello store "casa": lookup del source
+  // per (recordType, recordId) con fallback sullo store casa (id opachi, nessun prefisso in chiaro).
+  async function getSyncSource(recordType, recordId){
+    var store = SYNC_TYPES[recordType]; if (!store) return null;
+    var cur = await DB().get(store, recordId);
+    if (!cur && recordType === "transaction") cur = await DB().get("casa", recordId);
+    return cur || null;
+  }
   async function getSyncSeq(spaceId){ var v = await DB().meta.get("syncSeq:" + spaceId); return Number.isInteger(v) ? v : 0; }
   async function setSyncSeq(spaceId, seq){ await DB().meta.set("syncSeq:" + spaceId, seq | 0); return seq | 0; }
 
@@ -8179,7 +8420,9 @@ if ("serviceWorker" in navigator){
   // Applica UN record remoto (winner) con CAS + retry bounded. Ritorna "applied"|"local-wins"|"identical".
   async function applyOne(space, self, recordType, remote, opts){
     opts = opts || {};
-    var store = SYNC_TYPES[recordType];
+    var isCasa = recordType === "transaction" && window.nativeSyncBoundary.isCasaRecord(remote);   // F6.1
+    var store = isCasa ? "casa" : SYNC_TYPES[recordType];
+    if (isCasa && await DB().get("transactions", remote.id)) return "local-wins";   // F6.1: id gia' di una tx non-Casa -> mai duplicare fra store
     for (var attempt = 0; attempt < 6; attempt++){
       var local = await DB().get(store, remote.id);
       if (identico(local, remote)) return "identical";                       // no-op
@@ -8189,7 +8432,11 @@ if ("serviceWorker" in navigator){
       var o = { noIntent: true, expect: expect, expectAbsent: !local };
       if (opts.noProjection) o.noProjection = true;                          // F4/7F: FIRST PULL join, nessuna proiezione Personale
       try {
-        if (recordType === "transaction"){
+        if (isCasa){   // F6.1: record Casa -> store "casa", nessuna proiezione Personale
+          var csrc = Object.assign({}, remote);
+          csrc.createdAt = (local && local.createdAt != null) ? local.createdAt : Date.now();
+          await commitSharedRecordWithIntent("transaction", space, csrc, o);
+        } else if (recordType === "transaction"){
           var src = Object.assign({}, remote);
           src.createdAt = (local && local.createdAt != null) ? local.createdAt : Date.now();
           src.updatedAt = Date.now();
@@ -8286,8 +8533,8 @@ if ("serviceWorker" in navigator){
     var list = await listQuarantine(spaceId), removed = [];
     var NW = window.nativeSyncBoundary.nativeWinner;
     for (var i = 0; i < list.length; i++){
-      var q = list[i], store = SYNC_TYPES[q.recordType]; if (!store) continue;
-      var cur = await DB().get(store, q.recordId);
+      var q = list[i]; if (!SYNC_TYPES[q.recordType]) continue;
+      var cur = await getSyncSource(q.recordType, q.recordId);   // F6.1: anche store casa
       if (!cur || !Number.isInteger(cur.version)) continue;
       var qRec = { version: q.version | 0, deviceId: q.deviceId, deleted: q.deleted === true };
       var curRec = { version: cur.version | 0, deviceId: cur.deviceId, deleted: cur.deleted === true };
@@ -8341,6 +8588,17 @@ if ("serviceWorker" in navigator){
       return { res: res };
     }
     var localSeq = await getSyncSeq(spaceId);
+    // F6 — una versione precedente metteva in quarantena le entrate (boundary-invalid) e avanzava il cursor:
+    // UNA sola volta per spazio riparte da 0 (idempotente: i record identici sono no-op) per recuperarle.
+    // Il flag si scrive SOLO dopo un apply riuscito: se il pull fallisce (offline/5xx) si ritenta al prossimo.
+    // F6.1 — chiave nuova: un client pre-F6.1 mette in quarantena anche i record Casa; dopo l'aggiornamento
+    // riparte da 0 UNA volta in piu' (idempotente) per recuperarli.
+    var flagF6 = "repullF6.1:" + spaceId, segnaF6 = false;
+    if (localSeq > 0 && !(await DB().meta.get(flagF6))){
+      var qF6 = await listQuarantine(spaceId);
+      if (qF6.some(function(q){ return q.reason === "boundary-invalid"; })){ localSeq = 0; segnaF6 = true; }
+      else await DB().meta.set(flagF6, 1);
+    }
     var r = await fetchSince(localSeq);
     if (r.net) return { ok: false, reason: "offline" };                       // cursor invariato
     var res = r.res;
@@ -8358,7 +8616,9 @@ if ("serviceWorker" in navigator){
     if (res.status !== 200) return { ok: false, reason: "http-" + res.status };
     var body; try { body = await res.json(); } catch(e){ throw new Error("malformed-body"); }
     if (!body || typeof body.seq !== "number" || !Array.isArray(body.records)) throw new Error("malformed-body");
-    return await applyBatch(spaceId, space, self, body.records, body.seq);
+    var outB = await applyBatch(spaceId, space, self, body.records, body.seq);
+    if (segnaF6 && outB && outB.ok) await DB().meta.set(flagF6, 1);
+    return outB;
   }
 
   /* F4 · Passo 7F — Native Invite / Join / claimSelf.
@@ -8651,6 +8911,8 @@ if ("serviceWorker" in navigator){
     setSpaceCapability: setSpaceCapability,
     getSpaceCapability: getSpaceCapability,
     ensureSpaceCapability: ensureSpaceCapability,
+    uploadSpaceFile: uploadSpaceFile,       // F6.3
+    downloadSpaceFile: downloadSpaceFile,   // F6.3
     deliverPending: deliverPending,
     pullSpace: pullSpace,
     pendingPullRecovery: pendingPullRecovery,   // F4/7G-O2b: diagnostica read-only (spazi con recovery irrisolta, targetSeq)
@@ -10107,6 +10369,605 @@ if ("serviceWorker" in navigator){
 /* F4P7D-SYNC-END */
 </script>
 <!-- ==== /MODULE: native-sync commit layer ==== -->
+<!-- ==== MODULE: casa-runtime (F6.1) ==== -->
+<script>
+"use strict";
+/* F6.1 — motore «Casa» (nessuna UI). Spazio ongoing nativo E2EE; tre tipi sincronizzati
+   (casaTenant, casaMove, casaDebt) nello store "casa", sul filo come recordType "transaction".
+   Write-path: guardie di sharedRuntime + commit atomico record+intent cifrato con CAS (7D2).
+   Calcoli PURI (nessun I/O, nessun Date.now()): conto del mese, saldo, divisione utile, debiti, ritardi.
+   Importi in centesimi interi; date YYYY-MM-DD (la data di riferimento arriva sempre come parametro). */
+/* F6P1-CASA-START */
+(function(){
+  function DB(){ return window.calculonDB; }
+  function NB(){ return window.nativeSyncBoundary; }
+  function SR(){ return window.sharedRuntime; }
+  function dev(){ return (typeof DEV !== "undefined" && DEV) ? DEV : "local"; }
+  function own(o, k){ return Object.prototype.hasOwnProperty.call(o, k); }
+  function base(cur){ return { version: cur.version, deviceId: cur.deviceId, deleted: cur.deleted === true }; }
+
+  var TENANT_FIELDS = ["name", "room", "phone", "rentMonthly", "startDate", "endDate", "excludedExtras", "note"];
+  var DEBT_FIELDS   = ["debtor", "creditorMemberId", "creditorName", "initialAmount", "monthlyInstallment", "startDate", "note"];
+  var MOVE_FIELDS = {   // campi ammessi per moveType (oltre a date, amount, note)
+    rent: ["tenantId", "month"], billShare: ["tenantId", "billId"],
+    bill: ["supplier", "period", "extra", "shares", "pdfRef"], expense: ["supplier"],
+    debtPayment: ["debtId"], adjustment: ["reason"], debtAdjustment: ["debtId", "reason"]
+  };
+  var CASH_IN = { rent: 1, billShare: 1 }, CASH_OUT = { bill: 1, expense: 1, debtPayment: 1 };
+
+  // ---------------- helper puri ----------------
+  function monthOf(d){ return String(d).slice(0, 7); }
+  function nextMonth(m){ var y = +m.slice(0, 4), mo = +m.slice(5, 7) + 1; if (mo > 12){ mo = 1; y++; } return y + "-" + (mo < 10 ? "0" : "") + mo; }
+  function normExtra(s){ return String(s).toLowerCase().replace(/\s+/g, ""); }
+  function vivi(arr){ return (arr || []).filter(function(r){ return r && r.deleted !== true; }); }
+  function byStart(a, b){ return a.startDate < b.startDate ? -1 : a.startDate > b.startDate ? 1 : (a.id < b.id ? -1 : a.id > b.id ? 1 : 0); }
+  function tenantActiveIn(t, month){ return monthOf(t.startDate) <= month && (t.endDate == null || monthOf(t.endDate) >= month); }
+  function tenantActiveOn(t, date){ return t.startDate <= date && (t.endDate == null || t.endDate >= date); }
+  // ripartizione intera: i primi `resto` ricevono +1 centesimo (deterministico nell'ordine dato)
+  function parti(total, n){ var q = Math.floor(total / n), r = total - q * n, out = []; for (var i = 0; i < n; i++) out.push(q + (i < r ? 1 : 0)); return out; }
+
+  // Quote di una bolletta in parti uguali; la voce a parte (extra) solo fra chi non la esclude.
+  // tenants: [{id, excludedExtras}] nell'ordine voluto. Ritorna [{tenantId, amount}], somma = amount.
+  function computeBillShares(amount, extra, tenants){
+    if (!Number.isInteger(amount) || amount <= 0) throw new Error("importo bolletta non intero/<=0");
+    if (!Array.isArray(tenants) || tenants.length === 0) throw new Error("nessun inquilino per le quote");
+    var extraAmt = 0, payers = tenants;
+    if (extra != null){
+      if (!extra.name || !Number.isInteger(extra.amount) || extra.amount <= 0 || extra.amount > amount) throw new Error("voce a parte non valida");
+      extraAmt = extra.amount;
+      payers = tenants.filter(function(t){ return !(t.excludedExtras || []).some(function(x){ return normExtra(x) === normExtra(extra.name); }); });
+      if (payers.length === 0) throw new Error("voce a parte esclusa da tutti gli inquilini");
+    }
+    var b = parti(amount - extraAmt, tenants.length), e = parti(extraAmt, payers.length), out = [];
+    for (var i = 0; i < tenants.length; i++){
+      var j = payers.indexOf(tenants[i]);
+      out.push({ tenantId: tenants[i].id, amount: b[i] + (j >= 0 ? e[j] : 0) });
+    }
+    return out;
+  }
+
+  // Divide un importo fra i membri secondo splitBp {memberId: basis point, somma 10000}; l'ultimo prende il resto.
+  function splitProfit(total, members, splitBp){
+    var out = {}, ids = members.slice(), assigned = 0;
+    if (ids.length === 0) return out;
+    var bp = splitBp || {}; if (!splitBp){ var eq = parti(10000, ids.length); ids.forEach(function(id, i){ bp[id] = eq[i]; }); }
+    for (var i = 0; i < ids.length; i++){
+      var v = (i === ids.length - 1) ? total - assigned : (total >= 0 ? Math.floor(total * (bp[ids[i]] | 0) / 10000) : -Math.floor(-total * (bp[ids[i]] | 0) / 10000));
+      out[ids[i]] = v; assigned += v;
+    }
+    return out;
+  }
+
+  // Conto del mese (solo denaro davvero entrato/uscito, per data di cassa). Le rettifiche contano nel saldo, non nell'utile.
+  function monthCash(moves, month){
+    var income = 0, expense = 0, balance = 0;
+    vivi(moves).forEach(function(m){
+      var mm = monthOf(m.date);
+      var signed = CASH_IN[m.moveType] ? m.amount : CASH_OUT[m.moveType] ? -m.amount : (m.moveType === "adjustment" ? m.amount : 0);
+      if (mm <= month) balance += signed;
+      if (mm === month){ if (CASH_IN[m.moveType]) income += m.amount; else if (CASH_OUT[m.moveType]) expense += m.amount; }
+    });
+    return { income: income, expense: expense, profit: income - expense, balance: balance };
+  }
+
+  // Registro dei debiti fino a fine `month`. Eventi del mese: rettifiche (+ aumenta, - riduce) e rate
+  // pagate dal conto; poi, se il mese e' in utile, la quota di ogni membro scala i suoi debiti verso
+  // l'altro membro finche' > 0. Mese in perdita: nessun movimento da utile (il debito resta fermo).
+  function debtLedger(data, month, opts){
+    opts = opts || {};
+    var debts = vivi(data.debts).slice().sort(byStart), moves = vivi(data.moves), members = opts.members || [];
+    var bal = {}, history = [], first = null;
+    debts.forEach(function(d){ bal[d.id] = d.initialAmount; var sm = monthOf(d.startDate); if (first === null || sm < first) first = sm; });
+    var before = {};
+    if (first === null) return { balances: bal, before: before, history: history };
+    for (var m = first; m <= month; m = nextMonth(m)){
+      if (m === month) debts.forEach(function(d){ before[d.id] = bal[d.id]; });
+      var started = debts.filter(function(d){ return monthOf(d.startDate) <= m; });
+      started.forEach(function(d){
+        var sm = monthOf(d.startDate);
+        moves.forEach(function(x){
+          if (x.debtId !== d.id) return;
+          var em = monthOf(x.date); if (em < sm) em = sm;   // eventi antecedenti all'inizio: al mese d'inizio
+          if (em !== m) return;
+          if (x.moveType === "debtAdjustment"){ bal[d.id] += x.amount; history.push({ month: m, debtId: d.id, kind: "adjustment", moveId: x.id, amount: x.amount, reason: x.reason }); }
+          else if (x.moveType === "debtPayment"){ bal[d.id] -= x.amount; history.push({ month: m, debtId: d.id, kind: "payment", moveId: x.id, amount: -x.amount }); }
+        });
+      });
+      var cash = monthCash(moves, m);
+      if (cash.profit > 0 && members.length){
+        var shares = splitProfit(cash.profit, members, opts.splitBp);
+        members.forEach(function(mid){
+          var rem = shares[mid];
+          started.forEach(function(d){
+            if (rem <= 0 || d.debtor !== mid || !d.creditorMemberId || members.indexOf(d.creditorMemberId) < 0 || bal[d.id] <= 0) return;
+            var off = Math.min(rem, bal[d.id]); bal[d.id] -= off; rem -= off;
+            history.push({ month: m, debtId: d.id, kind: "profitShare", memberId: mid, amount: -off });
+          });
+        });
+      }
+    }
+    return { balances: bal, before: before, history: history };
+  }
+
+  // Riepilogo del mese: entrate, uscite, utile, saldo cumulato, divisione e scalata dei debiti.
+  // opts.members = [memberId...] (ordine stabile), opts.splitBp opzionale (default parti uguali).
+  function monthSummary(data, month, opts){
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(month))) throw new Error("mese non valido: " + month);
+    opts = opts || {};
+    var members = opts.members || [];
+    var cash = monthCash(data.moves, month);
+    var shares = cash.profit > 0 ? splitProfit(cash.profit, members, opts.splitBp) : {};
+    var led = debtLedger(data, month, opts), toDebt = {};
+    members.forEach(function(mid){ toDebt[mid] = 0; if (!own(shares, mid)) shares[mid] = 0; });
+    led.history.forEach(function(h){ if (h.month === month && h.kind === "profitShare") toDebt[h.memberId] += -h.amount; });
+    var debts = vivi(data.debts).map(function(d){ return { debtId: d.id, before: own(led.before, d.id) ? led.before[d.id] : null, after: led.balances[d.id] }; });
+    return { month: month, income: cash.income, expense: cash.expense, profit: cash.profit, balance: cash.balance,
+      shares: shares, toDebt: toDebt, debts: debts };
+  }
+
+  // Dovuto/pagato/mancante per inquilino nel mese. Dovuto = affitto (inquilino attivo nel mese) + sue
+  // quote delle bollette datate nel mese. «In ritardo» solo DOPO la fine del mese: asOf >= 1° del mese dopo.
+  function tenantStatus(data, month, asOf){
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(month))) throw new Error("mese non valido: " + month);
+    if (typeof asOf !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) throw new Error("asOf deve essere YYYY-MM-DD");
+    var moves = vivi(data.moves), bills = moves.filter(function(m){ return m.moveType === "bill" && monthOf(m.date) === month; });
+    var billIds = {}; bills.forEach(function(b){ billIds[b.id] = true; });
+    var late = asOf >= nextMonth(month) + "-01";
+    var rows = vivi(data.tenants).slice().sort(byStart).map(function(t){
+      var rentDue = tenantActiveIn(t, month) ? t.rentMonthly : 0, billsDue = 0, paid = 0;
+      bills.forEach(function(b){ (b.shares || []).forEach(function(q){ if (q.tenantId === t.id) billsDue += q.amount; }); });
+      moves.forEach(function(m){
+        if (m.tenantId !== t.id) return;
+        if (m.moveType === "rent" && m.month === month) paid += m.amount;
+        else if (m.moveType === "billShare" && billIds[m.billId]) paid += m.amount;
+      });
+      var due = rentDue + billsDue, missing = Math.max(0, due - paid);
+      return { tenantId: t.id, name: t.name, rentDue: rentDue, billsDue: billsDue, due: due, paid: paid, missing: missing, late: late && missing > 0 };
+    }).filter(function(r){ return r.due > 0 || r.paid > 0; });
+    var tot = rows.reduce(function(a, r){ return { due: a.due + r.due, paid: a.paid + r.paid, missing: a.missing + r.missing }; }, { due: 0, paid: 0, missing: 0 });
+    return { month: month, asOf: asOf, tenants: rows, totals: tot };
+  }
+
+  // ---------------- write-path ----------------
+  async function spazioCasa(spaceId){
+    var sp = await SR()._spazioScrivibile(spaceId);   // nativo, active, join ready, self valido
+    if (sp.kind !== "ongoing") throw new Error("casa: serve uno spazio ongoing");
+    return sp;
+  }
+  async function listAll(spaceId){ return await DB().list("casa", function(r){ return r && r.spaceId === spaceId; }); }
+  async function list(spaceId){
+    if (!spaceId) throw new Error("spaceId richiesto");
+    var all = vivi(await listAll(spaceId));
+    return { tenants: all.filter(function(r){ return r.type === "casaTenant"; }),
+             moves: all.filter(function(r){ return r.type === "casaMove"; }),
+             debts: all.filter(function(r){ return r.type === "casaDebt"; }) };
+  }
+  async function vivo(spaceId, id, type){
+    var r = id ? await DB().get("casa", id) : null;
+    if (!r || r.spaceId !== spaceId || r.deleted === true) throw new Error("record casa inesistente: " + id);
+    if (type && r.type !== type) throw new Error("tipo atteso " + type + ", trovato " + r.type);
+    return r;
+  }
+  // Riferimenti ad altri record dello spazio (fail-closed). Il boundary resta solo strutturale.
+  // Su update si verificano solo i riferimenti NUOVI: uno gia' presente puo' restare (storico).
+  async function verificaRiferimenti(sp, rec, cur){
+    function nuovoRif(f){ return rec[f] && (!cur || rec[f] !== cur[f]); }
+    if (rec.type === "casaDebt"){
+      var ms = {}; (await SR().listMembers(sp.id)).forEach(function(m){ ms[m.id] = true; });
+      if (nuovoRif("debtor") && rec.debtor !== "both" && !ms[rec.debtor]) throw new Error("debitore non membro: " + rec.debtor);
+      if (nuovoRif("creditorMemberId") && !ms[rec.creditorMemberId]) throw new Error("creditore non membro: " + rec.creditorMemberId);
+      return;
+    }
+    if (rec.type !== "casaMove") return;
+    if (nuovoRif("tenantId")) await vivo(sp.id, rec.tenantId, "casaTenant");
+    if (nuovoRif("billId")){ var b = await vivo(sp.id, rec.billId, "casaMove"); if (b.moveType !== "bill") throw new Error("billId non e' una bolletta"); }
+    if (nuovoRif("debtId")) await vivo(sp.id, rec.debtId, "casaDebt");
+    if (rec.moveType === "bill"){
+      var gia = {}; ((cur && cur.shares) || []).forEach(function(q){ gia[q.tenantId] = true; });
+      for (var i = 0; i < rec.shares.length; i++) if (!gia[rec.shares[i].tenantId]) await vivo(sp.id, rec.shares[i].tenantId, "casaTenant");
+    }
+  }
+  async function commit(sp, rec, cur){
+    var err = NB().validateCasaRecord(rec); if (err) throw new Error("casa: " + err);
+    await verificaRiferimenti(sp, rec, cur);
+    await window.nativeSync._commitSharedRecordWithIntent("transaction", sp, rec, cur ? { expect: base(cur) } : { expectAbsent: true });
+    return rec.id;
+  }
+  function copia(dst, src, fields){ fields.forEach(function(f){ if (own(src, f)) dst[f] = src[f]; }); return dst; }
+  function nuovo(sp, type){
+    var now = Date.now();
+    return { id: sp.id + ":" + codice(8), spaceId: sp.id, type: type, note: null,
+      version: 1, deviceId: dev(), createdAt: now, updatedAt: now, updatedBy: sp.selfMemberId || null, deleted: false };
+  }
+  function bump(sp, cur, patch){
+    ["id", "spaceId", "type", "moveType"].forEach(function(f){ if (own(patch, f) && patch[f] !== cur[f]) throw new Error(f + " immutabile"); });
+    return Object.assign({}, cur, { version: (cur.version | 0) + 1, deviceId: dev(), updatedAt: Date.now(), updatedBy: sp.selfMemberId || null, deleted: false });
+  }
+  async function quoteAutomatiche(spaceId, amount, extra, date){
+    var ts = (await list(spaceId)).tenants.filter(function(t){ return tenantActiveOn(t, date); }).sort(byStart);
+    return computeBillShares(amount, extra, ts);
+  }
+
+  async function createTenant(spaceId, input){
+    var sp = await spazioCasa(spaceId); input = input || {};
+    var rec = copia(Object.assign(nuovo(sp, "casaTenant"), { room: null, phone: null, endDate: null, excludedExtras: [] }), input, TENANT_FIELDS);
+    return commit(sp, rec, null);
+  }
+  async function createDebt(spaceId, input){
+    var sp = await spazioCasa(spaceId); input = input || {};
+    var rec = copia(Object.assign(nuovo(sp, "casaDebt"), { creditorMemberId: null, creditorName: null, monthlyInstallment: null }), input, DEBT_FIELDS);
+    return commit(sp, rec, null);
+  }
+  async function createMove(spaceId, input){
+    var sp = await spazioCasa(spaceId); input = input || {};
+    var mt = input.moveType; if (!own(MOVE_FIELDS, mt)) throw new Error("moveType sconosciuto: " + mt);
+    var rec = copia(Object.assign(nuovo(sp, "casaMove"), { moveType: mt }), input, ["date", "amount", "note"].concat(MOVE_FIELDS[mt]));
+    if (mt === "bill"){
+      if (!own(rec, "extra")) rec.extra = null;
+      if (!own(rec, "pdfRef")) rec.pdfRef = null;
+      if (!own(rec, "shares")) rec.shares = await quoteAutomatiche(spaceId, rec.amount, rec.extra, rec.date);   // parti uguali
+    }
+    return commit(sp, rec, null);
+  }
+  async function update(spaceId, id, patch, type){
+    var sp = await spazioCasa(spaceId), cur = await vivo(spaceId, id, type); patch = patch || {};
+    var fields = type === "casaTenant" ? TENANT_FIELDS : type === "casaDebt" ? DEBT_FIELDS : ["date", "amount", "note"].concat(MOVE_FIELDS[cur.moveType]);
+    var rec = copia(bump(sp, cur, patch), patch, fields);
+    // bolletta: importo o voce a parte cambiati senza quote nuove -> ricalcolo in parti uguali
+    if (type === "casaMove" && cur.moveType === "bill" && !own(patch, "shares") && (rec.amount !== cur.amount || JSON.stringify(rec.extra) !== JSON.stringify(cur.extra)))
+      rec.shares = await quoteAutomatiche(spaceId, rec.amount, rec.extra, rec.date);
+    return commit(sp, rec, cur);
+  }
+  async function remove(spaceId, id){   // tombstone causale (+1)
+    var sp = await spazioCasa(spaceId), cur = await vivo(spaceId, id);
+    var rec = Object.assign(bump(sp, cur, {}), { deleted: true });
+    await window.nativeSync._commitSharedRecordWithIntent("transaction", sp, rec, { expect: base(cur) });
+    return id;
+  }
+  async function restore(spaceId, id){
+    var sp = await spazioCasa(spaceId), cur = await DB().get("casa", id);
+    if (!cur || cur.spaceId !== spaceId) throw new Error("record casa inesistente: " + id);
+    if (cur.deleted !== true) return id;
+    return commit(sp, bump(sp, cur, {}), cur);
+  }
+
+  // Ripartizione dell'utile: shareRule percent dello spazio se presente, altrimenti parti uguali.
+  async function splitOpts(spaceId){
+    var members = (await SR().listMembers(spaceId)).filter(function(m){ return m.active !== false; })
+      .sort(function(a, b){ return (a.createdAt || 0) - (b.createdAt || 0) || (a.id < b.id ? -1 : 1); }).map(function(m){ return m.id; });
+    var rule = await SR().getShareRule(spaceId), splitBp = null;
+    if (rule && rule.mode === "percent"){ splitBp = {}; rule.parts.forEach(function(p){ splitBp[p.memberId] = p.value; }); }
+    return { members: members, splitBp: splitBp };
+  }
+  async function report(spaceId, month, asOf){
+    var data = await list(spaceId), o = await splitOpts(spaceId);
+    return { summary: monthSummary(data, month, o), tenants: tenantStatus(data, month, asOf) };
+  }
+
+  // ---------------- test (harness ermetico runAllF4) ----------------
+  async function throwsA(fn){ try { await fn(); return false; } catch(e){ return true; } }
+  // Esempio della bozza 3 (novembre) su uno spazio ongoing nuovo. Ritorna gli id utili ai test.
+  async function seedNovembre(){
+    var C = window.casaRuntime;
+    var made = await SR().createSpace({ kind: "ongoing", name: "Casa Via Roma", selfName: "Giovanni" });
+    var SP = made.spaceId, G = made.selfMemberId, S = await SR().addMember(SP, { name: "Sorella" });
+    var tM = await C.createTenant(SP, { name: "Marco", room: "1", rentMonthly: 45000, startDate: "2026-09-01" });
+    var tG = await C.createTenant(SP, { name: "Giulia", room: "2", rentMonthly: 45000, startDate: "2026-09-01" });
+    var tL = await C.createTenant(SP, { name: "Luca", room: "3", rentMonthly: 40000, startDate: "2026-09-01", excludedExtras: ["canoneTV"] });
+    var dS = await C.createDebt(SP, { debtor: G, creditorMemberId: S, initialAmount: 300000, startDate: "2026-11-01" });
+    var dP = await C.createDebt(SP, { debtor: "both", creditorName: "Papà", initialAmount: 2400000, monthlyInstallment: 30000, startDate: "2026-11-01" });
+    await C.createMove(SP, { moveType: "adjustment", date: "2026-10-31", amount: 214000, reason: "saldo iniziale del conto" });
+    await C.createMove(SP, { moveType: "rent", date: "2026-11-05", amount: 45000, tenantId: tM, month: "2026-11" });
+    await C.createMove(SP, { moveType: "rent", date: "2026-11-05", amount: 45000, tenantId: tG, month: "2026-11" });
+    var bLuce = await C.createMove(SP, { moveType: "bill", date: "2026-11-06", amount: 18600, supplier: "Enel luce", period: "set–ott", extra: { name: "Canone TV", amount: 900 } });
+    var bGas = await C.createMove(SP, { moveType: "bill", date: "2026-11-06", amount: 12000, supplier: "Gas", period: "set–ott" });
+    await C.createMove(SP, { moveType: "billShare", date: "2026-11-07", amount: 6350, tenantId: tM, billId: bLuce });
+    await C.createMove(SP, { moveType: "billShare", date: "2026-11-07", amount: 4000, tenantId: tM, billId: bGas });
+    var rP = await C.createMove(SP, { moveType: "debtPayment", date: "2026-11-10", amount: 30000, debtId: dP, note: "Rata papà" });
+    return { SP: SP, G: G, S: S, tM: tM, tG: tG, tL: tL, dS: dS, dP: dP, bLuce: bLuce, bGas: bGas, rP: rP };
+  }
+  function rowOf(st, id){ return st.tenants.filter(function(r){ return r.tenantId === id; })[0] || null; }
+  function debtOf(sum, id){ return sum.debts.filter(function(d){ return d.debtId === id; })[0] || null; }
+
+  async function TEST_ENGINE(){
+    var r = [], ok = function(n, c){ r.push({ name: n, pass: !!c }); };
+    var C = window.casaRuntime;
+    // --- puri ---
+    var T3 = [{ id: "m", excludedExtras: [] }, { id: "g", excludedExtras: [] }, { id: "l", excludedExtras: ["canoneTV"] }];
+    var q = C.computeBillShares(18600, { name: "Canone TV", amount: 900 }, T3);
+    ok("quote luce: 63,50 / 63,50 / 59,00 (canone solo ai non esclusi, nome normalizzato)", q[0].amount === 6350 && q[1].amount === 6350 && q[2].amount === 5900);
+    ok("quote gas: 40 a testa", C.computeBillShares(12000, null, T3).every(function(x){ return x.amount === 4000; }));
+    var q100 = C.computeBillShares(100, null, T3);
+    ok("quote: resto deterministico, somma = importo", q100[0].amount === 34 && q100[1].amount === 33 && q100[2].amount === 33);
+    ok("quote: voce a parte esclusa da tutti -> throw", await throwsA(function(){ return C.computeBillShares(1000, { name: "canoneTV", amount: 100 }, [T3[2]]); }));
+    var sp1 = C.splitProfit(39751, ["a", "b"]);
+    ok("split 50/50: ultimo prende il resto", sp1.a === 19875 && sp1.b === 19876);
+    var sp2 = C.splitProfit(10000, ["a", "b"], { a: 6000, b: 4000 });
+    ok("split configurabile 60/40", sp2.a === 6000 && sp2.b === 4000);
+
+    // --- esempio bozza: novembre ---
+    var X = await seedNovembre(), SP = X.SP;
+    var luce = await DB().get("casa", X.bLuce);
+    function quotaDi(b, tid){ return b.shares.filter(function(s){ return s.tenantId === tid; })[0].amount; }
+    ok("bolletta luce: quote automatiche Marco 63,50 / Giulia 63,50 / Luca 59,00", quotaDi(luce, X.tM) === 6350 && quotaDi(luce, X.tG) === 6350 && quotaDi(luce, X.tL) === 5900 && luce.shares.length === 3 && luce.pdfRef === null);
+    var rep = await C.report(SP, "2026-11", "2026-11-30"), sm = rep.summary;
+    ok("nov: entrate 1.003,50", sm.income === 100350);
+    ok("nov: uscite 606,00 (rata papà compresa)", sm.expense === 60600);
+    ok("nov: utile 397,50", sm.profit === 39750);
+    ok("nov: saldo cumulato 2.537,50 (rettifica iniziale nel saldo, non nell'utile)", sm.balance === 253750);
+    ok("nov: 198,75 a testa", sm.shares[X.G] === 19875 && sm.shares[X.S] === 19875);
+    ok("nov: la metà di Giovanni scala il debito", sm.toDebt[X.G] === 19875 && sm.toDebt[X.S] === 0);
+    var dS = debtOf(sm, X.dS), dP = debtOf(sm, X.dP);
+    ok("nov: debito sorella 3.000,00 -> 2.801,25", dS.before === 300000 && dS.after === 280125);
+    ok("nov: debito papà scende della rata", dP.before === 2400000 && dP.after === 2370000);
+    var st = rep.tenants;
+    ok("nov: Marco in regola", rowOf(st, X.tM).missing === 0 && rowOf(st, X.tM).paid === 55350);
+    ok("nov: Luca manca 499,00", rowOf(st, X.tL).missing === 49900 && rowOf(st, X.tL).rentDue === 40000 && rowOf(st, X.tL).billsDue === 9900);
+    ok("nov: Giulia manca 103,50", rowOf(st, X.tG).missing === 10350);
+    ok("nov: totali dovuto 1.606 / pagato 1.003,50 / manca 602,50", st.totals.due === 160600 && st.totals.paid === 100350 && st.totals.missing === 60250);
+    ok("nov al 30/11: nessuno in ritardo", st.tenants.every(function(t){ return t.late === false; }));
+    var st2 = C.tenantStatus(await C.list(SP), "2026-11", "2026-12-01");
+    ok("nov al 1/12: Luca e Giulia in ritardo, Marco no", rowOf(st2, X.tL).late && rowOf(st2, X.tG).late && !rowOf(st2, X.tM).late);
+
+    // --- ritardo: 31 del mese vs 1° del mese dopo (ottobre non pagato) ---
+    var data = await C.list(SP);
+    ok("ott al 31/10: Luca non ancora in ritardo", rowOf(C.tenantStatus(data, "2026-10", "2026-10-31"), X.tL).late === false);
+    ok("ott al 1/11: Luca in ritardo", rowOf(C.tenantStatus(data, "2026-10", "2026-11-01"), X.tL).late === true);
+    ok("tenantStatus: asOf obbligatorio", await throwsA(function(){ return C.tenantStatus(data, "2026-10"); }));
+
+    // --- mese in perdita: debito fermo; poi mese in utile + rettifica ---
+    await C.createMove(SP, { moveType: "expense", date: "2026-12-03", amount: 50000, note: "caldaia" });
+    var dic = (await C.report(SP, "2026-12", "2026-12-31")).summary;
+    ok("dic: utile negativo", dic.profit === -50000);
+    ok("dic: in perdita il debito resta fermo", debtOf(dic, X.dS).before === 280125 && debtOf(dic, X.dS).after === 280125);
+    ok("dic: nessuna quota al debito", dic.toDebt[X.G] === 0 && dic.shares[X.G] === 0);
+    await C.createMove(SP, { moveType: "rent", date: "2027-01-05", amount: 45000, tenantId: X.tM, month: "2027-01" });
+    await C.createMove(SP, { moveType: "debtAdjustment", date: "2027-01-10", amount: -20000, debtId: X.dS, reason: "Le ho dato contanti" });
+    var gen = (await C.report(SP, "2027-01", "2027-01-31")).summary;
+    ok("gen: rettifica -200 e metà utile 225 scalano il debito", debtOf(gen, X.dS).after === 280125 - 20000 - 22500);
+    ok("gen: rettifica del debito non è denaro del conto", gen.income === 45000 && gen.expense === 0);
+
+    // --- quote a mano ---
+    var hand = await C.createMove(SP, { moveType: "bill", date: "2026-11-20", amount: 18600, supplier: "Acqua",
+      shares: [{ tenantId: X.tM, amount: 10000 }, { tenantId: X.tG, amount: 5000 }, { tenantId: X.tL, amount: 3600 }] });
+    ok("quote a mano: salvate come date", (await DB().get("casa", hand)).shares[2].amount === 3600);
+    ok("quote a mano: somma != importo respinta", await throwsA(function(){ return C.createMove(SP, { moveType: "bill", date: "2026-11-20", amount: 18600, shares: [{ tenantId: X.tM, amount: 18000 }] }); }));
+    ok("quote a mano: inquilino inesistente respinto", await throwsA(function(){ return C.createMove(SP, { moveType: "bill", date: "2026-11-20", amount: 100, shares: [{ tenantId: SP + ":nessuno", amount: 100 }] }); }));
+    await C.updateMove(SP, hand, { shares: [{ tenantId: X.tM, amount: 6200 }, { tenantId: X.tG, amount: 6200 }, { tenantId: X.tL, amount: 6200 }] });
+    var h2 = await DB().get("casa", hand);
+    ok("update quote a mano: version 2", h2.version === 2 && h2.shares[0].amount === 6200);
+    await C.updateMove(SP, hand, { amount: 12000 });
+    ok("update importo senza quote: ricalcolo in parti uguali", (await DB().get("casa", hand)).shares.every(function(s){ return s.amount === 4000; }));
+    ok("Luca: le quote dell'acqua entrano nel suo dovuto", rowOf(C.tenantStatus(await C.list(SP), "2026-11", "2026-12-01"), X.tL).billsDue === 9900 + 4000);
+
+    // --- modifica / elimina / ripristina ---
+    await C.updateTenant(SP, X.tL, { rentMonthly: 42000, phone: "333" });
+    var lu = await DB().get("casa", X.tL);
+    ok("updateTenant: version 2, autore = self", lu.version === 2 && lu.rentMonthly === 42000 && lu.updatedBy === X.G && lu.phone === "333");
+    ok("type/moveType immutabili", await throwsA(function(){ return C.updateMove(SP, hand, { moveType: "expense" }); }));
+    await C.deleteMove(SP, X.rP);
+    var del = await DB().get("casa", X.rP);
+    ok("delete: tombstone version+1", del.deleted === true && del.version === 2);
+    ok("delete: la rata non conta più", (await C.report(SP, "2026-11", "2026-11-30")).summary.expense === 18600 + 12000 + 12000);
+    await C.restore(SP, X.rP);
+    ok("restore: viva, version 3", (await DB().get("casa", X.rP)).deleted === false && (await DB().get("casa", X.rP)).version === 3);
+
+    // --- validazione fail-closed ---
+    ok("rent senza mese respinto", await throwsA(function(){ return C.createMove(SP, { moveType: "rent", date: "2026-11-01", amount: 1, tenantId: X.tM }); }));
+    ok("rettifica senza motivo respinta", await throwsA(function(){ return C.createMove(SP, { moveType: "adjustment", date: "2026-11-01", amount: -5 }); }));
+    ok("importo 0 respinto", await throwsA(function(){ return C.createMove(SP, { moveType: "expense", date: "2026-11-01", amount: 0 }); }));
+    ok("importo non intero respinto", await throwsA(function(){ return C.createMove(SP, { moveType: "expense", date: "2026-11-01", amount: 10.5 }); }));
+    ok("debito con due creditori respinto", await throwsA(function(){ return C.createDebt(SP, { debtor: X.G, creditorMemberId: X.S, creditorName: "Papà", initialAmount: 1, startDate: "2026-11-01" }); }));
+    ok("debitore non membro respinto", await throwsA(function(){ return C.createDebt(SP, { debtor: SP + ":x", creditorName: "Papà", initialAmount: 1, startDate: "2026-11-01" }); }));
+    var ex = await SR().createSpace({ kind: "experience", name: "Vacanza", selfName: "Gio" });
+    ok("spazio experience respinto", await throwsA(function(){ return C.createTenant(ex.spaceId, { name: "X", rentMonthly: 1, startDate: "2026-11-01" }); }));
+    ok("nessun record Casa nello store transactions", (await DB().list("transactions", function(t){ return t && t.spaceId === SP; })).length === 0);
+    var bz = await SR().balances(SP);
+    ok("saldi dello spazio invariati (nessuna tx)", bz[X.G] === 0 && bz[X.S] === 0 && Object.keys(bz).length === 2);
+
+    var fails = r.filter(function(x){ return !x.pass; });
+    return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+  }
+
+  async function TEST_SYNC(){
+    var r = [], ok = function(n, c){ r.push({ name: n, pass: !!c }); };
+    var C = window.casaRuntime, B = NB(), CR = window.nativeCrypto, NS = window.nativeSync;
+    var X = await seedNovembre(), SP = X.SP, space = await DB().get("spaces", SP);
+    var ten = await DB().get("casa", X.tL), bill = await DB().get("casa", X.bLuce), debt = await DB().get("casa", X.dS);
+    // --- boundary ---
+    ok("boundary: inquilino syncabile", B.isSyncableSharedRecord(ten) === true);
+    ok("boundary: bolletta syncabile", B.isSyncableSharedRecord(bill) === true);
+    ok("boundary: debito syncabile", B.isSyncableSharedRecord(debt) === true);
+    function senza(o, k){ var c = Object.assign({}, o); delete c[k]; return c; }
+    function con(o, k, v){ var c = Object.assign({}, o); c[k] = v; return c; }
+    ok("boundary: senza version respinto", B.isSyncableSharedRecord(senza(ten, "version")) === false);
+    ok("boundary: deviceId vuoto respinto", B.isSyncableSharedRecord(con(ten, "deviceId", "")) === false);
+    ok("boundary: inquilino senza nome respinto", B.isSyncableSharedRecord(senza(ten, "name")) === false);
+    ok("boundary: affitto non intero respinto", B.isSyncableSharedRecord(con(ten, "rentMonthly", 1.5)) === false);
+    ok("boundary: bolletta con quote != importo respinta", B.isSyncableSharedRecord(con(bill, "shares", [{ tenantId: X.tM, amount: 1 }])) === false);
+    ok("boundary: bolletta senza quote respinta", B.isSyncableSharedRecord(senza(bill, "shares")) === false);
+    ok("boundary: moveType sconosciuto respinto", B.isSyncableSharedRecord(con(bill, "moveType", "regalo")) === false);
+    ok("boundary: debito senza creditore respinto", B.isSyncableSharedRecord(con(debt, "creditorMemberId", null)) === false);
+    ok("boundary: Casa nel Personale respinta", B.isSyncableSharedRecord(con(ten, "spaceId", "personal:local")) === false);
+    ok("boundary: tipo casa* sconosciuto respinto", B.isSyncableSharedRecord(con(ten, "type", "casaFoo")) === false);
+    var pj = B.sharedProjectionOfCasa(Object.assign({}, ten, { evil: 1 }));
+    ok("projection: niente createdAt né campi non in allowlist", !("createdAt" in pj) && !("evil" in pj) && pj.name === "Luca" && pj.updatedBy === X.G);
+    ok("projection tx invariata per le spese", B.isCasaRecord({ type: "expense" }) === false);
+
+    // --- intent cifrato su ogni write (recordType "transaction") ---
+    async function intent(id){ return await DB().get("syncOutbox", "sync:" + SP + ":transaction:" + id); }
+    var iT = await intent(X.tL);
+    ok("intent: inquilino v1 come recordType transaction", iT && iT.version === 1 && iT.recordType === "transaction" && iT.status === "pending");
+    var envJ = JSON.stringify(iT.envelope);
+    ok("envelope: nessun dato Casa in chiaro", envJ.indexOf("Luca") < 0 && envJ.indexOf("casaTenant") < 0 && envJ.indexOf("canoneTV") < 0);
+    ok("envelope: id opaco come le tx", X.tL.indexOf(SP + ":") === 0 && X.tL.length === SP.length + 9);
+    var dTen = await CR.decryptSharedEnvelope(iT.envelope);
+    ok("intent: decifra nel record Casa", dTen.type === "casaTenant" && dTen.name === "Luca" && dTen.excludedExtras[0] === "canoneTV");
+    await C.updateTenant(SP, X.tL, { room: "3B" });
+    ok("update: intent v2", (await intent(X.tL)).version === 2);
+    await C.deleteTenant(SP, X.tL);
+    var iDel = await intent(X.tL);
+    ok("delete: intent tombstone v3", iDel.version === 3 && iDel.deleted === true && (await CR.decryptSharedEnvelope(iDel.envelope)).deleted === true);
+
+    // --- round-trip E2EE ---
+    async function rt(rec){ var e = await CR.encryptSharedRecord("transaction", rec); return JSON.stringify(await CR.decryptSharedEnvelope(e)) === JSON.stringify(B.sharedProjectionOfCasa(rec)); }
+    ok("round-trip inquilino", await rt(await DB().get("casa", X.tM)));
+    ok("round-trip bolletta (voce a parte + quote + pdfRef)", await rt(bill));
+    ok("round-trip debito", await rt(debt));
+    ok("round-trip rata papà", await rt(await DB().get("casa", X.rP)));
+    ok("decifrato passa il boundary", B.isSyncableSharedRecord(await CR.decryptSharedEnvelope(await CR.encryptSharedRecord("transaction", bill))) === true);
+
+    // --- inbound: v2 remota applicata nello store casa, senza proiezioni né tx ---
+    var mar = await DB().get("casa", X.tM);
+    var remote = Object.assign({}, mar, { name: "Marco B.", version: 2, deviceId: "devRemoto" });
+    var envR = await CR.encryptSharedRecord("transaction", remote);
+    var a1 = await NS._applyBatch(SP, space, space.selfMemberId, [envR], 50, {});
+    var marL = await DB().get("casa", X.tM);
+    ok("inbound: applicato", a1.applied === 1 && a1.quarantined === 0);
+    ok("inbound: record v2 nello store casa (createdAt locale preservato)", marL.name === "Marco B." && marL.version === 2 && marL.createdAt === mar.createdAt);
+    ok("inbound: nessuna tx/proiezione creata", (await DB().get("transactions", X.tM)) == null && (await DB().list("transactions", function(t){ return t && (t.spaceId === SP || t.sourceSpaceId === SP); })).length === 0);
+    ok("inbound: nessun echo outbound (intent resta v1)", (await intent(X.tM)).version === 1);
+    var a2 = await NS._applyBatch(SP, space, space.selfMemberId, [envR], 51, {});
+    ok("inbound: re-apply idempotente", a2.applied === 0 && a2.quarantined === 0);
+    // record Casa incompleto (bolletta con quote sbagliate) -> quarantena, mai applicato
+    var bad = Object.assign({}, bill, { id: SP + ":badbill1", shares: [{ tenantId: X.tM, amount: 1 }], version: 1, deviceId: "devRemoto" });
+    var envB = await CR.encryptSharedRecord("transaction", bad);
+    var a3 = await NS._applyBatch(SP, space, space.selfMemberId, [envB], 52, {});
+    var qq = await NS.listQuarantine(SP);
+    ok("inbound: Casa incompleta in quarantena (boundary-invalid)", a3.quarantined === 1 && qq.some(function(x){ return x.recordId === SP + ":badbill1" && x.reason === "boundary-invalid"; }));
+    ok("inbound: Casa incompleta non applicata", (await DB().get("casa", SP + ":badbill1")) == null);
+    // collisione di id con una tx esistente: mai duplicare fra store
+    var exp = await SR().createExpense(SP, { amount: 1000, paidById: X.G, date: "2026-11-01", allocationMode: "equal", parts: (function(){ var o = {}; o[X.G] = 1; o[X.S] = 1; return o; })() });
+    var clash = Object.assign({}, await DB().get("casa", X.tG), { id: exp, version: 5, deviceId: "devRemoto" });
+    var a4 = await NS._applyBatch(SP, space, space.selfMemberId, [await CR.encryptSharedRecord("transaction", clash)], 53, {});
+    ok("inbound: id di una tx esistente non finisce nello store casa", a4.applied === 0 && (await DB().get("casa", exp)) == null && (await DB().get("transactions", exp)).type === "expense");
+
+    // --- sorgente per reEmit/recovery e bootstrap ---
+    var it = await intent(X.tG);
+    await DB().put("syncOutbox", Object.assign({}, it, { status: "error", errorClass: "http", httpStatus: 400 }));
+    var re = await NS.reEmit(SP, "transaction", X.tG);
+    ok("reEmit: ricostruisce il record Casa dallo store casa", re.status === "pending" && (await CR.decryptSharedEnvelope((await intent(X.tG)).envelope)).name === "Giulia");
+    var boot = await NS.bootstrapSpace(SP);
+    var nCasa = (await DB().list("casa", function(c){ return c.spaceId === SP; })).length;
+    ok("bootstrap: snapshot include i record Casa", boot.snapshot >= 1 + 2 + 1 + nCasa);
+
+    var fails = r.filter(function(x){ return !x.pass; });
+    return { total: r.length, passed: r.length - fails.length, failed: fails.length, fails: fails, results: r };
+  }
+
+  window.casaRuntime = {
+    list: list, report: report,
+    createTenant: createTenant, updateTenant: function(s, id, p){ return update(s, id, p, "casaTenant"); },
+    createMove: createMove,     updateMove: function(s, id, p){ return update(s, id, p, "casaMove"); },
+    createDebt: createDebt,     updateDebt: function(s, id, p){ return update(s, id, p, "casaDebt"); },
+    deleteTenant: remove, deleteMove: remove, deleteDebt: remove, restore: restore,
+    // calcoli puri
+    computeBillShares: computeBillShares, monthSummary: monthSummary, tenantStatus: tenantStatus,
+    debtLedger: debtLedger, splitProfit: splitProfit,
+    _testF6CasaEngine: TEST_ENGINE, _testF6CasaSync: TEST_SYNC
+  };
+})();
+/* F6P1-CASA-END */
+</script>
+<!-- ==== /MODULE: casa-runtime ==== -->
+
+<!-- ==== MODULE: casa-files (F6.3) ==== -->
+<script>
+"use strict";
+/* F6.3 — PDF delle bollette cifrati sul telefono (AES-GCM, chiave dello spazio, AAD lega spazio+file+keyVersion).
+   Sul server (Worker -> GitHub privato) arriva solo iv||ciphertext in base64. Nessun cambio al sync dei record. */
+/* F6P3-CASA-FILES-START */
+(function(){
+  var MAX = 5 * 1024 * 1024, TE = new TextEncoder();
+  function aad(spaceId, fileId, kv){ return TE.encode(JSON.stringify(["calculon-file", 1, spaceId, fileId, kv])); }
+  function b64url(u8){ return toB64(u8).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); }
+  function toB64(u8){ var s = "", CH = 0x8000; for (var i = 0; i < u8.length; i += CH) s += String.fromCharCode.apply(null, u8.subarray(i, i + CH)); return btoa(s); }
+  function nuovoId(){ return b64url(crypto.getRandomValues(new Uint8Array(18))); }   // 24 caratteri
+  async function chiave(spaceId, kv){
+    if (kv == null){ var sp = await window.calculonDB.get("spaces", spaceId); kv = (sp && Number.isInteger(sp.keyVersion)) ? sp.keyVersion : 1; }
+    var key = await window.spaceKeys.getSpaceKey(spaceId, kv); if (!key) throw new Error("missing-space-key");
+    return { key: key, kv: kv };
+  }
+  async function encrypt(spaceId, bytes, fileId){
+    var k = await chiave(spaceId, null), id = fileId || nuovoId(), iv = crypto.getRandomValues(new Uint8Array(12));
+    var ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv, additionalData: aad(spaceId, id, k.kv) }, k.key, bytes));
+    var out = new Uint8Array(12 + ct.length); out.set(iv, 0); out.set(ct, 12);
+    return { fileId: id, keyVersion: k.kv, data: out };
+  }
+  async function decrypt(spaceId, ref, data){
+    var k = await chiave(spaceId, ref.keyVersion);
+    if (!data || data.length < 29) throw new Error("decrypt-failed");
+    try { return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: data.subarray(0, 12), additionalData: aad(spaceId, ref.fileId, k.kv) }, k.key, data.subarray(12))); }
+    catch(e){ throw new Error("decrypt-failed"); }
+  }
+  // upload(spaceId, {name, bytes}) -> pdfRef pronto per la bolletta
+  async function upload(spaceId, file){
+    var bytes = file && file.bytes;
+    if (!(bytes instanceof Uint8Array) || bytes.length === 0) throw new Error("file-vuoto");
+    if (bytes.length > MAX) throw new Error("file-troppo-grande");
+    var e = await encrypt(spaceId, bytes);
+    await window.nativeSync.uploadSpaceFile(spaceId, e.fileId, toB64(e.data));
+    var name = String(file.name || "").trim().slice(0, 200) || "bolletta.pdf";
+    return { fileId: e.fileId, name: name, size: bytes.length, keyVersion: e.keyVersion };
+  }
+  async function open(spaceId, ref){
+    var data = await window.nativeSync.downloadSpaceFile(spaceId, ref.fileId);
+    return new Blob([await decrypt(spaceId, ref, data)], { type: "application/pdf" });
+  }
+
+  async function TEST(){
+    var R = [], ok = function(n, c){ R.push({ name: n, pass: !!c }); };
+    async function throwsA(fn, re){ try { await fn(); return false; } catch(e){ return re ? re.test(e.message) : true; } }
+    var c = await window.sharedRuntime.createSpace({ kind: "ongoing", name: "CasaFile", selfName: "Gio" }), SP = c.spaceId;
+    var pdf = TE.encode("%PDF-1.4 bolletta di prova " + "x".repeat(70000));
+    var e = await encrypt(SP, pdf);
+    ok("fileId opaco 24 caratteri", /^[A-Za-z0-9_-]{24}$/.test(e.fileId));
+    ok("ciphertext != chiaro (iv+tag)", e.data.length === pdf.length + 28 && toB64(e.data).indexOf(toB64(pdf.subarray(0, 30))) < 0);
+    var back = await decrypt(SP, { fileId: e.fileId, keyVersion: e.keyVersion }, e.data);
+    ok("round-trip byte identici", back.length === pdf.length && back.every(function(b, i){ return b === pdf[i]; }));
+    var t = e.data.slice(); t[40] ^= 1;
+    ok("manomissione -> decrypt-failed", await throwsA(function(){ return decrypt(SP, { fileId: e.fileId, keyVersion: e.keyVersion }, t); }, /decrypt-failed/));
+    ok("fileId diverso (AAD) -> decrypt-failed", await throwsA(function(){ return decrypt(SP, { fileId: "AAAAAAAAAAAAAAAAAAAAAAAA", keyVersion: e.keyVersion }, e.data); }, /decrypt-failed/));
+    var c2 = await window.sharedRuntime.createSpace({ kind: "ongoing", name: "Altro", selfName: "Gio" });
+    ok("altro spazio -> decrypt-failed", await throwsA(function(){ return decrypt(c2.spaceId, { fileId: e.fileId, keyVersion: e.keyVersion }, e.data); }, /decrypt-failed/));
+    ok("toB64 == btoa (piccolo)", toB64(TE.encode("ciao mondo!")) === btoa("ciao mondo!"));
+    // upload/open con trasporto finto (nessuna rete): il server riceve SOLO base64 del ciphertext
+    var NS = window.nativeSync, upO = NS.uploadSpaceFile, dnO = NS.downloadSpaceFile, store = {};
+    NS.uploadSpaceFile = async function(s, id, b64){ store[s + "|" + id] = b64; return true; };
+    NS.downloadSpaceFile = async function(s, id){ var b = atob(store[s + "|" + id]), u = new Uint8Array(b.length); for (var i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; };
+    try {
+      var ref = await upload(SP, { name: "Enel luce set-ott.pdf", bytes: pdf });
+      ok("pdfRef: campi e dimensione", ref.name === "Enel luce set-ott.pdf" && ref.size === pdf.length && ref.keyVersion >= 1 && /^[A-Za-z0-9_-]{24}$/.test(ref.fileId));
+      var sent = atob(store[SP + "|" + ref.fileId]);
+      ok("al server non arriva il chiaro", sent.indexOf("%PDF") < 0 && sent.indexOf("bolletta di prova") < 0);
+      var blob = await open(SP, ref), txt = await blob.text();
+      ok("open -> Blob PDF identico", blob.type === "application/pdf" && txt === new TextDecoder().decode(pdf));
+      ok("file vuoto respinto", await throwsA(function(){ return upload(SP, { name: "x.pdf", bytes: new Uint8Array(0) }); }, /file-vuoto/));
+      ok("file > 5 MB respinto", await throwsA(function(){ return upload(SP, { name: "x.pdf", bytes: new Uint8Array(MAX + 1) }); }, /troppo-grande/));
+      var B = window.nativeSyncBoundary, C = window.casaRuntime;
+      await C.createTenant(SP, { name: "Marco", rentMonthly: 45000, startDate: "2026-09-01" });
+      var billId = await C.createMove(SP, { moveType: "bill", date: "2026-11-06", amount: 18600, supplier: "Enel", pdfRef: ref });
+      var bill = await window.calculonDB.get("casa", billId);
+      ok("bolletta con pdfRef salvata", bill.pdfRef && bill.pdfRef.fileId === ref.fileId);
+      ok("pdfRef nel round-trip E2EE", JSON.stringify((await window.nativeCrypto.decryptSharedEnvelope(await window.nativeCrypto.encryptSharedRecord("transaction", bill))).pdfRef) === JSON.stringify(ref));
+      function conRef(pr){ return B.validateCasaRecord(Object.assign({}, bill, { pdfRef: pr })); }
+      ok("validatore: pdfRef null ok", conRef(null) === null);
+      ok("validatore: stringa respinta", conRef("x") !== null);
+      ok("validatore: fileId corto respinto", conRef(Object.assign({}, ref, { fileId: "abc" })) !== null);
+      ok("validatore: size > 5 MB respinta", conRef(Object.assign({}, ref, { size: MAX + 1 })) !== null);
+      ok("validatore: campo extra respinto", conRef(Object.assign({}, ref, { url: "https://x" })) !== null);
+      await C.updateMove(SP, billId, { pdfRef: null });
+      ok("togli PDF: pdfRef null", (await window.calculonDB.get("casa", billId)).pdfRef === null);
+    } finally { NS.uploadSpaceFile = upO; NS.downloadSpaceFile = dnO; }
+    var fails = R.filter(function(x){ return !x.pass; });
+    return { total: R.length, passed: R.length - fails.length, failed: fails.length, fails: fails };
+  }
+
+  window.casaFiles = { upload: upload, open: open, MAX_BYTES: MAX, _encrypt: encrypt, _decrypt: decrypt, _testF6CasaFiles: TEST };
+})();
+/* F6P3-CASA-FILES-END */
+</script>
+<!-- ==== /MODULE: casa-files ==== -->
 
 <script>
 "use strict";
@@ -13754,5 +14615,934 @@ if ("serviceWorker" in navigator){
 /* F3P5C-TAG-UI-END */
 </script>
 
+<!-- ==== MODULE: casa-ui (F6.2) ==== -->
+<style id="f6-casa-style">
+/* F6.2 — UI «Casa»: solo componenti esistenti (bozza 3), regole scoped a #ov-casa */
+#ov-casa .pos,#ov-casa .mov-amt.pos,#ov-casa .mese-tot-v.pos,#ov-casa .home-hero-v.pos{color:var(--viola)}
+#ov-casa .neg,#ov-casa .mov-amt.neg,#ov-casa .mese-tot-v.neg,#ov-casa .home-hero-v.neg{color:var(--rosso)}
+#ov-casa .mov-amt.trasf{color:var(--grigio)}
+#ov-casa .sub-title{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+#ov-casa .sub-dot{font-size:14px;font-weight:700}
+#ov-casa .sub-badge{font-variant-numeric:tabular-nums}
+#ov-casa .sub-badge.neg{color:var(--rosso);background:rgba(255,78,142,.12)}
+#ov-casa .sub-name small{display:block;font-weight:400;font-size:12px;color:var(--grigio);margin-top:2px}
+#ov-casa .home-recent-head{margin-top:26px}
+#ov-casa #casa-tabs{margin:2px 0 20px}
+#ov-casa .mov-card .sez-k{margin-bottom:8px}
+#ov-casa .mov-card-v{display:block;font-size:30px;font-weight:800;letter-spacing:-.04em;font-variant-numeric:tabular-nums;line-height:1.1}
+#ov-casa .mov-card .nota{margin:8px 0 0}
+#ov-casa .quota{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+#ov-casa .quota:first-child{margin-top:12px}
+#ov-casa .quota input{width:120px;flex:none;text-align:right;font-weight:700;font-variant-numeric:tabular-nums}
+#ov-casa input[type=month],#ov-casa input[type=tel]{width:100%;min-width:0;box-sizing:border-box;min-height:var(--tap);
+  padding:12px 15px;font-family:var(--sf);background:rgba(255,255,255,.8);border:0;border-radius:var(--r-sm);-webkit-appearance:none;appearance:none}
+#ov-casa .due-campi{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+#ov-casa .due-campi > div{min-width:0}
+#ov-casa .importo-wrap{margin-bottom:0}
+#ov-casa .casa-form .lbl,#ov-casa .casa-form .lbl:first-of-type{margin:18px 0 9px}
+#ov-casa .casa-form > .lbl:first-child,#ov-casa .casa-form > .sez-k:first-child{margin-top:0}
+#ov-casa .casa-form .seg{margin-bottom:0}
+#ov-casa .casa-form .due{margin-top:24px}
+#ov-casa .casa-del{margin-top:12px}
+#ov-casa .casa-meta{font-size:12px;color:var(--grigio);margin:18px 0 0;text-align:center}
+#ov-casa .casa-vuoto{text-align:center;color:var(--grigio);padding:22px 8px}
+#ov-casa .mov-row:disabled{cursor:default}
+#ov-casa .sub-actions{flex:none;display:flex;gap:0}
+#ov-casa #casa-toast.show{pointer-events:auto}   /* .sub-toast ha pointer-events:none: senza questo «Annulla» non si tocca */
+</style>
+<div class="subscreen" id="ov-casa" hidden>
+  <div class="sub-head">
+    <button class="sub-back" type="button" id="casa-back">‹ Spazio</button>
+    <span class="sub-title" id="casa-title">Casa</span>
+  </div>
+  <div class="sub-body" id="casa-body">
+    <div id="casa-main">
+      <div class="seg seg-3" id="casa-tabs" role="group" aria-label="Sezioni">
+        <button type="button" class="seg-btn is-on" data-tab="conto" aria-pressed="true">Conto</button>
+        <button type="button" class="seg-btn" data-tab="inquilini" aria-pressed="false">Inquilini</button>
+        <button type="button" class="seg-btn" data-tab="debiti" aria-pressed="false">Debiti</button>
+      </div>
+      <div id="casa-view" aria-live="polite"></div>
+    </div>
+    <div id="casa-detail" hidden></div>
+    <div id="casa-form" class="casa-form" hidden></div>
+  </div>
+  <div class="sub-toast" id="casa-toast" role="status" aria-live="polite" hidden></div>
+</div>
+<script>
+"use strict";
+/* F6P2-CASA-UI-START */
+/* F6.2 — UI «Casa» (bozza 3). Solo presentazione sopra window.casaRuntime (F6.1): nessun cambio
+   motore/wire/Worker. Calcoli dalle funzioni pure del motore; ogni scrittura passa dalle API
+   casaRuntime (guardie, CAS, intent cifrato). Read-after-write canonico: dopo ogni mutazione si
+   rilegge tutto. Il PDF delle bollette arriva con F6.3 (R2). */
+(function(){
+  var doc = document;
+  function $(id){ return doc.getElementById(id); }
+  function C(){ return window.casaRuntime; }
+  function SR(){ return window.sharedRuntime; }
+  var ov = $("ov-casa");
+  if (!ov) return;
+
+  var S = { spaceId: null, sp: null, tab: "conto", month: null, data: null, members: [], opts: null,
+            tenantId: null, formOpen: false, busy: false, showAll: false };
+
+  // ---------- helper ----------
+  var MESI = ["gennaio","febbraio","marzo","aprile","maggio","giugno","luglio","agosto","settembre","ottobre","novembre","dicembre"];
+  function pad(n){ return (n < 10 ? "0" : "") + n; }
+  function oggi(){ var d = new Date(); return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()); }
+  function meseOggi(){ return oggi().slice(0, 7); }
+  function meseAdd(m, k){ var t = (+m.slice(0, 4)) * 12 + (+m.slice(5, 7) - 1) + k; return Math.floor(t / 12) + "-" + pad(t % 12 + 1); }
+  function nomeMese(m){ return MESI[+m.slice(5, 7) - 1]; }
+  function meseLungo(m){ return nomeMese(m) + " " + m.slice(0, 4); }
+  function giorno(d){ return d ? (+d.slice(8, 10)) + " " + MESI[+d.slice(5, 7) - 1].slice(0, 3) : ""; }
+  function dataLunga(d){ return d ? (+d.slice(8, 10)) + " " + MESI[+d.slice(5, 7) - 1] + " " + d.slice(0, 4) : ""; }
+  function euro(c){ return eur(Math.abs(c | 0)) + " €"; }
+  function euroS(c){ return (c < 0 ? "−" : c > 0 ? "+" : "") + euro(c); }
+  function cifra(c){ return eur(Math.abs(c | 0)); }
+  function parseCents(str){
+    var v = (str == null ? "" : String(str)).trim(); if (!v) return NaN;
+    if (v.indexOf(",") >= 0) v = v.replace(/\./g, "").replace(",", ".");
+    if (!/^\d*\.?\d*$/.test(v)) return NaN;
+    var f = parseFloat(v); if (!isFinite(f)) return NaN;
+    return Math.round(f * 100);
+  }
+  function el(tag, cls, txt){ var e = doc.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
+  function iniziale(s){ s = String(s || "").trim(); return s ? s[0].toUpperCase() : ""; }
+  function byStart(a, b){ return a.startDate < b.startDate ? -1 : a.startDate > b.startDate ? 1 : (a.id < b.id ? -1 : 1); }
+  function vivi(a){ return (a || []).filter(function(r){ return r && r.deleted !== true; }); }
+
+  // ---------- nomi ----------
+  function membro(id){ for (var i = 0; i < S.members.length; i++) if (S.members[i].id === id) return S.members[i]; return null; }
+  function nomeMembro(id){ if (id === S.sp.selfMemberId) return "Tu"; var m = membro(id); return m ? (m.name || "Partecipante") : "Partecipante"; }
+  function inquilino(id){ var t = (S.data.tenants || []).filter(function(x){ return x.id === id; })[0]; return t || null; }
+  function nomeInq(id){ var t = inquilino(id); return t ? t.name : "Inquilino"; }
+  function debito(id){ return (S.data.debts || []).filter(function(d){ return d.id === id; })[0] || null; }
+  function creditore(d, perFrase){
+    if (!d) return "";
+    if (d.creditorName) return d.creditorName;
+    if (d.creditorMemberId === S.sp.selfMemberId) return perFrase ? "te" : "Tu";
+    return nomeMembro(d.creditorMemberId);
+  }
+  function titoloDebito(d){
+    var c = creditore(d, true);
+    if (d.debtor === "both") return "Voi dovete a " + c;
+    if (d.debtor === S.sp.selfMemberId) return "Tu devi a " + c;
+    return nomeMembro(d.debtor) + " deve a " + c;
+  }
+  function bolla(b){ return [b.supplier, b.period].filter(Boolean).join(" ") || "Bolletta"; }
+
+  // ---------- toast (sopra la sottoschermata, z 90) ----------
+  var toastT = null;
+  function toast(msg, action){
+    var t = $("casa-toast"); if (!t) return;   // dentro #ov-casa: sopra il contenuto della sottoschermata
+    t.textContent = ""; t.appendChild(el("span", null, msg));
+    if (action){
+      var b = el("button", "sub-toast-act", action.label); b.type = "button";
+      b.onclick = function(){ clearTimeout(toastT); nascondi(); action.onClick(); };
+      t.appendChild(b);
+    }
+    t.hidden = false; void t.offsetWidth; t.classList.add("show");
+    clearTimeout(toastT); toastT = setTimeout(nascondi, action ? 5000 : 1800);
+    function nascondi(){ t.classList.remove("show"); setTimeout(function(){ t.hidden = true; t.textContent = ""; }, 260); }
+  }
+  function erroreUtente(e){
+    var m = (e && e.message) || "";
+    if (/voce a parte esclusa/.test(m)) return "Nessun inquilino paga la voce a parte.";
+    if (/nessun inquilino/.test(m)) return "Nessun inquilino attivo in quella data.";
+    if (/voce a parte/.test(m)) return "La voce a parte non è valida.";
+    if (/data uscita/.test(m)) return "La data di uscita è prima dell'ingresso.";
+    if (/debitore === creditore/.test(m)) return "Chi deve e chi riceve devono essere diversi.";
+    if (/record casa inesistente/.test(m)) return "Questo dato non c'è più: è stato eliminato.";
+    if (/CAS|conflict|version/i.test(m)) return "Qualcuno l'ha appena modificato. Riapri e riprova.";
+    return "Non riesco a salvare ora. Riprova.";
+  }
+
+  // ---------- dati ----------
+  async function opzioniDivisione(spaceId){
+    var members = vivi(await SR().listMembers(spaceId)).filter(function(m){ return m.active !== false; })
+      .sort(function(a, b){ return (a.createdAt || 0) - (b.createdAt || 0) || (a.id < b.id ? -1 : 1); });
+    var rule = null; try { rule = await SR().getShareRule(spaceId); } catch(e){}
+    var splitBp = null;
+    if (rule && rule.mode === "percent"){ splitBp = {}; rule.parts.forEach(function(p){ splitBp[p.memberId] = p.value; }); }
+    return { list: members, opts: { members: members.map(function(m){ return m.id; }), splitBp: splitBp } };
+  }
+  async function carica(){
+    var id = S.spaceId;
+    var sp = await window.calculonDB.get("spaces", id);
+    var data = await C().list(id);
+    var mo = await opzioniDivisione(id);
+    if (S.spaceId !== id) return false;
+    S.sp = sp; S.data = data; S.members = mo.list; S.opts = mo.opts;
+    return true;
+  }
+  async function dopoScrittura(){
+    try { await window.nativeSync.deliverPending(S.spaceId); } catch(e){ /* offline: resta in coda, il badge lo dice */ }
+    await aggiorna();
+    try { if (typeof aggiornaBadgeShared === "function") aggiornaBadgeShared(S.spaceId); } catch(e){}
+  }
+  async function aggiorna(){
+    try { if (!(await carica())) return; }
+    catch(e){ var v = $("casa-view"); v.textContent = ""; v.appendChild(el("p", "casa-vuoto", "Non riesco a mostrare il conto adesso.")); return; }
+    $("casa-title").textContent = (S.sp && S.sp.name) || "Casa";
+    if (S.formOpen) return;
+    if (S.tenantId) renderInquilino(); else render();
+  }
+
+  // ---------- componenti ----------
+  function riga(dot, nome, sotto, destra){   // .sub-row
+    var r = el("div", "sub-row");
+    if (dot != null) r.appendChild(dot);
+    var n = el("span", "sub-name", nome); if (sotto) n.appendChild(el("small", null, sotto)); r.appendChild(n);
+    if (destra) r.appendChild(destra);
+    return r;
+  }
+  function dot(lettera, trasf){ return el("span", "sub-dot" + (trasf ? " trasf" : ""), lettera || ""); }
+  function movRow(lettera, trasf, desc, meta, amt, amtCls, onTap){
+    var b = el("button", "mov-row"); b.type = "button";
+    b.appendChild(dot(lettera, trasf));
+    var m = el("span", "mov-main"); m.appendChild(el("span", "mov-desc", desc)); m.appendChild(el("span", "mov-meta", meta)); b.appendChild(m);
+    b.appendChild(el("span", "mov-amt" + (amtCls ? " " + amtCls : ""), amt));
+    if (onTap) b.onclick = onTap; else b.disabled = true;
+    return b;
+  }
+  function testa(titolo, link, onLink){
+    var h = el("div", "home-recent-head"); h.appendChild(el("span", "sez-k", titolo));
+    if (link){ var a = el("button", "home-link", link); a.type = "button"; a.onclick = onLink; h.appendChild(a); }
+    return h;
+  }
+  function hero(valore, cls, etichetta){
+    var h = el("div", "home-hero");
+    h.appendChild(el("span", "home-hero-v" + (cls ? " " + cls : ""), valore));
+    h.appendChild(el("span", "home-hero-lbl", etichetta));
+    return h;
+  }
+  function totali(celle){   // [[etichetta, valore, cls, onTap?]...] ultima = riga intera
+    var g = el("div", "mese-tot");
+    celle.forEach(function(c, i){
+      var cell = el("div", "mese-tot-cell" + (i === celle.length - 1 ? " mese-tot-diff" : ""));
+      cell.appendChild(el("span", "sez-k", c[0]));
+      var v = el("span", "mese-tot-v" + (c[2] ? " " + c[2] : ""), c[1]); cell.appendChild(v);
+      if (c[3]){ var l = el("button", "home-link", c[3].label); l.type = "button"; l.style.alignSelf = "flex-start"; l.onclick = c[3].onClick; cell.appendChild(l); }
+      g.appendChild(cell);
+    });
+    return g;
+  }
+  function bottone(testo, cls, onClick){ var b = el("button", "btn " + cls, testo); b.type = "button"; b.onclick = onClick; return b; }
+  function meseNav(onChange){
+    var n = el("div", "mese-nav");
+    var p = el("button", "mese-arrow", "‹"); p.type = "button"; p.setAttribute("aria-label", "Mese precedente");
+    var x = el("button", "mese-arrow", "›"); x.type = "button"; x.setAttribute("aria-label", "Mese successivo");
+    x.disabled = S.month >= meseOggi();
+    p.onclick = function(){ S.month = meseAdd(S.month, -1); onChange(); };
+    x.onclick = function(){ if (S.month < meseOggi()){ S.month = meseAdd(S.month, 1); onChange(); } };
+    n.appendChild(p); n.appendChild(el("span", "mese-label", meseLungo(S.month))); n.appendChild(x);
+    return n;
+  }
+
+  // ---------- descrizione di un movimento ----------
+  function descrivi(m){
+    switch (m.moveType){
+      case "rent":      return { l: iniziale(nomeInq(m.tenantId)), d: "Affitto " + nomeInq(m.tenantId), meta: nomeMese(m.month) + " · " + giorno(m.date), a: euroS(m.amount), c: "pos" };
+      case "billShare": var b = (S.data.moves || []).filter(function(x){ return x.id === m.billId; })[0];
+                        return { l: iniziale(nomeInq(m.tenantId)), d: "Quota bolletta " + nomeInq(m.tenantId), meta: (b ? bolla(b) + " · " : "") + giorno(m.date), a: euroS(m.amount), c: "pos" };
+      case "bill":      return { l: "", d: "Bolletta " + (m.supplier || ""), meta: [m.period, m.pdfRef ? "PDF" : "", giorno(m.date)].filter(Boolean).join(" · "), a: euroS(-m.amount), c: "" };
+      case "expense":   return { l: "", d: m.supplier || m.note || "Spesa", meta: giorno(m.date), a: euroS(-m.amount), c: "" };
+      case "debtPayment": var d = m.debtId ? debito(m.debtId) : null;
+                        return { l: "", d: "Rata" + (d ? " " + creditore(d, true) : ""), meta: "dal conto · " + giorno(m.date), a: euroS(-m.amount), c: "" };
+      case "adjustment": return { l: "", t: true, d: "Rettifica del saldo", meta: (m.reason || "") + " · " + giorno(m.date), a: euroS(m.amount), c: "trasf" };
+      case "debtAdjustment": return { l: "", t: true, d: "Rettifica debito", meta: (m.reason || "") + " · " + giorno(m.date), a: euroS(m.amount), c: "trasf" };
+    }
+    return { l: "", d: "Movimento", meta: giorno(m.date), a: euroS(m.amount), c: "" };
+  }
+  function rigaMov(m){ var x = descrivi(m); return movRow(x.l, x.t, x.d, x.meta, x.a, x.c, function(){ apriMovimento(m); }); }
+
+  // ---------- viste ----------
+  function render(){
+    $("casa-detail").hidden = true; $("casa-main").hidden = false;
+    $("casa-back").textContent = "‹ Spazio";
+    Array.prototype.forEach.call($("casa-tabs").querySelectorAll(".seg-btn"), function(b){
+      var on = b.getAttribute("data-tab") === S.tab; b.classList.toggle("is-on", on); b.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+    var v = $("casa-view"); v.textContent = "";
+    if (S.tab === "inquilini") vistaInquilini(v); else if (S.tab === "debiti") vistaDebiti(v); else vistaConto(v);
+  }
+
+  function vistaConto(v){
+    var m = meseOggi(), sum = C().monthSummary(S.data, m, S.opts), st = C().tenantStatus(S.data, m, oggi());
+    var nInq = vivi(S.data.tenants).length, nMov = vivi(S.data.moves).length;
+    if (!nInq && !nMov){
+      v.appendChild(el("p", "home-msg", "Il conto della casa è vuoto. Comincia dagli inquilini, poi registra incassi e bollette."));
+      v.appendChild(bottone("+ Nuovo inquilino", "btn-primary w", function(){ formInquilino(null); }));
+      v.appendChild(bottone("+ Nuovo debito", "btn-ghost w", function(){ formDebito(null); }));
+      return;
+    }
+    var mancano = st.tenants.filter(function(r){ return r.missing > 0; });
+    var frase = sum.profit > 0 ? "Questo mese chiude in attivo." : sum.profit < 0 ? "Questo mese è in perdita: i debiti restano fermi." : "Questo mese è in pari.";
+    if (mancano.length) frase += " " + (mancano.length === 1 ? mancano[0].name + " deve ancora " + euro(mancano[0].missing) + "." : mancano.length + " inquilini devono ancora pagare.");
+    v.appendChild(el("p", "home-msg", frase));
+    v.appendChild(hero(euroS(sum.profit).replace(/^\+/, ""), sum.profit > 0 ? "pos" : sum.profit < 0 ? "neg" : "", "Utile di " + nomeMese(m) + ", finora"));
+    v.appendChild(totali([
+      ["Entrate", euro(sum.income), "pos"],
+      ["Uscite", euro(sum.expense), ""],
+      ["Saldo del conto", euroS(sum.balance).replace(/^\+/, ""), sum.balance < 0 ? "neg" : "", { label: "Allinea al saldo della banca", onClick: function(){ formSaldo(sum.balance); } }]
+    ]));
+    // divisione dell'utile
+    if (S.opts.members.length){
+      v.appendChild(testa("Divisione dell'utile"));
+      if (sum.profit <= 0) v.appendChild(el("p", "nota", "Nessun utile da dividere in " + nomeMese(m) + "."));
+      else S.opts.members.forEach(function(mid){
+        var quota = sum.shares[mid] | 0, aDeb = sum.toDebt[mid] | 0, sotto;
+        if (aDeb > 0){
+          var d = vivi(S.data.debts).filter(function(x){ return x.debtor === mid && x.creditorMemberId; })[0];
+          sotto = (aDeb === quota ? "va a " : euro(aDeb) + " a ") + (d ? creditore(d, true) : "chi riceve") + ", scala il debito";
+        } else sotto = mid === S.sp.selfMemberId ? "la tua parte" : "la sua parte";
+        v.appendChild(riga(dot(iniziale(nomeMembro(mid))), nomeMembro(mid), sotto, el("span", "mov-amt", euro(quota))));
+      });
+    }
+    // ultimi movimenti
+    var moves = vivi(S.data.moves).filter(function(x){ return x.moveType !== "debtAdjustment"; })
+      .sort(function(a, b){ return a.date < b.date ? 1 : a.date > b.date ? -1 : (b.updatedAt || 0) - (a.updatedAt || 0); });
+    var lim = S.showAll ? moves.length : 8;
+    v.appendChild(testa(S.showAll ? "Tutti i movimenti" : "Ultimi movimenti", moves.length > 8 ? (S.showAll ? "Meno" : "Vedi tutti") : null, function(){ S.showAll = !S.showAll; render(); }));
+    if (!moves.length) v.appendChild(el("p", "nota", "Ancora nessun movimento."));
+    moves.slice(0, lim).forEach(function(x){ v.appendChild(rigaMov(x)); });
+    v.appendChild(bottone("+ Aggiungi", "btn-primary w", function(){ formMovimento("incasso", null, null); }));
+  }
+
+  function vistaInquilini(v){
+    var st = C().tenantStatus(S.data, S.month, oggi()), per = {};
+    st.tenants.forEach(function(r){ per[r.tenantId] = r; });
+    v.appendChild(meseNav(render));
+    v.appendChild(totali([["Dovuto", euro(st.totals.due), ""], ["Pagato", euro(st.totals.paid), "pos"], ["Manca", euro(st.totals.missing), st.totals.missing > 0 ? "neg" : ""]]));
+    var ts = vivi(S.data.tenants).slice().sort(byStart);
+    v.appendChild(el("span", "sez-k", ts.length === 1 ? "1 inquilino" : ts.length + " inquilini"));
+    if (!ts.length) v.appendChild(el("p", "nota", "Aggiungi gli inquilini: nome, affitto e data di ingresso."));
+    ts.forEach(function(t){
+      var r = per[t.id], badge;
+      if (!r || r.due === 0) badge = el("span", "sub-badge", r && r.paid ? "Pagato" : "Non attivo");
+      else if (r.missing === 0) badge = el("span", "sub-badge", "In regola");
+      else badge = el("span", "sub-badge" + (r.late ? " neg" : ""), (r.late ? "−" : "Mancano ") + cifra(r.missing));
+      var sotto = [t.room, euro(t.rentMonthly) + " al mese"].filter(Boolean).join(" · ");
+      if ((t.excludedExtras || []).length) sotto += " · senza " + t.excludedExtras.join(", ");
+      var b = riga(dot(iniziale(t.name)), t.name, sotto, badge);
+      b.setAttribute("role", "button"); b.tabIndex = 0; b.style.cursor = "pointer";
+      b.onclick = function(){ S.tenantId = t.id; renderInquilino(); };
+      b.onkeydown = function(e){ if (e.key === "Enter" || e.key === " "){ e.preventDefault(); b.onclick(); } };
+      v.appendChild(b);
+    });
+    v.appendChild(bottone("+ Nuovo inquilino", "btn-primary w", function(){ formInquilino(null); }));
+  }
+
+  function vistaDebiti(v){
+    var m = meseOggi(), sum = C().monthSummary(S.data, m, S.opts), after = {};
+    sum.debts.forEach(function(d){ after[d.debtId] = d.after; });
+    var io = S.sp.selfMemberId;   // prima i tuoi debiti, poi quelli comuni, poi gli altri
+    function peso(d){ return d.debtor === io ? 0 : d.debtor === "both" ? 1 : 2; }
+    var ds = vivi(S.data.debts).slice().sort(function(a, b){ return peso(a) - peso(b) || byStart(a, b); });
+    var miei = ds.filter(function(d){ return d.debtor === io; });
+    if (!ds.length) v.appendChild(el("p", "home-msg", "Nessun debito registrato."));
+    else if (miei.length) v.appendChild(el("p", "home-msg", "Ancora " + euro(after[miei[0].id]) + " a " + creditore(miei[0], true) + "."));
+    else v.appendChild(el("p", "home-msg", "Ecco a che punto sono i debiti."));
+    ds.forEach(function(d){
+      var c = el("div", "mov-card");
+      c.appendChild(el("span", "sez-k", titoloDebito(d)));
+      var bal = after[d.id] != null ? after[d.id] : d.initialAmount;
+      c.appendChild(el("span", "mov-card-v" + (bal < 0 ? " neg" : ""), euroS(bal).replace(/^\+/, "")));
+      var nota = "Erano " + euro(d.initialAmount) + " dal " + dataLunga(d.startDate) + ".";
+      if (d.monthlyInstallment) nota += " Rata di " + euro(d.monthlyInstallment) + " al mese.";
+      if (d.creditorMemberId && d.debtor !== "both") nota += " Scende con la quota dell'utile.";
+      c.appendChild(el("p", "nota", nota));
+      var az = el("div", "mov-azioni");
+      az.appendChild(bottone("Rettifica", "btn-ghost", function(){ formRettifica(d, null); }));
+      if (d.monthlyInstallment) az.appendChild(bottone("Paga rata", "btn-ghost", function(){ formMovimento("spesa", null, { debtId: d.id, amount: d.monthlyInstallment }); }));
+      az.appendChild(bottone("Modifica", "btn-ghost", function(){ formDebito(d); }));
+      c.appendChild(az);
+      v.appendChild(c);
+    });
+    var hist = ds.length ? C().debtLedger(S.data, m, S.opts).history.slice().reverse().slice(0, 40) : [];
+    if (hist.length){
+      v.appendChild(testa("Storico"));
+      hist.forEach(function(h){
+        var d = debito(h.debtId), mv = h.moveId ? vivi(S.data.moves).filter(function(x){ return x.id === h.moveId; })[0] : null;
+        var desc, meta = nomeMese(h.month) + " " + h.month.slice(0, 4);
+        if (h.kind === "profitShare"){ desc = (h.memberId === S.sp.selfMemberId ? "Tua quota" : "Quota di " + nomeMembro(h.memberId)) + " dell'utile"; meta += " · a " + creditore(d, true); }
+        else if (h.kind === "payment"){ desc = "Rata"; meta += " · dal conto"; }
+        else { desc = "Rettifica"; if (h.reason) meta += " · " + h.reason; }
+        v.appendChild(movRow(h.kind === "profitShare" ? iniziale(nomeMembro(h.memberId)) : "", h.kind === "adjustment", desc, meta, euroS(h.amount), "trasf",
+          mv ? function(){ apriMovimento(mv); } : null));
+      });
+    }
+    v.appendChild(bottone("+ Nuovo debito", "btn-primary w", function(){ formDebito(null); }));
+  }
+
+  // ---------- scheda inquilino ----------
+  function renderInquilino(){
+    var t = inquilino(S.tenantId);
+    if (!t){ S.tenantId = null; render(); return; }
+    $("casa-main").hidden = true;
+    var v = $("casa-detail"); v.hidden = false; v.textContent = "";
+    $("casa-back").textContent = "‹ Inquilini";
+    $("casa-title").textContent = t.name;
+    var st = C().tenantStatus(S.data, S.month, oggi()), r = st.tenants.filter(function(x){ return x.tenantId === t.id; })[0] ||
+      { rentDue: 0, billsDue: 0, due: 0, paid: 0, missing: 0, late: false };
+    v.appendChild(meseNav(renderInquilino));
+    var mese = nomeMese(S.month);
+    v.appendChild(el("p", "home-msg", r.missing > 0 ? (t.name + (r.late ? " è indietro di " : " deve ancora ") + euro(r.missing) + " per " + mese + ".")
+      : r.due > 0 ? t.name + " è in regola per " + mese + "." : t.name + " non ha nulla da pagare a " + mese + "."));
+    v.appendChild(hero(euro(r.missing), r.missing > 0 ? "neg" : "pos", "Da pagare"));
+    var mod = bottone("Modifica", "sub-mini", function(){ formInquilino(t); }); mod.className = "sub-mini";
+    v.appendChild(riga(null, "Affitto", "dal " + dataLunga(t.startDate) + (t.endDate ? " al " + dataLunga(t.endDate) : "") + (t.room ? " · " + t.room : ""), (function(){
+      var w = el("span"); w.style.display = "flex"; w.style.alignItems = "center"; w.style.gap = "4px";
+      w.appendChild(el("span", "mov-amt", euro(t.rentMonthly))); w.appendChild(mod); return w; })()));
+    var ex = (t.excludedExtras || []);
+    v.appendChild(riga(null, "Bollette", ex.length ? "parti uguali, senza " + ex.join(", ") : "parti uguali", null));
+    // voci del mese
+    var moves = vivi(S.data.moves);
+    v.appendChild(testa(mese.charAt(0).toUpperCase() + mese.slice(1)));
+    if (r.rentDue > 0){
+      var paidRent = moves.filter(function(m){ return m.moveType === "rent" && m.tenantId === t.id && m.month === S.month; }).reduce(function(a, m){ return a + m.amount; }, 0);
+      var mancaR = Math.max(0, r.rentDue - paidRent);
+      v.appendChild(movRow("", true, "Affitto", "pagato " + euro(paidRent), euro(mancaR > 0 ? mancaR : r.rentDue), mancaR > 0 ? "neg" : "pos",
+        mancaR > 0 ? function(){ formMovimento("incasso", null, { tenantId: t.id, kind: "rent", month: S.month, amount: mancaR }); } : null));
+    }
+    moves.filter(function(m){ return m.moveType === "bill" && m.date.slice(0, 7) === S.month; }).forEach(function(b){
+      var q = (b.shares || []).filter(function(s){ return s.tenantId === t.id; })[0]; if (!q || !q.amount) return;
+      var pag = moves.filter(function(m){ return m.moveType === "billShare" && m.tenantId === t.id && m.billId === b.id; }).reduce(function(a, m){ return a + m.amount; }, 0);
+      var manca = Math.max(0, q.amount - pag);
+      v.appendChild(movRow("", true, bolla(b), "la sua quota · pagato " + euro(pag), euro(manca > 0 ? manca : q.amount), manca > 0 ? "neg" : "pos",
+        manca > 0 ? function(){ formMovimento("incasso", null, { tenantId: t.id, kind: "billShare", billId: b.id, amount: manca }); } : null));
+    });
+    var incassi = moves.filter(function(m){ return m.tenantId === t.id && (m.moveType === "rent" || m.moveType === "billShare") && m.date.slice(0, 7) === S.month; })
+      .sort(function(a, b){ return a.date < b.date ? 1 : -1; });
+    if (incassi.length){ v.appendChild(testa("Incassi registrati")); incassi.forEach(function(m){ v.appendChild(rigaMov(m)); }); }
+    if (!r.due && !incassi.length) v.appendChild(el("p", "nota", "Nessuna voce in questo mese."));
+    var due = el("div", "due"); due.style.marginTop = "18px";
+    due.appendChild(bottone("Modifica", "btn-ghost", function(){ formInquilino(t); }));
+    due.appendChild(bottone("Registra incasso", "btn-primary", function(){
+      var pref = { tenantId: t.id, kind: "rent", month: S.month };
+      formMovimento("incasso", null, pref);
+    }));
+    v.appendChild(due);
+  }
+
+  // ---------- form: infrastruttura ----------
+  var F = { prevTitle: "", prevBack: "" };
+  function apriForm(titolo, build){
+    S.formOpen = true;
+    F.prevTitle = $("casa-title").textContent; F.prevBack = $("casa-back").textContent;
+    $("casa-main").hidden = true; $("casa-detail").hidden = true;
+    var f = $("casa-form"); f.textContent = ""; f.hidden = false;
+    $("casa-title").textContent = titolo; $("casa-back").textContent = "‹ Indietro";
+    build(f);
+    $("casa-body").scrollTop = 0;
+    var first = f.querySelector("input,select"); if (first && !("ontouchstart" in window)) try { first.focus(); } catch(e){}
+  }
+  function chiudiForm(){
+    S.formOpen = false;
+    var f = $("casa-form"); f.hidden = true; f.textContent = "";
+    $("casa-title").textContent = (S.sp && S.sp.name) || "Casa";
+    aggiorna();
+  }
+  var uid = 0;
+  function campo(f, etichetta, input, opz){
+    var id = "casa-f" + (++uid); input.id = id;
+    var l = el("label", "lbl", etichetta); l.htmlFor = id;
+    if (opz) l.appendChild(el("span", "lbl-opt", " (opzionale)"));
+    f.appendChild(l); f.appendChild(input); return input;
+  }
+  function inTesto(val, ph, max){ var i = el("input"); i.type = "text"; i.autocomplete = "off"; i.maxLength = max || 80; if (ph) i.placeholder = ph; if (val != null) i.value = val; return i; }
+  function inData(val, tipo){ var i = el("input"); i.type = tipo || "date"; if (val) i.value = val; return i; }
+  function inImporto(f, etichetta, cents, opz){
+    var id = "casa-f" + (++uid), l = el("label", "lbl", etichetta); l.htmlFor = id;
+    if (opz) l.appendChild(el("span", "lbl-opt", " (opzionale)"));
+    var w = el("div", "importo-wrap importo-sm"), i = el("input", "importo");
+    i.id = id; i.type = "text"; i.inputMode = "decimal"; i.placeholder = "0,00"; i.autocomplete = "off";
+    if (cents != null && cents !== "") i.value = cifra(cents);
+    w.appendChild(i); w.appendChild(el("span", "sim", "€"));
+    f.appendChild(l); f.appendChild(w); return i;
+  }
+  function inSelect(opzioni, val){
+    var s = el("select");
+    opzioni.forEach(function(o){ var op = el("option", null, o[1]); op.value = o[0]; s.appendChild(op); });
+    if (val != null) s.value = val; return s;
+  }
+  function seg(f, etichetta, opzioni, val, onChange){   // opzioni [[valore, testo]]
+    if (etichetta) f.appendChild(el("span", "lbl", etichetta));
+    var g = el("div", "seg" + (opzioni.length === 3 ? " seg-3" : "")); g.setAttribute("role", "group"); if (etichetta) g.setAttribute("aria-label", etichetta);
+    var stato = { value: val };
+    opzioni.forEach(function(o){
+      var b = el("button", "seg-btn" + (o[0] === val ? " is-on" : ""), o[1]); b.type = "button";
+      b.setAttribute("aria-pressed", o[0] === val ? "true" : "false");
+      b.onclick = function(){
+        stato.value = o[0];
+        Array.prototype.forEach.call(g.children, function(x){ var on = x === b; x.classList.toggle("is-on", on); x.setAttribute("aria-pressed", on ? "true" : "false"); });
+        if (onChange) onChange(o[0]);
+      };
+      g.appendChild(b);
+    });
+    f.appendChild(g); return stato;
+  }
+  function piede(f, onSalva, rec, onElimina){
+    var err = el("p", "err"); err.setAttribute("role", "alert"); err.hidden = true; f.appendChild(err);
+    var d = el("div", "due");
+    d.appendChild(bottone("Annulla", "btn-ghost", chiudiForm));
+    var s = bottone("Salva", "btn-primary", async function(){
+      if (S.busy) return; err.hidden = true;
+      var msg = null; S.busy = true; s.disabled = true; s.setAttribute("aria-busy", "true");
+      try { msg = await onSalva(); } catch(e){ msg = erroreUtente(e); }
+      S.busy = false; s.disabled = false; s.removeAttribute("aria-busy");
+      if (msg){ err.textContent = msg; err.hidden = false; return; }
+      chiudiForm(); await dopoScrittura();
+    });
+    d.appendChild(s); f.appendChild(d);
+    if (rec && onElimina){
+      var del = bottone("Elimina", "btn-ghost w casa-del", null), armato = false;
+      del.onclick = async function(){
+        if (!armato){ armato = true; del.textContent = "Tocca di nuovo per eliminare"; return; }
+        if (S.busy) return; S.busy = true;
+        try { await onElimina(); } catch(e){ S.busy = false; err.textContent = erroreUtente(e); err.hidden = false; return; }
+        S.busy = false; var id = rec.id, sid = S.spaceId;
+        chiudiForm(); await dopoScrittura();
+        toast("Eliminato", { label: "Annulla", onClick: async function(){ try { await C().restore(sid, id); await dopoScrittura(); } catch(e){ toast("Non riesco ad annullare"); } } });
+      };
+      f.appendChild(del);
+    }
+    if (rec && rec.updatedAt){
+      var chi = rec.updatedBy ? nomeMembro(rec.updatedBy) : null, quando = new Date(rec.updatedAt);
+      f.appendChild(el("p", "casa-meta", "Ultima modifica" + (chi ? " di " + (chi === "Tu" ? "te" : chi) : "") + " il " +
+        quando.toLocaleDateString("it-IT", { day: "numeric", month: "long" }) + " alle " + quando.toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" }) +
+        (rec.version > 1 ? " · versione " + rec.version : "")));
+    }
+  }
+  function importoOk(c){ return Number.isInteger(c) && c > 0; }
+
+  // ---------- form: movimento (incasso / bolletta / spesa) ----------
+  function tipoDi(m){ return m.moveType === "rent" || m.moveType === "billShare" ? "incasso" : m.moveType === "bill" ? "bolletta" : "spesa"; }
+  function apriMovimento(m){
+    if (m.moveType === "adjustment") return formSaldo(null, m);
+    if (m.moveType === "debtAdjustment") return formRettifica(debito(m.debtId), m);
+    formMovimento(tipoDi(m), m, null);
+  }
+  function formMovimento(tipo, rec, pref){
+    pref = pref || {};
+    var titoli = { incasso: "Incasso", bolletta: "Bolletta", spesa: "Spesa" };
+    apriForm(rec ? "Modifica" : "Aggiungi", function(f){
+      if (!rec) seg(f, null, [["incasso", "Incasso"], ["bolletta", "Bolletta"], ["spesa", "Spesa"]], tipo, function(nt){ chiudiFormSilenzioso(); formMovimento(nt, null, null); });
+      else f.appendChild(el("span", "sez-k", titoli[tipo]));
+      if (tipo === "incasso") corpoIncasso(f, rec, pref);
+      else if (tipo === "bolletta") corpoBolletta(f, rec);
+      else corpoSpesa(f, rec, pref);
+    });
+  }
+  function chiudiFormSilenzioso(){ S.formOpen = false; $("casa-form").hidden = true; }
+
+  function corpoIncasso(f, rec, pref){
+    var ts = vivi(S.data.tenants).slice().sort(byStart);
+    if (!ts.length){ f.appendChild(el("p", "nota", "Aggiungi prima un inquilino.")); f.appendChild(bottone("+ Nuovo inquilino", "btn-primary w", function(){ chiudiFormSilenzioso(); formInquilino(null); })); return; }
+    var amt = inImporto(f, "Importo", rec ? rec.amount : pref.amount);
+    var tenSel = campo(f, "Da chi", inSelect(ts.map(function(t){ return [t.id, t.name]; }), rec ? rec.tenantId : (pref.tenantId || ts[0].id)));
+    var kind = rec ? rec.moveType : (pref.kind || "rent");
+    var box = el("div");
+    var cosa = rec ? null : seg(f, "Per cosa", [["rent", "Affitto"], ["billShare", "Quota bolletta"]], kind, function(k){ kind = k; disegna(); });
+    f.appendChild(box);
+    var meseIn = null, billSel = null;
+    function bolletteDi(tid){
+      return vivi(S.data.moves).filter(function(m){ return m.moveType === "bill" && (m.shares || []).some(function(s){ return s.tenantId === tid && s.amount > 0; }); })
+        .sort(function(a, b){ return a.date < b.date ? 1 : -1; });
+    }
+    function disegna(){
+      box.textContent = ""; meseIn = billSel = null;
+      if (kind === "rent") meseIn = campo(box, "Mese dell'affitto", inData(rec ? rec.month : (pref.month || meseOggi()), "month"));
+      else {
+        var bs = bolletteDi(tenSel.value);
+        if (!bs.length){ box.appendChild(el("p", "nota", nomeInq(tenSel.value) + " non ha quote di bollette.")); return; }
+        billSel = campo(box, "Bolletta", inSelect(bs.map(function(b){
+          var q = b.shares.filter(function(s){ return s.tenantId === tenSel.value; })[0];
+          return [b.id, bolla(b) + " · " + giorno(b.date) + " · quota " + euro(q.amount)];
+        }), rec ? rec.billId : pref.billId));
+      }
+    }
+    tenSel.onchange = function(){ if (kind === "billShare") disegna(); };
+    disegna();
+    var data = campo(f, "Data dell'incasso", inData(rec ? rec.date : oggi()));
+    var nota = campo(f, "Nota", inTesto(rec ? rec.note : "", "", 140), true);
+    piede(f, async function(){
+      var a = parseCents(amt.value);
+      if (!importoOk(a)) return "Inserisci un importo valido.";
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(data.value)) return "Scegli la data dell'incasso.";
+      var input = { date: data.value, amount: a, tenantId: tenSel.value, note: nota.value.trim() || null };
+      if (kind === "rent"){ if (!meseIn || !/^\d{4}-\d{2}$/.test(meseIn.value)) return "Scegli il mese dell'affitto."; input.month = meseIn.value; }
+      else { if (!billSel || !billSel.value) return "Scegli la bolletta."; input.billId = billSel.value; }
+      if (rec) await C().updateMove(S.spaceId, rec.id, input);
+      else { input.moveType = kind; await C().createMove(S.spaceId, input); }
+      toast(rec ? "Incasso aggiornato" : "Incasso registrato");
+      return null;
+    }, rec, rec ? function(){ return C().deleteMove(S.spaceId, rec.id); } : null);
+    void cosa;
+  }
+
+  function kb(n){ return n >= 1048576 ? (n / 1048576).toFixed(1).replace(".", ",") + " MB" : Math.max(1, Math.round(n / 1024)) + " KB"; }
+  // Apre il PDF cifrato: finestra aperta SUBITO (nel tocco, niente blocco popup), poi download + decifra.
+  async function apriPdf(ref){
+    var w = null; try { w = window.open("", "_blank"); } catch(e){}
+    try {
+      var blob = await window.casaFiles.open(S.spaceId, ref), url = URL.createObjectURL(blob);
+      if (w) w.location.href = url;
+      else { var a = el("a"); a.href = url; a.download = ref.name; doc.body.appendChild(a); a.click(); a.remove(); }
+      setTimeout(function(){ URL.revokeObjectURL(url); }, 60000);
+    } catch(e){
+      if (w) try { w.close(); } catch(x){}
+      toast(/decrypt/.test((e && e.message) || "") ? "Il PDF non si apre: file danneggiato" : "Non riesco ad aprire il PDF: serve la connessione");
+    }
+  }
+  function sezionePdf(f, rec){
+    var stato = { ref: rec ? (rec.pdfRef || null) : null, file: null };
+    f.appendChild(el("span", "lbl", "PDF"));
+    var box = el("div"); f.appendChild(box);
+    var inp = el("input"); inp.type = "file"; inp.accept = "application/pdf,.pdf"; inp.hidden = true; f.appendChild(inp);
+    var msg = el("p", "err"); msg.hidden = true; f.appendChild(msg);
+    inp.onchange = function(){
+      var fl = inp.files && inp.files[0]; inp.value = ""; msg.hidden = true;
+      if (!fl) return;
+      if (fl.size > window.casaFiles.MAX_BYTES){ msg.textContent = "Il PDF supera 5 MB."; msg.hidden = false; return; }
+      if (fl.type && fl.type !== "application/pdf"){ msg.textContent = "Scegli un file PDF."; msg.hidden = false; return; }
+      stato.file = fl; disegna();
+    };
+    function disegna(){
+      box.textContent = "";
+      var nome = stato.file ? stato.file.name : stato.ref ? stato.ref.name : null;
+      if (!nome){ box.appendChild(bottone("+ Allega PDF", "btn-ghost w", function(){ inp.click(); })); box.lastChild.style.marginTop = "0"; return; }
+      var r = el("div", "sub-row"); r.style.margin = "0";
+      var d = dot("PDF", true); d.style.fontSize = "10px"; d.style.color = "var(--rosso)"; r.appendChild(d);
+      var n = el("span", "sub-name", nome);
+      n.appendChild(el("small", null, kb(stato.file ? stato.file.size : stato.ref.size) + (stato.file ? " · si cifra al salvataggio" : " · cifrato")));
+      r.appendChild(n);
+      var az = el("span", "sub-actions");
+      if (!stato.file && stato.ref){ var ap = el("button", "sub-mini", "Apri"); ap.type = "button"; ap.onclick = function(){ apriPdf(stato.ref); }; az.appendChild(ap); }
+      var ca = el("button", "sub-mini", "Cambia"); ca.type = "button"; ca.onclick = function(){ inp.click(); }; az.appendChild(ca);
+      var to = el("button", "sub-mini muted", "Togli"); to.type = "button"; to.onclick = function(){ stato.file = null; stato.ref = null; disegna(); }; az.appendChild(to);
+      r.appendChild(az); box.appendChild(r);
+    }
+    disegna();
+    // al salvataggio: carica il nuovo file (cifrato) e ritorna il pdfRef da scrivere
+    stato.risolvi = async function(){
+      if (!stato.file) return stato.ref;
+      var bytes = new Uint8Array(await stato.file.arrayBuffer());
+      return await window.casaFiles.upload(S.spaceId, { name: stato.file.name, bytes: bytes });
+    };
+    return stato;
+  }
+  function corpoBolletta(f, rec){
+    var amt = inImporto(f, "Importo", rec ? rec.amount : null);
+    var pdf = sezionePdf(f, rec);
+    var dc = el("div", "due-campi"), c1 = el("div"), c2 = el("div"); dc.appendChild(c1); dc.appendChild(c2); f.appendChild(dc);
+    var forn = campo(c1, "Fornitore", inTesto(rec ? rec.supplier : "", "Es. Enel luce", 60));
+    var per = campo(c2, "Periodo", inTesto(rec ? rec.period : "", "Es. set–ott", 30));
+    var data = campo(f, "Data del pagamento", inData(rec ? rec.date : oggi()));
+    var dx = el("div", "due-campi"), x1 = el("div"), x2 = el("div"); dx.appendChild(x1); dx.appendChild(x2); f.appendChild(dx);
+    var exN = campo(x1, "Voce a parte", inTesto(rec && rec.extra ? rec.extra.name : "", "Es. Canone TV", 40), true);
+    var exA = el("input"); exA.type = "text"; exA.inputMode = "decimal"; exA.placeholder = "0,00"; exA.autocomplete = "off";
+    if (rec && rec.extra) exA.value = cifra(rec.extra.amount);
+    campo(x2, "Importo voce", exA);
+    var modo = "uguali", manuali = {};
+    if (rec){
+      (rec.shares || []).forEach(function(s){ manuali[s.tenantId] = s.amount; });
+      var au0 = automatiche(), rs = rec.shares || [];   // «Parti uguali» solo se le quote salvate sono quelle automatiche
+      if (!(au0 && au0.length === rs.length && au0.every(function(q){ return rs.some(function(s){ return s.tenantId === q.tenantId && s.amount === q.amount; }); }))) modo = "mano";
+    }
+    // in modifica si parte da «Parti uguali» solo se le quote salvate coincidono con il calcolo automatico
+    var quoteBox = el("div"), info = el("p", "nota"); info.setAttribute("role", "status");
+    var sModo = seg(f, "Quote degli inquilini", [["uguali", "Parti uguali"], ["mano", "A mano"]], modo, function(m){ modo = m; disegnaQuote(); });
+    f.appendChild(quoteBox); f.appendChild(info);
+    var inputs = {};
+    function attiviAlla(d){ return vivi(S.data.tenants).filter(function(t){ return t.startDate <= d && (t.endDate == null || t.endDate >= d); }).sort(byStart); }
+    function extra(){ var n = exN.value.trim(), a = parseCents(exA.value); return n && importoOk(a) ? { name: n, amount: a } : null; }
+    function automatiche(){
+      var a = parseCents(amt.value), ts = attiviAlla(data.value || oggi());
+      if (!importoOk(a) || !ts.length) return null;
+      try { return C().computeBillShares(a, extra(), ts); } catch(e){ return null; }
+    }
+    function elencoInquilini(){
+      var ids = {}, out = [];
+      attiviAlla(data.value || oggi()).forEach(function(t){ ids[t.id] = true; out.push(t); });
+      if (rec) (rec.shares || []).forEach(function(s){ if (!ids[s.tenantId]){ var t = inquilino(s.tenantId); ids[s.tenantId] = true; out.push(t || { id: s.tenantId, name: "Inquilino", excludedExtras: [] }); } });
+      return out;
+    }
+    function disegnaQuote(){
+      quoteBox.textContent = ""; inputs = {};
+      var auto = automatiche(), autoMap = {}; (auto || []).forEach(function(q){ autoMap[q.tenantId] = q.amount; });
+      var ts = modo === "uguali" ? attiviAlla(data.value || oggi()) : elencoInquilini();
+      if (!ts.length){ info.textContent = "Nessun inquilino attivo alla data della bolletta."; return; }
+      var ex = extra();
+      ts.forEach(function(t){
+        var r = el("div", "quota");
+        var esc = ex && (t.excludedExtras || []).some(function(x){ return x.toLowerCase().replace(/\s+/g, "") === ex.name.toLowerCase().replace(/\s+/g, ""); });
+        var n = el("span", "sub-name", t.name); n.appendChild(el("small", null, esc ? "senza " + ex.name : (ex ? "con " + ex.name : "parte uguale"))); r.appendChild(n);
+        var i = el("input"); i.type = "text"; i.inputMode = "decimal"; i.autocomplete = "off"; i.setAttribute("aria-label", "Quota di " + t.name);
+        var v = modo === "uguali" ? autoMap[t.id] : (own(manuali, t.id) ? manuali[t.id] : autoMap[t.id]);
+        i.value = v != null ? cifra(v) : "";
+        i.readOnly = modo === "uguali";
+        i.oninput = function(){ var c = parseCents(i.value); manuali[t.id] = isNaN(c) ? 0 : c; somma(); };
+        inputs[t.id] = i; r.appendChild(i); quoteBox.appendChild(r);
+      });
+      somma();
+    }
+    function own(o, k){ return Object.prototype.hasOwnProperty.call(o, k); }
+    function quoteCorrenti(){
+      if (modo === "uguali") return automatiche();
+      var out = [];
+      Object.keys(inputs).forEach(function(id){ var c = parseCents(inputs[id].value); out.push({ tenantId: id, amount: isNaN(c) ? -1 : c }); });
+      return out;
+    }
+    function somma(){
+      var a = parseCents(amt.value), q = quoteCorrenti();
+      if (!importoOk(a)){ info.textContent = "Inserisci l'importo per vedere le quote."; return; }
+      if (!q){ info.textContent = "Non riesco a dividere: controlla voce a parte e inquilini."; return; }
+      var s = q.reduce(function(x, y){ return x + Math.max(0, y.amount); }, 0);
+      info.textContent = modo === "uguali" ? "Le quote fanno " + euro(s) + ". Scegli «A mano» per cambiarle."
+        : (s === a ? "Le quote fanno " + euro(s) + "." : "Le quote fanno " + euro(s) + ": " + (s < a ? "mancano " : "ci sono ") + euro(Math.abs(a - s)) + (s < a ? "." : " in più."));
+    }
+    [amt, exN, exA].forEach(function(i){ i.addEventListener("input", function(){ if (modo === "uguali") disegnaQuote(); else somma(); }); });
+    data.addEventListener("change", disegnaQuote);
+    disegnaQuote();
+    void sModo;
+    piede(f, async function(){
+      var a = parseCents(amt.value);
+      if (!importoOk(a)) return "Inserisci un importo valido.";
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(data.value)) return "Scegli la data del pagamento.";
+      var exNome = exN.value.trim(), exImp = exA.value.trim() ? parseCents(exA.value) : NaN, ex = null;
+      if (exNome || exA.value.trim()){
+        if (!exNome || !importoOk(exImp)) return "Scrivi nome e importo della voce a parte, oppure lasciali vuoti.";
+        if (exImp > a) return "La voce a parte supera l'importo della bolletta.";
+        ex = { name: exNome, amount: exImp };
+      }
+      var q = quoteCorrenti();
+      if (!q || !q.length) return attiviAlla(data.value).length ? "Non riesco a dividere: nessun inquilino paga la voce a parte." : "Nessun inquilino attivo alla data della bolletta.";
+      if (q.some(function(x){ return !Number.isInteger(x.amount) || x.amount < 0; })) return "Controlla le quote: servono importi validi.";
+      var s = q.reduce(function(x, y){ return x + y.amount; }, 0);
+      if (s !== a) return "Le quote devono fare " + euro(a) + " (ora fanno " + euro(s) + ").";
+      var pdfRef;
+      try { pdfRef = await pdf.risolvi(); }
+      catch(e){ return /troppo-grande/.test(e.message) ? "Il PDF supera 5 MB." : "Non riesco a caricare il PDF: serve la connessione. Puoi toglierlo e salvare lo stesso."; }
+      var input = { date: data.value, amount: a, supplier: forn.value.trim() || null, period: per.value.trim() || null, extra: ex, shares: q, pdfRef: pdfRef };
+      if (rec) await C().updateMove(S.spaceId, rec.id, input);
+      else { input.moveType = "bill"; await C().createMove(S.spaceId, input); }
+      toast(rec ? "Bolletta aggiornata" : "Bolletta aggiunta");
+      return null;
+    }, rec, rec ? function(){ return C().deleteMove(S.spaceId, rec.id); } : null);
+  }
+
+  function corpoSpesa(f, rec, pref){
+    var amt = inImporto(f, "Importo", rec ? rec.amount : pref.amount);
+    var ds = vivi(S.data.debts).slice().sort(byStart);
+    var debSel = null, desc = null;
+    var isRata = rec ? rec.moveType === "debtPayment" : !!pref.debtId;
+    if (!rec || rec.moveType === "expense") desc = campo(f, "Descrizione", inTesto(rec ? rec.supplier : "", "Es. Idraulico, condominio", 60), true);
+    if (ds.length && (!rec || rec.moveType === "debtPayment")){
+      var opz = (rec ? [] : [["", "No, è una spesa"]]).concat(ds.map(function(d){ return [d.id, "Rata: " + titoloDebito(d).toLowerCase()]; }));
+      debSel = campo(f, "È la rata di un debito?", inSelect(opz, rec ? (rec.debtId || "") : (pref.debtId || "")));
+      debSel.onchange = function(){ if (desc){ desc.disabled = !!debSel.value; } };
+      if (desc && isRata) desc.disabled = true;
+    }
+    var data = campo(f, "Data", inData(rec ? rec.date : oggi()));
+    var nota = campo(f, "Nota", inTesto(rec ? rec.note : "", "", 140), true);
+    piede(f, async function(){
+      var a = parseCents(amt.value);
+      if (!importoOk(a)) return "Inserisci un importo valido.";
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(data.value)) return "Scegli la data.";
+      var input = { date: data.value, amount: a, note: nota.value.trim() || null };
+      var rata = debSel && debSel.value;
+      if (rec){
+        if (rec.moveType === "debtPayment") input.debtId = debSel ? (debSel.value || null) : rec.debtId;
+        else input.supplier = desc.value.trim() || null;
+        await C().updateMove(S.spaceId, rec.id, input);
+      } else if (rata){ input.moveType = "debtPayment"; input.debtId = rata; await C().createMove(S.spaceId, input); }
+      else { input.moveType = "expense"; input.supplier = desc.value.trim() || null; await C().createMove(S.spaceId, input); }
+      toast(rec ? "Spesa aggiornata" : (rata ? "Rata registrata" : "Spesa aggiunta"));
+      return null;
+    }, rec, rec ? function(){ return C().deleteMove(S.spaceId, rec.id); } : null);
+  }
+
+  // ---------- form: saldo del conto (rettifica) ----------
+  function formSaldo(saldoAttuale, rec){
+    apriForm(rec ? "Rettifica del saldo" : "Allinea il saldo", function(f){
+      var banca = null, verso = null, amt = null;
+      if (!rec){
+        f.appendChild(el("p", "nota", "Il conto in Calculon segna " + euroS(saldoAttuale).replace(/^\+/, "") + ". Scrivi quanto c'è davvero in banca: la differenza diventa una rettifica (conta nel saldo, non nell'utile)."));
+        banca = inImporto(f, "Saldo in banca", null);
+      } else {
+        verso = seg(f, "Cosa cambia", [["piu", "Aggiungi"], ["meno", "Togli"]], rec.amount > 0 ? "piu" : "meno");
+        amt = inImporto(f, "Importo", Math.abs(rec.amount));
+      }
+      var anteprima = el("p", "nota"); anteprima.setAttribute("role", "status");
+      if (banca){ f.appendChild(anteprima); banca.addEventListener("input", function(){
+        var b = parseCents(banca.value); anteprima.textContent = isNaN(b) ? "" : (b === saldoAttuale ? "Il saldo è già allineato." : "Rettifica di " + euroS(b - saldoAttuale) + ".");
+      }); }
+      var motivo = campo(f, "Motivo", inTesto(rec ? rec.reason : "", "Es. commissioni bancarie", 80));
+      var data = campo(f, "Data", inData(rec ? rec.date : oggi()));
+      piede(f, async function(){
+        var x;
+        if (banca){ var b = parseCents(banca.value); if (isNaN(b)) return "Inserisci il saldo della banca."; x = b - saldoAttuale; if (x === 0) return "Il saldo è già allineato."; }
+        else { var a = parseCents(amt.value); if (!importoOk(a)) return "Inserisci un importo valido."; x = verso.value === "meno" ? -a : a; }
+        if (!motivo.value.trim()) return "Scrivi il motivo: resta nello storico.";
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(data.value)) return "Scegli la data.";
+        var input = { date: data.value, amount: x, reason: motivo.value.trim() };
+        if (rec) await C().updateMove(S.spaceId, rec.id, input);
+        else { input.moveType = "adjustment"; await C().createMove(S.spaceId, input); }
+        toast("Saldo rettificato");
+        return null;
+      }, rec, rec ? function(){ return C().deleteMove(S.spaceId, rec.id); } : null);
+    });
+  }
+
+  // ---------- form: inquilino ----------
+  function formInquilino(t){
+    apriForm(t ? "Modifica inquilino" : "Nuovo inquilino", function(f){
+      var nome = campo(f, "Nome", inTesto(t ? t.name : "", "Es. Marco", 60));
+      var dc = el("div", "due-campi"), c1 = el("div"), c2 = el("div"); dc.appendChild(c1); dc.appendChild(c2); f.appendChild(dc);
+      var stanza = campo(c1, "Stanza", inTesto(t ? t.room : "", "Es. Stanza 1", 30), true);
+      var tel = el("input"); tel.type = "tel"; tel.autocomplete = "off"; tel.maxLength = 30; if (t && t.phone) tel.value = t.phone;
+      campo(c2, "Telefono", tel, true);
+      var aff = inImporto(f, "Affitto al mese", t ? t.rentMonthly : null);
+      var dd = el("div", "due-campi"), d1 = el("div"), d2 = el("div"); dd.appendChild(d1); dd.appendChild(d2); f.appendChild(dd);
+      var ing = campo(d1, "Ingresso", inData(t ? t.startDate : oggi()));
+      var usc = campo(d2, "Uscita", inData(t ? t.endDate : ""), true);
+      var esc = campo(f, "Voci che non paga", inTesto(t ? (t.excludedExtras || []).join(", ") : "", "Es. Canone TV", 120), true);
+      f.appendChild(el("p", "nota", "Separate da virgola. Una voce esclusa, nelle bollette, si divide solo tra gli altri."));
+      piede(f, async function(){
+        var n = nome.value.trim(), a = parseCents(aff.value);
+        if (!n) return "Scrivi il nome.";
+        if (!Number.isInteger(a) || a < 0) return "Inserisci l'affitto al mese.";
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(ing.value)) return "Scegli la data di ingresso.";
+        if (usc.value && usc.value < ing.value) return "L'uscita è prima dell'ingresso.";
+        var input = { name: n, room: stanza.value.trim() || null, phone: tel.value.trim() || null, rentMonthly: a,
+          startDate: ing.value, endDate: usc.value || null,
+          excludedExtras: esc.value.split(",").map(function(s){ return s.trim(); }).filter(Boolean) };
+        if (t) await C().updateTenant(S.spaceId, t.id, input);
+        else await C().createTenant(S.spaceId, input);
+        toast(t ? "Inquilino aggiornato" : "Inquilino aggiunto");
+        return null;
+      }, t, t ? async function(){ await C().deleteTenant(S.spaceId, t.id); S.tenantId = null; } : null);
+    });
+  }
+
+  // ---------- form: debito ----------
+  function formDebito(d){
+    apriForm(d ? "Modifica debito" : "Nuovo debito", function(f){
+      var self = S.sp.selfMemberId, altri = S.members.filter(function(m){ return m.id !== self; });
+      var chi = [[self, "Io"]].concat(altri.map(function(m){ return [m.id, m.name || "Partecipante"]; }));
+      if (S.members.length > 1) chi.push(["both", "Entrambi"]);
+      var debitore = seg(f, "Chi deve", chi.slice(0, 3), d ? d.debtor : self, function(){ disegnaCred(); });
+      var credBox = el("div"); f.appendChild(credBox);
+      var cred = null, credNome = null;
+      var credIniz = d ? (d.creditorMemberId || "ext") : null;
+      function disegnaCred(){
+        credBox.textContent = ""; credNome = null;
+        var opz = S.members.filter(function(m){ return m.id !== debitore.value && debitore.value !== "both"; })
+          .map(function(m){ return [m.id, m.id === self ? "Io" : (m.name || "Partecipante")]; }).slice(0, 2);
+        opz.push(["ext", "Altra persona"]);
+        var val = credIniz && opz.some(function(o){ return o[0] === credIniz; }) ? credIniz : opz[0][0];
+        cred = seg(credBox, "A chi", opz, val, function(){ nomeExt(); });
+        var nb = el("div"); credBox.appendChild(nb);
+        function nomeExt(){ nb.textContent = ""; credNome = null; if (cred.value === "ext") credNome = campo(nb, "Nome", inTesto(d && d.creditorName ? d.creditorName : "", "Es. Papà", 40)); }
+        nomeExt();
+      }
+      disegnaCred();
+      var iniz = inImporto(f, "Importo di partenza", d ? d.initialAmount : null);
+      var rata = inImporto(f, "Rata al mese dal conto", d ? d.monthlyInstallment : null, true);
+      var dataI = campo(f, "Da quando", inData(d ? d.startDate : oggi()));
+      var nota = campo(f, "Nota", inTesto(d ? d.note : "", "", 140), true);
+      piede(f, async function(){
+        var a = parseCents(iniz.value), r = rata.value.trim() ? parseCents(rata.value) : null;
+        if (!importoOk(a)) return "Inserisci l'importo di partenza.";
+        if (r !== null && !importoOk(r)) return "La rata non è valida (o lasciala vuota).";
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(dataI.value)) return "Scegli la data di partenza.";
+        var input = { debtor: debitore.value, initialAmount: a, monthlyInstallment: r, startDate: dataI.value, note: nota.value.trim() || null };
+        if (cred.value === "ext"){ var n = credNome && credNome.value.trim(); if (!n) return "Scrivi a chi è dovuto."; input.creditorName = n; input.creditorMemberId = null; }
+        else { if (cred.value === input.debtor) return "Chi deve e chi riceve devono essere diversi."; input.creditorMemberId = cred.value; input.creditorName = null; }
+        if (d) await C().updateDebt(S.spaceId, d.id, input); else await C().createDebt(S.spaceId, input);
+        toast(d ? "Debito aggiornato" : "Debito aggiunto");
+        return null;
+      }, d, d ? function(){ return C().deleteDebt(S.spaceId, d.id); } : null);
+    });
+  }
+
+  // ---------- form: rettifica del debito ----------
+  function formRettifica(d, rec){
+    if (!d){ toast("Il debito di questa rettifica non c'è più"); return; }
+    apriForm("Rettifica", function(f){
+      var sum = C().monthSummary(S.data, meseOggi(), S.opts), ora = d.initialAmount;
+      sum.debts.forEach(function(x){ if (x.debtId === d.id) ora = x.after; });
+      f.appendChild(el("span", "sez-k", titoloDebito(d)));
+      f.appendChild(el("p", "nota", "Oggi: " + euro(ora) + "."));
+      var verso = seg(f, "Cosa cambia", [["meno", "Togli"], ["piu", "Aggiungi"]], rec && rec.amount > 0 ? "piu" : "meno", prev);
+      var amt = inImporto(f, "Importo", rec ? Math.abs(rec.amount) : null);
+      var motivo = campo(f, "Motivo", inTesto(rec ? rec.reason : "", "Es. Le ho dato contanti", 80));
+      var data = campo(f, "Data", inData(rec ? rec.date : oggi()));
+      var pv = el("p", "nota"); pv.setAttribute("role", "status"); f.appendChild(pv);
+      function prev(){
+        var a = parseCents(amt.value); if (!importoOk(a)){ pv.textContent = ""; return; }
+        var base = ora - (rec ? rec.amount : 0), dopo = base + (verso.value === "meno" ? -a : a);
+        pv.textContent = "Dopo la rettifica: " + euroS(dopo).replace(/^\+/, "") + ".";
+      }
+      amt.addEventListener("input", prev); prev();
+      piede(f, async function(){
+        var a = parseCents(amt.value);
+        if (!importoOk(a)) return "Inserisci un importo valido.";
+        if (!motivo.value.trim()) return "Scrivi il motivo: resta nello storico.";
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(data.value)) return "Scegli la data.";
+        var input = { date: data.value, amount: verso.value === "meno" ? -a : a, reason: motivo.value.trim(), debtId: d.id };
+        if (rec) await C().updateMove(S.spaceId, rec.id, input);
+        else { input.moveType = "debtAdjustment"; await C().createMove(S.spaceId, input); }
+        toast("Debito rettificato");
+        return null;
+      }, rec, rec ? function(){ return C().deleteMove(S.spaceId, rec.id); } : null);
+    });
+  }
+
+  // ---------- apertura / chiusura / navigazione ----------
+  async function apri(spaceId){
+    S.spaceId = spaceId; S.tab = "conto"; S.month = meseOggi(); S.tenantId = null; S.formOpen = false; S.showAll = false;
+    $("casa-form").hidden = true; $("casa-detail").hidden = true; $("casa-main").hidden = false;
+    $("casa-view").textContent = "";
+    ov.hidden = false; doc.body.style.overflow = "hidden";
+    $("casa-body").scrollTop = 0;
+    await aggiorna();
+    // pull best-effort, poi rilettura (render locale gia' fatto)
+    try { await window.nativeSync.pullSpace(spaceId); } catch(e){}
+    if (S.spaceId === spaceId && !ov.hidden) await aggiorna();
+  }
+  function chiudi(){
+    ov.hidden = true; doc.body.style.overflow = "";
+    S.spaceId = null; S.data = null; S.formOpen = false;
+    try { if (typeof SPACE_CTX !== "undefined" && SPACE_CTX && typeof refreshSharedFinance === "function") refreshSharedFinance(SPACE_CTX.id, { pull: false }); } catch(e){}
+  }
+  $("casa-back").onclick = function(){
+    if (S.formOpen) return chiudiForm();
+    if (S.tenantId){ S.tenantId = null; $("casa-title").textContent = (S.sp && S.sp.name) || "Casa"; render(); return; }
+    chiudi();
+  };
+  Array.prototype.forEach.call($("casa-tabs").querySelectorAll(".seg-btn"), function(b){
+    b.onclick = function(){ S.tab = b.getAttribute("data-tab"); S.showAll = false; render(); $("casa-body").scrollTop = 0; };
+  });
+
+  // Gate dell'ingresso: solo spazio ongoing nativo con self attivo (le scritture lo richiedono).
+  async function gate(spaceId, selfState){
+    var btn = $("btn-casa-apri"); if (!btn) return;
+    btn.hidden = true;
+    if (selfState !== "active") return;
+    var sp = null; try { sp = await window.calculonDB.get("spaces", spaceId); } catch(e){}
+    if (typeof SPACE_CTX === "undefined" || !SPACE_CTX || SPACE_CTX.id !== spaceId) return;   // race guard
+    btn.hidden = !(sp && sp.kind === "ongoing" && !sp.legacyGroupId && sp.status === "active");
+  }
+  var apriBtn = $("btn-casa-apri");
+  if (apriBtn) apriBtn.onclick = function(){ if (typeof SPACE_CTX !== "undefined" && SPACE_CTX && SPACE_CTX.id) apri(SPACE_CTX.id); };
+
+  window.calculonCasa = { open: apri, close: chiudi, gate: gate };
+})();
+/* F6P2-CASA-UI-END */
+</script>
+<!-- ==== /MODULE: casa-ui ==== -->
 </body>
 </html>

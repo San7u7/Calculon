@@ -15,3 +15,8 @@ class_name = "SpaceSyncDO"
 [[migrations]]
 tag = "v1-space-sync"
 new_sqlite_classes = ["SpaceSyncDO"]
+
+# F6.3 — archivio dei PDF cifrati delle bollette (repository GitHub PRIVATO).
+# Il token NON va qui: `npx wrangler secret put GITHUB_TOKEN` (fine-grained, Contents read/write solo su questo repo).
+[vars]
+GITHUB_REPO = "San7u7/calculon-file"

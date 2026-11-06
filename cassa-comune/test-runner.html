@@ -41,7 +41,7 @@
 "use strict";
 var DB_NAME = "calculon";
 // Moduli che possono esporre metodi _test* (scansione a runtime: niente hardcoding delle suite).
-var MODULES = ["calculonDB","sharedRuntime","personalProjection","nativeSyncBoundary","spaceKeys","nativeCrypto","syncOutbox","nativeSync","nativeJoin"];
+var MODULES = ["calculonDB","sharedRuntime","personalProjection","nativeSyncBoundary","spaceKeys","nativeCrypto","syncOutbox","nativeSync","nativeJoin","casaRuntime","casaFiles"];
 var outEl = document.getElementById("out");
 function log(s, cls){ var span = document.createElement("span"); if (cls) span.className = cls; span.textContent = s + "\n"; outEl.appendChild(span); }
 
